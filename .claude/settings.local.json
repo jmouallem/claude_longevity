@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip install:*)",
+      "Bash(python:*)",
+      "Bash(npm create:*)",
+      "Bash(npm install:*)",
+      "Bash(ls:*)",
+      "Bash(npx tsc:*)",
+      "Bash(npm run build:*)",
+      "Bash(curl:*)",
+      "Bash(npx vite:*)",
+      "Bash(netstat:*)",
+      "Bash(taskkill:*)",
+      "Bash(tasklist:*)",
+      "Bash(TOKEN=\"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIiwiZXhwIjoxNzcxNzY3NzI2LCJpYXQiOjE3NzE1MDg1MjZ9.XiAirS26cQZyVSFDScxP8aorf4vuDRaJ-w7ezrCNBX4\")",
+      "Bash(AUTH=\"Authorization: Bearer $TOKEN\")",
+      "Bash(__NEW_LINE_978921b0a7685436__ echo \"=== Log Food ===\")",
+      "Bash(__NEW_LINE_978921b0a7685436__ echo \"\")",
+      "Bash(TOKEN=\"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIiwiZXhwIjoxNzcxNzY3ODI5LCJpYXQiOjE3NzE1MDg2Mjl9.k0SHd2tZVKZCgUKZeaIxXYGbsrUV11ohZea6dxzNwr8\")",
+      "Bash(__NEW_LINE_593a7c012893168d__ echo \"=== Start Fast ===\")",
+      "Bash(__NEW_LINE_593a7c012893168d__ echo \"\")",
+      "Bash(findstr:*)",
+      "Bash(TOKEN=\"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIiwiZXhwIjoxNzcxNzgzNzQ4LCJpYXQiOjE3NzE1MjQ1NDh9.00QIECgMQ4VAqpgA5TZDLaf97ibfVShyCGhEU6HzHCE\")"
+    ]
+  }
+}

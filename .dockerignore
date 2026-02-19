@@ -1,0 +1,39 @@
+# VCS
+.git
+.gitignore
+.github
+
+# Node / frontend
+node_modules
+frontend/node_modules
+frontend/dist
+frontend/.vite
+
+# Python
+__pycache__
+*.py[cod]
+*.pyd
+*.so
+.venv
+venv
+
+# Env / secrets
+.env
+.env.*
+
+# Local data / db files
+backend/data/*.db*
+data/*.db*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode
+.idea
+
+# Tests / cache
+.pytest_cache
+.mypy_cache
+.ruff_cache
+coverage.xml
+.coverage
