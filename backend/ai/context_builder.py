@@ -8,20 +8,30 @@ from db.models import (
     User, FoodLog, HydrationLog, VitalsLog, ExerciseLog,
     SupplementLog, FastingLog, SleepLog, Summary, Message,
 )
-from utils.datetime_utils import start_of_day, end_of_day, today_utc
+from services.specialists_config import get_specialist_prompt, get_system_prompt, parse_overrides
+from utils.datetime_utils import start_of_day, end_of_day, today_utc, today_for_tz
+from utils.units import cm_to_ft_in, kg_to_lb, ml_to_oz
 
 CONTEXT_DIR = Path(__file__).parent.parent / "context"
 
 
-def load_system_prompt() -> str:
-    return (CONTEXT_DIR / "system_prompt.md").read_text(encoding="utf-8")
+def _format_height(cm_value: float, unit: str) -> str:
+    if unit == "ft":
+        ft, inches = cm_to_ft_in(cm_value)
+        return f"{ft} ft {inches} in"
+    return f"{cm_value:.1f} cm"
 
 
-def load_specialist_prompt(specialist: str) -> str:
-    path = CONTEXT_DIR / "specialists" / f"{specialist}.md"
-    if path.exists():
-        return path.read_text(encoding="utf-8")
-    return ""
+def _format_weight(kg_value: float, unit: str) -> str:
+    if unit == "lb":
+        return f"{kg_to_lb(kg_value):.1f} lb"
+    return f"{kg_value:.1f} kg"
+
+
+def _format_hydration(ml_value: float, unit: str) -> str:
+    if unit == "oz":
+        return f"{ml_to_oz(ml_value):.1f} oz"
+    return f"{ml_value:.0f} ml"
 
 
 def format_user_profile(settings) -> str:
@@ -30,16 +40,22 @@ def format_user_profile(settings) -> str:
         return "No profile configured yet."
 
     lines = []
+    height_unit = settings.height_unit or "cm"
+    weight_unit = settings.weight_unit or "kg"
+    hydration_unit = settings.hydration_unit or "ml"
+    lines.append(
+        f"- Preferred units: height={height_unit}, weight={weight_unit}, hydration={hydration_unit}"
+    )
     if settings.age:
         lines.append(f"- Age: {settings.age}")
     if settings.sex:
         lines.append(f"- Sex: {settings.sex}")
     if settings.height_cm:
-        lines.append(f"- Height: {settings.height_cm} cm")
+        lines.append(f"- Height: {_format_height(settings.height_cm, height_unit)}")
     if settings.current_weight_kg:
-        lines.append(f"- Current weight: {settings.current_weight_kg} kg")
+        lines.append(f"- Current weight: {_format_weight(settings.current_weight_kg, weight_unit)}")
     if settings.goal_weight_kg:
-        lines.append(f"- Goal weight: {settings.goal_weight_kg} kg")
+        lines.append(f"- Goal weight: {_format_weight(settings.goal_weight_kg, weight_unit)}")
     if settings.fitness_level:
         lines.append(f"- Fitness level: {settings.fitness_level}")
     if settings.medical_conditions:
@@ -64,49 +80,57 @@ def format_user_profile(settings) -> str:
     return "\n".join(lines) if lines else "Profile not yet configured."
 
 
-def format_medications(medications_json: str | None) -> str:
-    if not medications_json:
+def _format_item_list(raw: str | None, label: str = "items") -> str:
+    """Format a stored list (JSON array of strings/dicts, or comma-separated) into bullet points."""
+    if not raw:
         return "None reported."
-    try:
-        meds = json.loads(medications_json)
-        lines = []
-        for m in meds:
-            line = f"- {m.get('name', 'Unknown')}"
-            if m.get('dose'):
-                line += f" ({m['dose']})"
-            if m.get('timing'):
-                line += f" — {m['timing']}"
-            if m.get('purpose'):
-                line += f" — for {m['purpose']}"
-            lines.append(line)
-        return "\n".join(lines) if lines else "None reported."
-    except (json.JSONDecodeError, TypeError):
-        return medications_json or "None reported."
+    txt = raw.strip()
+    items: list[str] = []
+    if txt.startswith("["):
+        try:
+            parsed = json.loads(txt)
+            if isinstance(parsed, list):
+                for entry in parsed:
+                    if isinstance(entry, str):
+                        items.append(entry.strip())
+                    elif isinstance(entry, dict):
+                        name = entry.get("name", str(entry))
+                        dose = entry.get("dose", "")
+                        timing = entry.get("timing", "")
+                        parts = [str(name)]
+                        if dose:
+                            parts[0] += f" ({dose})"
+                        if timing:
+                            parts[0] += f" — {timing}"
+                        items.append(parts[0])
+                    else:
+                        items.append(str(entry))
+        except (json.JSONDecodeError, TypeError):
+            items = [s.strip() for s in txt.split(",") if s.strip()]
+    else:
+        items = [s.strip() for s in txt.split(",") if s.strip()]
+    if not items:
+        return "None reported."
+    return "\n".join(f"- {item}" for item in items)
+
+
+def format_medications(medications_json: str | None) -> str:
+    return _format_item_list(medications_json, "medications")
 
 
 def format_supplements(supplements_json: str | None) -> str:
-    if not supplements_json:
-        return "None reported."
-    try:
-        supps = json.loads(supplements_json)
-        lines = []
-        for s in supps:
-            line = f"- {s.get('name', 'Unknown')}"
-            if s.get('dose'):
-                line += f" ({s['dose']})"
-            if s.get('timing'):
-                line += f" — {s['timing']}"
-            lines.append(line)
-        return "\n".join(lines) if lines else "None reported."
-    except (json.JSONDecodeError, TypeError):
-        return supplements_json or "None reported."
+    return _format_item_list(supplements_json, "supplements")
 
 
 def compute_today_snapshot(db: Session, user: User, target_date: date | None = None) -> str:
     """Compute a snapshot of today's health data."""
-    d = target_date or today_utc()
-    day_start = start_of_day(d)
-    day_end = end_of_day(d)
+    settings = user.settings
+    tz_name = (settings.timezone if settings else None) or None
+    d = target_date or today_for_tz(tz_name)
+    day_start = start_of_day(d, tz_name)
+    day_end = end_of_day(d, tz_name)
+    weight_unit = (settings.weight_unit if settings else None) or "kg"
+    hydration_unit = (settings.hydration_unit if settings else None) or "ml"
 
     sections = [f"Date: {d.isoformat()}"]
 
@@ -151,7 +175,7 @@ def compute_today_snapshot(db: Session, user: User, target_date: date | None = N
     ).all()
     if hydration:
         total_ml = sum(h.amount_ml for h in hydration)
-        sections.append(f"Hydration: {total_ml:.0f} ml ({total_ml/250:.1f} cups)")
+        sections.append(f"Hydration: {_format_hydration(total_ml, hydration_unit)}")
     else:
         sections.append("No hydration logged today.")
 
@@ -164,7 +188,7 @@ def compute_today_snapshot(db: Session, user: User, target_date: date | None = N
     if vitals:
         parts = []
         if vitals.weight_kg:
-            parts.append(f"Weight: {vitals.weight_kg} kg")
+            parts.append(f"Weight: {_format_weight(vitals.weight_kg, weight_unit)}")
         if vitals.bp_systolic and vitals.bp_diastolic:
             parts.append(f"BP: {vitals.bp_systolic}/{vitals.bp_diastolic}")
         if vitals.heart_rate:
@@ -224,13 +248,14 @@ def get_latest_summary(db: Session, user: User, summary_type: str) -> str | None
 def build_context(db: Session, user: User, specialist: str = "orchestrator") -> str:
     """Build the full context string for an AI call."""
     sections = []
+    overrides = parse_overrides(user.specialist_config)
 
     # 1. Base system prompt
-    sections.append(load_system_prompt())
+    sections.append(get_system_prompt(overrides))
 
     # 2. Specialist instructions
     if specialist and specialist != "orchestrator":
-        specialist_prompt = load_specialist_prompt(specialist)
+        specialist_prompt = get_specialist_prompt(specialist, overrides)
         if specialist_prompt:
             sections.append(specialist_prompt)
 

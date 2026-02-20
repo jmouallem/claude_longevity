@@ -8,6 +8,8 @@ export interface ChatMessage {
   specialist_used?: string;
   created_at: string;
   isStreaming?: boolean;
+  image_preview_url?: string;
+  has_image?: boolean;
 }
 
 interface HistoryMessage {
@@ -16,6 +18,16 @@ interface HistoryMessage {
   content: string;
   specialist_used?: string;
   created_at: string;
+  has_image?: boolean;
+}
+
+function fileToDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(new Error('Failed to read image preview'));
+    reader.readAsDataURL(file);
+  });
 }
 
 export function useChat() {
@@ -33,10 +45,11 @@ export function useChat() {
         history.map((msg) => ({
           id: msg.id,
           role: msg.role,
-          content: msg.content,
+          content: msg.content || (msg.has_image ? '[Image attached]' : ''),
           specialist_used: msg.specialist_used,
           created_at: msg.created_at,
           isStreaming: false,
+          has_image: !!msg.has_image,
         }))
       );
     } catch (err) {
@@ -54,12 +67,23 @@ export function useChat() {
     const userMessageId = `user-${Date.now()}`;
     const assistantMessageId = `assistant-${Date.now()}`;
 
+    let imagePreviewUrl: string | undefined;
+    if (imageFile) {
+      try {
+        imagePreviewUrl = await fileToDataUrl(imageFile);
+      } catch {
+        imagePreviewUrl = URL.createObjectURL(imageFile);
+      }
+    }
+
     const userMessage: ChatMessage = {
       id: userMessageId,
       role: 'user',
       content: text,
       created_at: new Date().toISOString(),
       isStreaming: false,
+      image_preview_url: imagePreviewUrl,
+      has_image: !!imageFile,
     };
 
     const assistantMessage: ChatMessage = {

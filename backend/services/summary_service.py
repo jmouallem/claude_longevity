@@ -10,12 +10,15 @@ from db.models import (
     User, Summary, FoodLog, VitalsLog, ExerciseLog,
     HydrationLog, SupplementLog, FastingLog, SleepLog,
 )
-from utils.datetime_utils import start_of_day, end_of_day
+from utils.datetime_utils import start_of_day, end_of_day, today_for_tz
 from utils.encryption import decrypt_api_key
 
 logger = logging.getLogger(__name__)
 
 DAILY_SUMMARY_PROMPT = """Summarize this day's health data into a concise daily summary.
+Date: {date}
+User timezone: {timezone}
+
 Include: total calories/macros, protein goal status, hydration total,
 fasting duration, exercise done, vitals trends, sleep quality,
 what went well, what needs improvement, and any recommendations.
@@ -49,10 +52,10 @@ User profile: {profile}
 Weekly summaries: {data}"""
 
 
-def gather_daily_data(db: Session, user: User, d: date) -> dict:
-    """Gather all health data for a specific day."""
-    day_start = start_of_day(d)
-    day_end = end_of_day(d)
+def gather_daily_data(db: Session, user: User, d: date, tz_name: str | None = None) -> dict:
+    """Gather all health data for a specific day in the user's timezone."""
+    day_start = start_of_day(d, tz_name)
+    day_end = end_of_day(d, tz_name)
 
     foods = db.query(FoodLog).filter(
         FoodLog.user_id == user.id, FoodLog.logged_at >= day_start, FoodLog.logged_at <= day_end
@@ -117,19 +120,28 @@ def gather_daily_data(db: Session, user: User, d: date) -> dict:
     }
 
 
-async def generate_summary(db: Session, user: User, summary_type: str, target_date: date) -> int:
+async def generate_summary(db: Session, user: User, summary_type: str, target_date: date | None = None) -> int:
     """Generate a summary using the utility model."""
     settings = user.settings
     if not settings or not settings.api_key_encrypted:
         raise ValueError("API key not configured")
+
+    tz_name = settings.timezone or "UTC"
+    if target_date is None:
+        target_date = today_for_tz(tz_name)
 
     api_key = decrypt_api_key(settings.api_key_encrypted)
     provider = get_provider(settings.ai_provider, api_key)
     profile = format_user_profile(settings)
 
     if summary_type == "daily":
-        data = gather_daily_data(db, user, target_date)
-        prompt = DAILY_SUMMARY_PROMPT.format(profile=profile, data=json.dumps(data))
+        data = gather_daily_data(db, user, target_date, tz_name)
+        prompt = DAILY_SUMMARY_PROMPT.format(
+            date=target_date.isoformat(),
+            timezone=tz_name,
+            profile=profile,
+            data=json.dumps(data),
+        )
         period_start = target_date
         period_end = target_date
 

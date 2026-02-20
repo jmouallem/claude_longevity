@@ -1,4 +1,5 @@
 from datetime import datetime, date, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 
 def utcnow() -> datetime:
@@ -9,11 +10,35 @@ def today_utc() -> date:
     return datetime.now(timezone.utc).date()
 
 
-def start_of_day(d: date) -> datetime:
+def today_for_tz(tz_name: str | None) -> date:
+    """Return today's date in the user's timezone."""
+    if tz_name:
+        try:
+            return datetime.now(ZoneInfo(tz_name)).date()
+        except Exception:
+            pass
+    return today_utc()
+
+
+def start_of_day(d: date, tz_name: str | None = None) -> datetime:
+    """Return start of day as a UTC datetime, optionally in user's timezone."""
+    if tz_name:
+        try:
+            local = datetime(d.year, d.month, d.day, tzinfo=ZoneInfo(tz_name))
+            return local.astimezone(timezone.utc)
+        except Exception:
+            pass
     return datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
 
 
-def end_of_day(d: date) -> datetime:
+def end_of_day(d: date, tz_name: str | None = None) -> datetime:
+    """Return end of day as a UTC datetime, optionally in user's timezone."""
+    if tz_name:
+        try:
+            local = datetime(d.year, d.month, d.day, 23, 59, 59, tzinfo=ZoneInfo(tz_name))
+            return local.astimezone(timezone.utc)
+        except Exception:
+            pass
     return datetime(d.year, d.month, d.day, 23, 59, 59, tzinfo=timezone.utc)
 
 

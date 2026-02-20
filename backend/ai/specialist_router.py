@@ -3,7 +3,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-ROUTING_PROMPT = """Classify this user message into ONE category and identify the best specialist.
+ROUTING_PROMPT_TEMPLATE = """Classify this user message into ONE category and identify the best specialist.
 
 Categories:
 - log_food: User is reporting what they ate/drank
@@ -20,9 +20,9 @@ Categories:
 - ask_medical: Question involving symptoms, medications, health concerns
 - general_chat: Greetings, motivation, general health topics
 
-Specialists: nutritionist, sleep_expert, movement_coach, supplement_auditor, safety_clinician, orchestrator
+Specialists: {specialists}
 
-Return ONLY valid JSON: {"category": "...", "specialist": "...", "confidence": 0.0-1.0}"""
+Return ONLY valid JSON: {{"category": "...", "specialist": "...", "confidence": 0.0-1.0}}"""
 
 CATEGORY_TO_SPECIALIST = {
     "log_food": "nutritionist",
@@ -41,14 +41,30 @@ CATEGORY_TO_SPECIALIST = {
 }
 
 
-async def classify_intent(provider, message: str, user_override: str | None = None) -> dict:
+async def classify_intent(
+    provider,
+    message: str,
+    user_override: str | None = None,
+    allowed_specialists: list[str] | None = None,
+) -> dict:
     """Classify user message intent and route to appropriate specialist."""
+    allowed = allowed_specialists or [
+        "nutritionist",
+        "sleep_expert",
+        "movement_coach",
+        "supplement_auditor",
+        "safety_clinician",
+        "orchestrator",
+    ]
+
     if user_override and user_override != "auto":
-        return {"category": "manual_override", "specialist": user_override, "confidence": 1.0}
+        specialist = user_override if user_override in allowed else "orchestrator"
+        return {"category": "manual_override", "specialist": specialist, "confidence": 1.0}
 
     try:
+        routing_prompt = ROUTING_PROMPT_TEMPLATE.format(specialists=", ".join(allowed))
         result = await provider.chat(
-            messages=[{"role": "user", "content": f"{ROUTING_PROMPT}\n\nMessage: {message}"}],
+            messages=[{"role": "user", "content": f"{routing_prompt}\n\nMessage: {message}"}],
             model=provider.get_utility_model(),
             system="You are a classification assistant. Return only valid JSON.",
             stream=False,
@@ -63,9 +79,15 @@ async def classify_intent(provider, message: str, user_override: str | None = No
             text = text.strip()
 
         parsed = json.loads(text)
+        category = parsed.get("category", "general_chat")
+        specialist = parsed.get("specialist", "orchestrator")
+        if specialist not in allowed:
+            specialist = CATEGORY_TO_SPECIALIST.get(category, "orchestrator")
+        if specialist not in allowed:
+            specialist = "orchestrator"
         return {
-            "category": parsed.get("category", "general_chat"),
-            "specialist": parsed.get("specialist", "orchestrator"),
+            "category": category,
+            "specialist": specialist,
             "confidence": parsed.get("confidence", 0.5),
         }
     except Exception as e:

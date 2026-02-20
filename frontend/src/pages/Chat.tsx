@@ -1,10 +1,39 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useChat } from '../hooks/useChat';
 import ChatMessage from '../components/ChatMessage';
 import ChatInput from '../components/ChatInput';
 
+const PENDING_IMAGE_KEY = 'chat_pending_image_data_url';
+const PENDING_IMAGE_NAME_KEY = 'chat_pending_image_name';
+const PENDING_IMAGE_TYPE_KEY = 'chat_pending_image_type';
+
+function dataUrlToFile(dataUrl: string, name: string, type: string): File | null {
+  try {
+    const parts = dataUrl.split(',');
+    if (parts.length < 2) return null;
+    const b64 = parts[1];
+    const bin = atob(b64);
+    const len = bin.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) bytes[i] = bin.charCodeAt(i);
+    return new File([bytes], name || `image-${Date.now()}.jpg`, { type: type || 'image/jpeg' });
+  } catch {
+    return null;
+  }
+}
+
+function fileToDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(new Error('Failed to read file'));
+    reader.readAsDataURL(file);
+  });
+}
+
 export default function Chat() {
   const { messages, loading, error, sendMessage, loadHistory } = useChat();
+  const [selectedImage, setSelectedImage] = useState<File | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const hasLoadedRef = useRef(false);
 
@@ -18,11 +47,48 @@ export default function Chat() {
 
   // Auto-scroll to bottom on new messages
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
   }, [messages]);
+
+  useEffect(() => {
+    if (selectedImage) return;
+    const dataUrl = sessionStorage.getItem(PENDING_IMAGE_KEY);
+    if (!dataUrl) return;
+    const name = sessionStorage.getItem(PENDING_IMAGE_NAME_KEY) || `image-${Date.now()}.jpg`;
+    const type = sessionStorage.getItem(PENDING_IMAGE_TYPE_KEY) || 'image/jpeg';
+    const restored = dataUrlToFile(dataUrl, name, type);
+    if (restored) {
+      setSelectedImage(restored);
+    }
+  }, [selectedImage]);
+
+  const handleSelectedImageChange = (file: File | null) => {
+    if (!file) {
+      setSelectedImage(null);
+      sessionStorage.removeItem(PENDING_IMAGE_KEY);
+      sessionStorage.removeItem(PENDING_IMAGE_NAME_KEY);
+      sessionStorage.removeItem(PENDING_IMAGE_TYPE_KEY);
+      return;
+    }
+
+    setSelectedImage(file);
+    void fileToDataUrl(file)
+      .then((dataUrl) => {
+        sessionStorage.setItem(PENDING_IMAGE_KEY, dataUrl);
+        sessionStorage.setItem(PENDING_IMAGE_NAME_KEY, file.name || 'image.jpg');
+        sessionStorage.setItem(PENDING_IMAGE_TYPE_KEY, file.type || 'image/jpeg');
+      })
+      .catch(() => {
+        // Keep in-memory image even if persistence fails.
+      });
+  };
 
   const handleSend = (text: string, imageFile?: File) => {
     sendMessage(text, imageFile);
+    setSelectedImage(null);
+    sessionStorage.removeItem(PENDING_IMAGE_KEY);
+    sessionStorage.removeItem(PENDING_IMAGE_NAME_KEY);
+    sessionStorage.removeItem(PENDING_IMAGE_TYPE_KEY);
   };
 
   const isStreaming = messages.some((m) => m.isStreaming);
@@ -79,7 +145,12 @@ export default function Chat() {
       )}
 
       {/* Input bar */}
-      <ChatInput onSend={handleSend} disabled={isStreaming} />
+      <ChatInput
+        onSend={handleSend}
+        selectedImage={selectedImage}
+        onSelectedImageChange={handleSelectedImageChange}
+        disabled={isStreaming}
+      />
     </div>
   );
 }

@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "sqlite:///data/longevity.db"
     DATA_DIR: Path = Path("data")
     UPLOAD_DIR: Path = Path("data/uploads")
-    CORS_ORIGINS: list[str] = ["http://localhost:5173", "http://localhost:8000"]
+    CORS_ORIGINS: list[str] = ["http://localhost:8050", "http://localhost:8001"]
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRY_HOURS: int = 72
 

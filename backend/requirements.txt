@@ -11,3 +11,4 @@ cryptography==44.0.0
 httpx==0.28.1
 python-multipart==0.0.20
 aiofiles==24.1.0
+tzdata>=2024.1

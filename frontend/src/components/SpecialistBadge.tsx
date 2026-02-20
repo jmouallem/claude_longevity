@@ -8,8 +8,15 @@ const SPECIALIST_COLORS: Record<string, string> = {
 };
 
 const DEFAULT_COLORS = 'bg-slate-500/20 text-slate-400 border-slate-500/30';
+const SPECIALIST_DISPLAY_NAMES: Record<string, string> = {
+  orchestrator: 'Longevity Coach',
+};
 
 function formatName(specialist: string): string {
+  if (SPECIALIST_DISPLAY_NAMES[specialist]) {
+    return SPECIALIST_DISPLAY_NAMES[specialist];
+  }
+
   return specialist
     .split('_')
     .map((word) => word.charAt(0).toUpperCase() + word.slice(1))

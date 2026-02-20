@@ -36,6 +36,9 @@ class UserSettings(Base):
     height_cm = Column(Float)
     current_weight_kg = Column(Float)
     goal_weight_kg = Column(Float)
+    height_unit = Column(Text, default="cm")
+    weight_unit = Column(Text, default="kg")
+    hydration_unit = Column(Text, default="ml")
     medical_conditions = Column(Text)  # JSON array
     medications = Column(Text)  # JSON array
     supplements = Column(Text)  # JSON array
@@ -44,6 +47,7 @@ class UserSettings(Base):
     dietary_preferences = Column(Text)  # JSON array
     health_goals = Column(Text)  # JSON array
     timezone = Column(Text, default="America/Edmonton")
+    usage_reset_at = Column(DateTime, nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     user = relationship("User", back_populates="settings")
@@ -142,6 +146,34 @@ class ExerciseLog(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class ExercisePlan(Base):
+    __tablename__ = "exercise_plan"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    target_date = Column(Text, nullable=False)  # YYYY-MM-DD
+    plan_type = Column(Text, nullable=False)  # rest_day | hiit | strength | zone2 | mobility | mixed
+    title = Column(Text, nullable=False)
+    description = Column(Text)
+    target_minutes = Column(Integer)
+    source = Column(Text, default="ai")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class DailyChecklistItem(Base):
+    __tablename__ = "daily_checklist_item"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    target_date = Column(Text, nullable=False)  # YYYY-MM-DD
+    item_type = Column(Text, nullable=False)  # medication | supplement
+    item_name = Column(Text, nullable=False)
+    completed = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class SupplementLog(Base):
     __tablename__ = "supplement_log"
 
@@ -207,5 +239,7 @@ Index("idx_messages_user_date", Message.user_id, Message.created_at)
 Index("idx_food_log_user_date", FoodLog.user_id, FoodLog.logged_at)
 Index("idx_vitals_log_user_date", VitalsLog.user_id, VitalsLog.logged_at)
 Index("idx_exercise_log_user_date", ExerciseLog.user_id, ExerciseLog.logged_at)
+Index("idx_exercise_plan_user_date", ExercisePlan.user_id, ExercisePlan.target_date)
+Index("idx_daily_checklist_user_date", DailyChecklistItem.user_id, DailyChecklistItem.target_date, DailyChecklistItem.item_type)
 Index("idx_summaries_user_type", Summary.user_id, Summary.summary_type, Summary.period_start)
 Index("idx_fasting_log_user_date", FastingLog.user_id, FastingLog.fast_start)

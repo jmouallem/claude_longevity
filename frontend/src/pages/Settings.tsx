@@ -1,21 +1,18 @@
 import { useState, useEffect, useCallback, type KeyboardEvent } from 'react';
 import { apiClient } from '../api/client';
+import {
+  lbToKg,
+  kgToLb,
+  ftInToCm,
+  cmToFtIn,
+  round1,
+  type HeightUnit,
+  type WeightUnit,
+  type HydrationUnit,
+} from '../utils/units';
 
-type Tab = 'apikey' | 'profile' | 'models';
+type Tab = 'apikey' | 'profile' | 'models' | 'usage';
 type Provider = 'anthropic' | 'openai' | 'google';
-type WeightUnit = 'kg' | 'lb';
-type HeightUnit = 'cm' | 'ft';
-
-// Conversion helpers
-const lbToKg = (lb: number) => Math.round(lb * 0.453592 * 10) / 10;
-const kgToLb = (kg: number) => Math.round(kg / 0.453592 * 10) / 10;
-const ftInToCm = (ft: number, inches: number) => Math.round((ft * 30.48 + inches * 2.54) * 10) / 10;
-const cmToFtIn = (cm: number): [number, number] => {
-  const totalIn = cm / 2.54;
-  const ft = Math.floor(totalIn / 12);
-  const inches = Math.round(totalIn % 12);
-  return [ft, inches];
-};
 
 interface ProfileData {
   ai_provider: string;
@@ -27,6 +24,9 @@ interface ProfileData {
   height_cm: number | null;
   current_weight_kg: number | null;
   goal_weight_kg: number | null;
+  height_unit: HeightUnit;
+  weight_unit: WeightUnit;
+  hydration_unit: HydrationUnit;
   fitness_level: string | null;
   timezone: string | null;
   medical_conditions: string | null;
@@ -139,6 +139,89 @@ function TagInput({
   );
 }
 
+interface StructuredItem {
+  name: string;
+  dose: string;
+  timing: string;
+}
+
+const TIMING_OPTIONS = [
+  '', 'morning', 'evening', 'with breakfast', 'with lunch',
+  'with dinner', 'bedtime', 'twice daily', 'as needed',
+];
+
+function StructuredItemEditor({
+  label,
+  items,
+  onChange,
+}: {
+  label: string;
+  items: StructuredItem[];
+  onChange: (items: StructuredItem[]) => void;
+}) {
+  const updateItem = (index: number, field: keyof StructuredItem, value: string) => {
+    const updated = items.map((item, i) => i === index ? { ...item, [field]: value } : item);
+    onChange(updated);
+  };
+
+  const removeItem = (index: number) => {
+    onChange(items.filter((_, i) => i !== index));
+  };
+
+  const addItem = () => {
+    onChange([...items, { name: '', dose: '', timing: '' }]);
+  };
+
+  return (
+    <div>
+      <label className="block text-sm text-slate-400 mb-1">{label}</label>
+      <div className="space-y-2">
+        {items.map((item, i) => (
+          <div key={i} className="flex gap-2 items-center">
+            <input
+              type="text"
+              value={item.name}
+              onChange={(e) => updateItem(i, 'name', e.target.value)}
+              placeholder="Name"
+              className="flex-1 min-w-0 bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm text-slate-100 placeholder-slate-500 focus:border-emerald-500 outline-none"
+            />
+            <input
+              type="text"
+              value={item.dose}
+              onChange={(e) => updateItem(i, 'dose', e.target.value)}
+              placeholder="Dose"
+              className="w-28 bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm text-slate-100 placeholder-slate-500 focus:border-emerald-500 outline-none"
+            />
+            <select
+              value={item.timing}
+              onChange={(e) => updateItem(i, 'timing', e.target.value)}
+              className="w-32 bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm text-slate-100 focus:border-emerald-500 outline-none"
+            >
+              {TIMING_OPTIONS.map((t) => (
+                <option key={t} value={t}>{t || '— timing —'}</option>
+              ))}
+            </select>
+            <button
+              type="button"
+              onClick={() => removeItem(i)}
+              className="text-slate-400 hover:text-rose-400 text-lg px-1"
+            >
+              &times;
+            </button>
+          </div>
+        ))}
+      </div>
+      <button
+        type="button"
+        onClick={addItem}
+        className="mt-2 text-sm text-emerald-400 hover:text-emerald-300"
+      >
+        + Add {label.toLowerCase().replace(/s$/, '')}
+      </button>
+    </div>
+  );
+}
+
 function UnitToggle({ value, options, onChange }: { value: string; options: { value: string; label: string }[]; onChange: (v: string) => void }) {
   return (
     <div className="inline-flex rounded-md border border-slate-600 overflow-hidden">
@@ -161,8 +244,7 @@ function UnitToggle({ value, options, onChange }: { value: string; options: { va
 }
 
 export default function Settings() {
-  const [tab, setTab] = useState<Tab>('apikey');
-  const [profile, setProfile] = useState<ProfileData | null>(null);
+  const [tab, setTab] = useState<Tab>('profile');
   const [loading, setLoading] = useState(true);
 
   // API Key state
@@ -185,11 +267,12 @@ export default function Settings() {
   const [currentWeight, setCurrentWeight] = useState('');
   const [goalWeight, setGoalWeight] = useState('');
   const [weightUnit, setWeightUnit] = useState<WeightUnit>('kg');
+  const [hydrationUnit, setHydrationUnit] = useState<HydrationUnit>('ml');
   const [fitnessLevel, setFitnessLevel] = useState('');
   const [timezone, setTimezone] = useState('');
   const [medicalConditionsTags, setMedicalConditionsTags] = useState<string[]>([]);
-  const [medicationsTags, setMedicationsTags] = useState<string[]>([]);
-  const [supplementsTags, setSupplementsTags] = useState<string[]>([]);
+  const [medicationsItems, setMedicationsItems] = useState<StructuredItem[]>([]);
+  const [supplementsItems, setSupplementsItems] = useState<StructuredItem[]>([]);
   const [familyHistoryTags, setFamilyHistoryTags] = useState<string[]>([]);
   const [dietaryPreferencesTags, setDietaryPreferencesTags] = useState<string[]>([]);
   const [healthGoalsTags, setHealthGoalsTags] = useState<string[]>([]);
@@ -208,47 +291,217 @@ export default function Settings() {
     default_utility: string;
   } | null>(null);
 
+  // Usage state
+  interface UsageModel {
+    model_id: string;
+    model_name: string;
+    tokens_in: number;
+    tokens_out: number;
+    request_count: number;
+    cost_usd: number;
+  }
+  const [usageData, setUsageData] = useState<{
+    models: UsageModel[];
+    total_cost_usd: number;
+    reset_at: string | null;
+  } | null>(null);
+  const [usageLoading, setUsageLoading] = useState(false);
+  const [resetConfirm, setResetConfirm] = useState(false);
+
+  const fetchUsage = useCallback(async () => {
+    setUsageLoading(true);
+    try {
+      const data = await apiClient.get<{
+        models: UsageModel[];
+        total_cost_usd: number;
+        reset_at: string | null;
+      }>('/api/settings/usage');
+      setUsageData(data);
+    } catch {
+      // ignore
+    } finally {
+      setUsageLoading(false);
+    }
+  }, []);
+
+  const resetUsage = async () => {
+    try {
+      await apiClient.post('/api/settings/usage/reset', {});
+      setResetConfirm(false);
+      fetchUsage();
+    } catch {
+      // ignore
+    }
+  };
+
+  const fmtNum = (n: number) => n.toLocaleString();
+  const fmtCost = (n: number) => `$${n.toFixed(4)}`;
+
   // Parse stored string into tags (handles both JSON arrays and comma-separated)
   const parseToTags = (val: string | null): string[] => {
+    const doseToken = /^\d[\d,.\s]*(mcg|mg|g|kg|iu|ml|units?|tabs?|caps?)\b/i;
+    const intakeTokenA = /^(\d+(?:[.,]\d+)?)\s*(drops?|caps?(?:ules?)?|tablets?|tabs?|pills?|ml)\b(?:\s*(daily|per day|\/day|a day))?$/i;
+    const intakeTokenB = /^(drops?|caps?(?:ules?)?|tablets?|tabs?|pills?|ml)\s*\+?\s*(\d+(?:[.,]\d+)?)(?:\s*(daily|per day|\/day|a day))?$/i;
+    const familyIntakeA = /^(\d+(?:[.,]\d+)?)\s*(omega\s*-?\s*3|omega3|d3|b12|coq10|q10)(?:\s*(daily|per day|\/day|a day))?$/i;
+    const familyIntakeB = /^(omega\s*-?\s*3|omega3|d3|b12|coq10|q10)\s*\+?\s*(\d+(?:[.,]\d+)?)(?:\s*(daily|per day|\/day|a day))?$/i;
+    const familyKey = (s: string): 'omega3' | 'd3' | 'b12' | 'coq10' | null => {
+      const t = s.toLowerCase();
+      if (t.includes('omega3') || t.includes('omega-3') || t.includes('omega 3')) return 'omega3';
+      if (t.includes('d3') || t.includes('vitamin d') || t.includes('vit d')) return 'd3';
+      if (t.includes('b12') || t.includes('vitamin b12') || t.includes('vit b12')) return 'b12';
+      if (t.includes('coq10') || t.includes('q10')) return 'coq10';
+      return null;
+    };
+    const toCanonicalIntake = (item: string): string | null => {
+      const a = item.match(intakeTokenA);
+      if (a) {
+        const qty = a[1];
+        const unit = a[2].toLowerCase();
+        const freq = (a[3] || '').toLowerCase();
+        const normalizedFreq = ['per day', '/day', 'a day'].includes(freq) ? 'daily' : freq;
+        return `${qty} ${unit}${normalizedFreq === 'daily' ? ' daily' : ''}`.trim();
+      }
+      const b = item.match(intakeTokenB);
+      if (b) {
+        const unit = b[1].toLowerCase();
+        const qty = b[2];
+        const freq = (b[3] || '').toLowerCase();
+        const normalizedFreq = ['per day', '/day', 'a day'].includes(freq) ? 'daily' : freq;
+        return `${qty} ${unit}${normalizedFreq === 'daily' ? ' daily' : ''}`.trim();
+      }
+      return null;
+    };
+    const normalize = (items: string[]) => {
+      const merged: string[] = [];
+      for (const raw of items) {
+        const item = raw.replace(/\s+/g, ' ').trim();
+        if (!item) continue;
+        const fa = item.match(familyIntakeA);
+        const fb = item.match(familyIntakeB);
+        if (fa || fb) {
+          const fam = familyKey((fa ? fa[2] : fb?.[1]) || '');
+          const qty = (fa ? fa[1] : fb?.[2]) || '';
+          const detail = `${qty} daily`;
+          if (fam) {
+            const idx = merged.findIndex((m) => familyKey(m) === fam);
+            if (idx >= 0) {
+              if (!merged[idx].toLowerCase().includes(detail.toLowerCase())) {
+                merged[idx] = `${merged[idx]}, ${detail}`;
+              }
+              continue;
+            }
+          }
+        }
+        const intake = toCanonicalIntake(item);
+        if (merged.length > 0 && intake) {
+          if (!merged[merged.length - 1].toLowerCase().includes(intake.toLowerCase())) {
+            merged[merged.length - 1] = `${merged[merged.length - 1]}, ${intake}`;
+          }
+          continue;
+        }
+        if (merged.length > 0 && doseToken.test(item)) {
+          merged[merged.length - 1] = `${merged[merged.length - 1]} ${item}`.trim();
+          continue;
+        }
+        merged.push(item);
+      }
+      return merged;
+    };
+
     if (!val) return [];
     const trimmed = val.trim();
     if (trimmed.startsWith('[')) {
       try {
         const arr = JSON.parse(trimmed);
-        if (Array.isArray(arr)) return arr.map((s: string) => s.trim()).filter(Boolean);
+        if (Array.isArray(arr)) return normalize(arr.map((s: string) => s.trim()).filter(Boolean));
       } catch { /* fall through */ }
     }
-    return trimmed.split(',').map(s => s.trim()).filter(Boolean);
+    return normalize(trimmed.split(',').map(s => s.trim()).filter(Boolean));
+  };
+
+  const parseToStructuredItems = (val: string | null): StructuredItem[] => {
+    if (!val) return [];
+    const trimmed = val.trim();
+    if (!trimmed) return [];
+    if (trimmed.startsWith('[')) {
+      try {
+        const arr = JSON.parse(trimmed);
+        if (Array.isArray(arr)) {
+          return arr.map((entry: string | { name?: string; dose?: string; timing?: string }) => {
+            if (typeof entry === 'string') {
+              // Legacy string entry — try to split "Name 4mg" into name + dose
+              const doseMatch = entry.match(/\b(\d[\d,.\s]*(mcg|mg|g|kg|iu|ml|units?|tabs?|caps?|drops?))\b/i);
+              if (doseMatch) {
+                const dose = doseMatch[0].trim();
+                const name = (entry.slice(0, doseMatch.index) + entry.slice(doseMatch.index! + doseMatch[0].length)).trim().replace(/^\s*[+\-,]\s*|\s*[+\-,]\s*$/g, '').trim();
+                return { name: name || dose, dose: name ? dose : '', timing: '' };
+              }
+              return { name: entry.trim(), dose: '', timing: '' };
+            }
+            return {
+              name: (entry.name || '').trim(),
+              dose: (entry.dose || '').trim(),
+              timing: (entry.timing || '').trim(),
+            };
+          }).filter((item: StructuredItem) => item.name);
+        }
+      } catch { /* fall through */ }
+    }
+    // Comma-separated fallback
+    return trimmed.split(',').map(s => s.trim()).filter(Boolean).map(s => ({ name: s, dose: '', timing: '' }));
   };
 
   const fetchProfile = useCallback(async () => {
     setLoading(true);
     try {
       const p = await apiClient.get<ProfileData>('/api/settings/profile');
-      setProfile(p);
       setProvider((p.ai_provider || 'anthropic') as Provider);
       setHasKey(p.has_api_key);
       setAge(p.age?.toString() ?? '');
       setSex(p.sex ?? '');
+      const profileHeightUnit: HeightUnit = p.height_unit === 'ft' ? 'ft' : 'cm';
+      const profileWeightUnit: WeightUnit = p.weight_unit === 'lb' ? 'lb' : 'kg';
+      const profileHydrationUnit: HydrationUnit = p.hydration_unit === 'oz' ? 'oz' : 'ml';
+      setHeightUnit(profileHeightUnit);
+      setWeightUnit(profileWeightUnit);
+      setHydrationUnit(profileHydrationUnit);
 
       // Height: store cm internally, populate both unit views
       const cm = p.height_cm;
-      if (cm) {
+      if (cm != null) {
         setHeightCm(cm.toString());
         const [ft, inches] = cmToFtIn(cm);
         setHeightFt(ft.toString());
         setHeightIn(inches.toString());
+      } else {
+        setHeightCm('');
+        setHeightFt('');
+        setHeightIn('');
       }
 
-      // Weight: store kg internally, populate display value based on unit
-      setCurrentWeight(p.current_weight_kg?.toString() ?? '');
-      setGoalWeight(p.goal_weight_kg?.toString() ?? '');
+      if (p.current_weight_kg != null) {
+        const displayCurrentWeight = profileWeightUnit === 'lb'
+          ? round1(kgToLb(p.current_weight_kg))
+          : round1(p.current_weight_kg);
+        setCurrentWeight(displayCurrentWeight.toString());
+      } else {
+        setCurrentWeight('');
+      }
+
+      if (p.goal_weight_kg != null) {
+        const displayGoalWeight = profileWeightUnit === 'lb'
+          ? round1(kgToLb(p.goal_weight_kg))
+          : round1(p.goal_weight_kg);
+        setGoalWeight(displayGoalWeight.toString());
+      } else {
+        setGoalWeight('');
+      }
 
       setFitnessLevel(p.fitness_level ?? '');
       setTimezone(p.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone);
       setMedicalConditionsTags(parseToTags(p.medical_conditions));
-      setMedicationsTags(parseToTags(p.medications));
-      setSupplementsTags(parseToTags(p.supplements));
+      setMedicationsItems(parseToStructuredItems(p.medications));
+      setSupplementsItems(parseToStructuredItems(p.supplements));
       setFamilyHistoryTags(parseToTags(p.family_history));
       setDietaryPreferencesTags(parseToTags(p.dietary_preferences));
       setHealthGoalsTags(parseToTags(p.health_goals));
@@ -282,6 +535,10 @@ export default function Settings() {
   useEffect(() => {
     fetchModels(provider);
   }, [provider, fetchModels]);
+
+  useEffect(() => {
+    if (tab === 'usage') fetchUsage();
+  }, [tab, fetchUsage]);
 
   const saveApiKey = async () => {
     if (!apiKey.trim()) return;
@@ -328,22 +585,23 @@ export default function Settings() {
       // Convert height to cm
       let heightCmVal: number | null = null;
       if (heightUnit === 'cm' && heightCm) {
-        heightCmVal = parseFloat(heightCm);
+        heightCmVal = round1(parseFloat(heightCm));
       } else if (heightUnit === 'ft' && (heightFt || heightIn)) {
-        heightCmVal = ftInToCm(parseFloat(heightFt || '0'), parseFloat(heightIn || '0'));
+        heightCmVal = round1(ftInToCm(parseFloat(heightFt || '0'), parseFloat(heightIn || '0')));
       }
 
       // Convert weight to kg
       let currentWeightKg: number | null = null;
       let goalWeightKg: number | null = null;
       if (currentWeight) {
-        currentWeightKg = weightUnit === 'lb' ? lbToKg(parseFloat(currentWeight)) : parseFloat(currentWeight);
+        currentWeightKg = weightUnit === 'lb' ? round1(lbToKg(parseFloat(currentWeight))) : round1(parseFloat(currentWeight));
       }
       if (goalWeight) {
-        goalWeightKg = weightUnit === 'lb' ? lbToKg(parseFloat(goalWeight)) : parseFloat(goalWeight);
+        goalWeightKg = weightUnit === 'lb' ? round1(lbToKg(parseFloat(goalWeight))) : round1(parseFloat(goalWeight));
       }
 
-      const tagsToString = (tags: string[]) => tags.length > 0 ? tags.join(', ') : null;
+      // Persist as JSON array so item text can safely contain commas.
+      const tagsToString = (tags: string[]) => (tags.length > 0 ? JSON.stringify(tags) : null);
 
       await apiClient.put('/api/settings/profile', {
         age: age ? parseInt(age) : null,
@@ -351,11 +609,18 @@ export default function Settings() {
         height_cm: heightCmVal,
         current_weight_kg: currentWeightKg,
         goal_weight_kg: goalWeightKg,
+        height_unit: heightUnit,
+        weight_unit: weightUnit,
+        hydration_unit: hydrationUnit,
         fitness_level: fitnessLevel || null,
         timezone: timezone || null,
         medical_conditions: tagsToString(medicalConditionsTags),
-        medications: tagsToString(medicationsTags),
-        supplements: tagsToString(supplementsTags),
+        medications: medicationsItems.filter(m => m.name.trim()).length > 0
+          ? JSON.stringify(medicationsItems.filter(m => m.name.trim()))
+          : null,
+        supplements: supplementsItems.filter(s => s.name.trim()).length > 0
+          ? JSON.stringify(supplementsItems.filter(s => s.name.trim()))
+          : null,
         family_history: tagsToString(familyHistoryTags),
         dietary_preferences: tagsToString(dietaryPreferencesTags),
         health_goals: tagsToString(healthGoalsTags),
@@ -410,9 +675,10 @@ export default function Settings() {
 
       {/* Tabs */}
       <div className="flex gap-2 mb-6">
-        <TabButton active={tab === 'apikey'} label="API Key" onClick={() => setTab('apikey')} />
         <TabButton active={tab === 'profile'} label="Profile" onClick={() => setTab('profile')} />
         <TabButton active={tab === 'models'} label="Models" onClick={() => setTab('models')} />
+        <TabButton active={tab === 'apikey'} label="API Key" onClick={() => setTab('apikey')} />
+        <TabButton active={tab === 'usage'} label="Usage" onClick={() => setTab('usage')} />
       </div>
 
       {/* API Key Tab */}
@@ -600,11 +866,11 @@ export default function Settings() {
                   onChange={(v) => {
                     const newUnit = v as WeightUnit;
                     if (newUnit === 'lb' && weightUnit === 'kg') {
-                      if (currentWeight) setCurrentWeight(kgToLb(parseFloat(currentWeight)).toString());
-                      if (goalWeight) setGoalWeight(kgToLb(parseFloat(goalWeight)).toString());
+                      if (currentWeight) setCurrentWeight(round1(kgToLb(parseFloat(currentWeight))).toString());
+                      if (goalWeight) setGoalWeight(round1(kgToLb(parseFloat(goalWeight))).toString());
                     } else if (newUnit === 'kg' && weightUnit === 'lb') {
-                      if (currentWeight) setCurrentWeight(lbToKg(parseFloat(currentWeight)).toString());
-                      if (goalWeight) setGoalWeight(lbToKg(parseFloat(goalWeight)).toString());
+                      if (currentWeight) setCurrentWeight(round1(lbToKg(parseFloat(currentWeight))).toString());
+                      if (goalWeight) setGoalWeight(round1(lbToKg(parseFloat(goalWeight))).toString());
                     }
                     setWeightUnit(newUnit);
                   }}
@@ -637,6 +903,17 @@ export default function Settings() {
             </div>
 
             <div className="sm:col-span-2">
+              <div className="flex items-center justify-between mb-1">
+                <label className="text-sm text-slate-400">Hydration Unit</label>
+                <UnitToggle
+                  value={hydrationUnit}
+                  options={[{ value: 'ml', label: 'ml' }, { value: 'oz', label: 'oz' }]}
+                  onChange={(v) => setHydrationUnit(v as HydrationUnit)}
+                />
+              </div>
+            </div>
+
+            <div className="sm:col-span-2">
               <label className="block text-sm text-slate-400 mb-1">Timezone</label>
               <input
                 type="text"
@@ -657,17 +934,15 @@ export default function Settings() {
               tags={medicalConditionsTags}
               onChange={setMedicalConditionsTags}
             />
-            <TagInput
+            <StructuredItemEditor
               label="Medications"
-              hint="e.g. metformin 500mg, lisinopril 10mg"
-              tags={medicationsTags}
-              onChange={setMedicationsTags}
+              items={medicationsItems}
+              onChange={setMedicationsItems}
             />
-            <TagInput
+            <StructuredItemEditor
               label="Supplements"
-              hint="e.g. vitamin D 2000 IU, omega-3"
-              tags={supplementsTags}
-              onChange={setSupplementsTags}
+              items={supplementsItems}
+              onChange={setSupplementsItems}
             />
             <TagInput
               label="Family History"
@@ -759,6 +1034,92 @@ export default function Settings() {
           >
             {modelsSaving ? 'Saving...' : 'Save Models'}
           </button>
+        </div>
+      )}
+
+      {tab === 'usage' && (
+        <div className="bg-slate-800 rounded-xl p-6 border border-slate-700 space-y-5">
+          <div className="flex items-center justify-between">
+            <div>
+              <h2 className="text-lg font-semibold text-slate-100">Model Usage</h2>
+              <p className="text-sm text-slate-400">
+                {usageData?.reset_at
+                  ? `Since ${new Date(usageData.reset_at).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`
+                  : 'Since account creation'}
+              </p>
+            </div>
+            {!resetConfirm ? (
+              <button
+                onClick={() => setResetConfirm(true)}
+                className="px-3 py-1.5 text-sm text-slate-400 hover:text-rose-400 border border-slate-600 hover:border-rose-500 rounded-lg transition-colors"
+              >
+                Reset Counters
+              </button>
+            ) : (
+              <div className="flex gap-2 items-center">
+                <span className="text-sm text-slate-400">Reset all?</span>
+                <button
+                  onClick={resetUsage}
+                  className="px-3 py-1.5 text-sm text-white bg-rose-600 hover:bg-rose-500 rounded-lg transition-colors"
+                >
+                  Confirm
+                </button>
+                <button
+                  onClick={() => setResetConfirm(false)}
+                  className="px-3 py-1.5 text-sm text-slate-400 hover:text-slate-200 border border-slate-600 rounded-lg transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
+            )}
+          </div>
+
+          {usageLoading ? (
+            <p className="text-sm text-slate-400">Loading...</p>
+          ) : usageData && usageData.models.length > 0 ? (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-slate-400 text-left border-b border-slate-700">
+                    <th className="pb-2 font-medium">Model</th>
+                    <th className="pb-2 font-medium text-right">Requests</th>
+                    <th className="pb-2 font-medium text-right">Input Tokens</th>
+                    <th className="pb-2 font-medium text-right">Output Tokens</th>
+                    <th className="pb-2 font-medium text-right">Est. Cost</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {usageData.models.map((m) => (
+                    <tr key={m.model_id} className="border-b border-slate-700/50 text-slate-200">
+                      <td className="py-2.5">
+                        <span className="font-medium">{m.model_name}</span>
+                        <span className="text-xs text-slate-500 ml-2">{m.model_id}</span>
+                      </td>
+                      <td className="py-2.5 text-right text-slate-300">{fmtNum(m.request_count)}</td>
+                      <td className="py-2.5 text-right text-slate-300">{fmtNum(m.tokens_in)}</td>
+                      <td className="py-2.5 text-right text-slate-300">{fmtNum(m.tokens_out)}</td>
+                      <td className="py-2.5 text-right font-medium text-emerald-400">{fmtCost(m.cost_usd)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+                <tfoot>
+                  <tr className="text-slate-100 font-semibold">
+                    <td className="pt-3">Total</td>
+                    <td className="pt-3 text-right">{fmtNum(usageData.models.reduce((s, m) => s + m.request_count, 0))}</td>
+                    <td className="pt-3 text-right">{fmtNum(usageData.models.reduce((s, m) => s + m.tokens_in, 0))}</td>
+                    <td className="pt-3 text-right">{fmtNum(usageData.models.reduce((s, m) => s + m.tokens_out, 0))}</td>
+                    <td className="pt-3 text-right text-emerald-400">{fmtCost(usageData.total_cost_usd)}</td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+          ) : (
+            <p className="text-sm text-slate-400">No usage data yet. Start chatting to see token usage here.</p>
+          )}
+
+          <p className="text-xs text-slate-500">
+            Costs are estimates based on pricing in <code className="text-slate-400">data/models.json</code>. Edit that file to update rates.
+          </p>
         </div>
       )}
     </div>

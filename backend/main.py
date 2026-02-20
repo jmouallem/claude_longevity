@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from config import settings
-from db.database import engine, Base
+from db.database import engine, Base, run_startup_migrations
 from auth.routes import router as auth_router
 from api.settings import router as settings_router
 from api.chat import router as chat_router
@@ -16,6 +16,7 @@ from api.specialists import router as specialists_router
 
 # Create all tables
 Base.metadata.create_all(bind=engine)
+run_startup_migrations()
 
 app = FastAPI(title="The Longevity Alchemist", version="1.0.0")
 

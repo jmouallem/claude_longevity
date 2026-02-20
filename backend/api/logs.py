@@ -1,7 +1,8 @@
 from datetime import date, datetime, timezone
 from typing import Optional
+import re
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -9,11 +10,17 @@ from auth.utils import get_current_user
 from db.database import get_db
 from db.models import (
     User, FoodLog, HydrationLog, VitalsLog, ExerciseLog,
-    SupplementLog, FastingLog, SleepLog,
+    SupplementLog, FastingLog, SleepLog, ExercisePlan, DailyChecklistItem,
 )
+from ai.context_builder import build_context
+from ai.providers import get_provider
+from utils.encryption import decrypt_api_key
 from utils.datetime_utils import start_of_day, end_of_day, today_utc
+from utils.med_utils import parse_structured_list, structured_to_display
 
 router = APIRouter(prefix="/logs", tags=["logs"])
+
+DOSE_TOKEN_RE = re.compile(r"^\d[\d,.\s]*(mcg|mg|g|kg|iu|ml|units?|tabs?|caps?)\b", re.IGNORECASE)
 
 
 # --- Pydantic Schemas ---
@@ -77,6 +84,38 @@ class SleepLogCreate(BaseModel):
     notes: Optional[str] = None
 
 
+class ExercisePlanResponse(BaseModel):
+    target_date: str
+    plan_type: str
+    title: str
+    description: Optional[str] = None
+    target_minutes: Optional[int] = None
+    completed: bool
+    status: str
+    completed_minutes: int
+    matching_sessions: int
+
+
+class ChecklistItem(BaseModel):
+    name: str
+    dose: str = ""
+    timing: str = ""
+    completed: bool
+
+
+class DailyChecklistResponse(BaseModel):
+    target_date: str
+    medications: list[ChecklistItem]
+    supplements: list[ChecklistItem]
+
+
+class ChecklistToggleRequest(BaseModel):
+    target_date: Optional[str] = None
+    item_type: str  # medication | supplement
+    item_name: str
+    completed: bool
+
+
 # --- Helper ---
 
 def get_logs_for_date(db, model, user_id, target_date, date_field="logged_at"):
@@ -98,6 +137,110 @@ def serialize_log(log, fields):
             val = val.isoformat()
         result[f] = val
     return result
+
+
+VALID_PLAN_TYPES = {"rest_day", "hiit", "strength", "zone2", "mobility", "mixed"}
+PLAN_MATCH_TYPES = {
+    "rest_day": set(),
+    "hiit": {"hiit"},
+    "strength": {"strength"},
+    "zone2": {"zone2_cardio", "walk", "run", "cycling", "swimming"},
+    "mobility": {"mobility", "yoga"},
+    "mixed": {"zone2_cardio", "walk", "run", "cycling", "swimming", "hiit", "strength", "mobility", "yoga"},
+}
+
+
+def compute_plan_status(
+    plan_type: str,
+    target_minutes: Optional[int],
+    exercise_logs: list[ExerciseLog],
+    target_date: date,
+) -> tuple[bool, str, int, int]:
+    completed_minutes = sum(l.duration_minutes or 0 for l in exercise_logs)
+    match_types = PLAN_MATCH_TYPES.get(plan_type, PLAN_MATCH_TYPES["mixed"])
+    matching = [l for l in exercise_logs if l.exercise_type in match_types] if match_types else []
+    matching_sessions = len(matching)
+    today = today_utc()
+
+    if plan_type == "rest_day":
+        if completed_minutes == 0:
+            return (target_date < today, "on_track" if target_date >= today else "completed", completed_minutes, 0)
+        return (False, "off_plan", completed_minutes, 0)
+
+    needed_minutes = target_minutes or 20
+    matched_minutes = sum(l.duration_minutes or 0 for l in matching)
+    done = matching_sessions > 0 and matched_minutes >= needed_minutes
+    if done:
+        return (True, "completed", completed_minutes, matching_sessions)
+    if target_date < today:
+        return (False, "missed", completed_minutes, matching_sessions)
+    return (False, "pending", completed_minutes, matching_sessions)
+
+
+def parse_plan_json(content: str) -> dict:
+    import json
+
+    text = content.strip()
+    if "```" in text:
+        text = text.split("```")[1]
+        if text.startswith("json"):
+            text = text[4:]
+        text = text.strip()
+    parsed = json.loads(text)
+    plan_type = str(parsed.get("plan_type", "mixed")).strip().lower()
+    if plan_type not in VALID_PLAN_TYPES:
+        plan_type = "mixed"
+    title = str(parsed.get("title", "Today's Exercise Plan")).strip() or "Today's Exercise Plan"
+    description = str(parsed.get("description", "")).strip()
+    target_minutes = parsed.get("target_minutes")
+    try:
+        target_minutes = int(target_minutes) if target_minutes is not None else None
+    except (ValueError, TypeError):
+        target_minutes = None
+    return {
+        "plan_type": plan_type,
+        "title": title,
+        "description": description,
+        "target_minutes": target_minutes,
+    }
+
+
+def parse_tag_list(raw: Optional[str]) -> list[str]:
+    def normalize(items: list[str]) -> list[str]:
+        merged: list[str] = []
+        for raw_item in items:
+            item = " ".join(raw_item.split()).strip()
+            if not item:
+                continue
+            if merged and DOSE_TOKEN_RE.match(item):
+                merged[-1] = f"{merged[-1]} {item}".strip()
+                continue
+            merged.append(item)
+        return merged
+
+    if not raw:
+        return []
+    txt = raw.strip()
+    if not txt:
+        return []
+    if txt.startswith("["):
+        try:
+            import json
+
+            arr = json.loads(txt)
+            if isinstance(arr, list):
+                parsed = []
+                for v in arr:
+                    if isinstance(v, str):
+                        parsed.append(v.strip())
+                    elif isinstance(v, dict):
+                        name = str(v.get("name", "")).strip()
+                        if name:
+                            parsed.append(name)
+                return normalize([x for x in parsed if x])
+        except Exception:
+            pass
+    return normalize([x.strip() for x in txt.split(",") if x.strip()])
 
 
 # --- Food Logs ---
@@ -126,10 +269,28 @@ def create_food_log(data: FoodLogCreate, user: User = Depends(get_current_user),
 @router.get("/vitals")
 def get_vitals_logs(
     target_date: Optional[date] = None,
+    date_from: Optional[date] = Query(default=None),
+    date_to: Optional[date] = Query(default=None),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    logs = get_logs_for_date(db, VitalsLog, user.id, target_date)
+    if date_from or date_to:
+        start_date = date_from or date_to or today_utc()
+        end_date = date_to or date_from or today_utc()
+        if end_date < start_date:
+            start_date, end_date = end_date, start_date
+        logs = (
+            db.query(VitalsLog)
+            .filter(
+                VitalsLog.user_id == user.id,
+                VitalsLog.logged_at >= start_of_day(start_date),
+                VitalsLog.logged_at <= end_of_day(end_date),
+            )
+            .order_by(VitalsLog.logged_at)
+            .all()
+        )
+    else:
+        logs = get_logs_for_date(db, VitalsLog, user.id, target_date)
     fields = ["logged_at", "weight_kg", "bp_systolic", "bp_diastolic", "heart_rate", "blood_glucose", "temperature_c", "spo2", "notes"]
     return [serialize_log(l, fields) for l in logs]
 
@@ -167,6 +328,200 @@ def create_exercise_log(data: ExerciseLogCreate, user: User = Depends(get_curren
     db.add(log)
     db.commit()
     return {"id": log.id, "status": "created"}
+
+
+@router.get("/exercise-plan", response_model=ExercisePlanResponse)
+def get_exercise_plan(
+    target_date: Optional[date] = None,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    d = target_date or today_utc()
+    d_iso = d.isoformat()
+    plan = (
+        db.query(ExercisePlan)
+        .filter(ExercisePlan.user_id == user.id, ExercisePlan.target_date == d_iso)
+        .order_by(ExercisePlan.updated_at.desc())
+        .first()
+    )
+    if not plan:
+        return ExercisePlanResponse(
+            target_date=d_iso,
+            plan_type="mixed",
+            title="No plan generated yet",
+            description="Generate your AI daily summary to create today's exercise plan.",
+            target_minutes=None,
+            completed=False,
+            status="not_set",
+            completed_minutes=0,
+            matching_sessions=0,
+        )
+
+    exercise_logs = get_logs_for_date(db, ExerciseLog, user.id, d)
+    completed, status, completed_minutes, matching_sessions = compute_plan_status(
+        plan.plan_type,
+        plan.target_minutes,
+        exercise_logs,
+        d,
+    )
+    return ExercisePlanResponse(
+        target_date=plan.target_date,
+        plan_type=plan.plan_type,
+        title=plan.title,
+        description=plan.description,
+        target_minutes=plan.target_minutes,
+        completed=completed,
+        status=status,
+        completed_minutes=completed_minutes,
+        matching_sessions=matching_sessions,
+    )
+
+
+@router.post("/exercise-plan/generate", response_model=ExercisePlanResponse)
+async def generate_exercise_plan(
+    target_date: Optional[date] = None,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    settings = user.settings
+    if not settings or not settings.api_key_encrypted:
+        raise HTTPException(status_code=400, detail="Please configure your API key in Settings before generating a plan.")
+
+    d = target_date or today_utc()
+    d_iso = d.isoformat()
+    api_key = decrypt_api_key(settings.api_key_encrypted)
+    provider = get_provider(settings.ai_provider, api_key)
+    system = build_context(db, user, "movement_coach")
+    user_prompt = (
+        "Create a practical exercise plan for this date based on user context.\n"
+        f"Date: {d_iso}\n\n"
+        "Return ONLY JSON with keys:\n"
+        "{\n"
+        '  "plan_type": "rest_day|hiit|strength|zone2|mobility|mixed",\n'
+        '  "title": "short title",\n'
+        '  "description": "one short paragraph",\n'
+        '  "target_minutes": integer or null\n'
+        "}\n"
+    )
+    result = await provider.chat(
+        messages=[{"role": "user", "content": user_prompt}],
+        model=provider.get_utility_model(),
+        system=system,
+        stream=False,
+    )
+    parsed = parse_plan_json(result["content"])
+
+    plan = (
+        db.query(ExercisePlan)
+        .filter(ExercisePlan.user_id == user.id, ExercisePlan.target_date == d_iso)
+        .first()
+    )
+    if not plan:
+        plan = ExercisePlan(user_id=user.id, target_date=d_iso, source="ai")
+        db.add(plan)
+
+    plan.plan_type = parsed["plan_type"]
+    plan.title = parsed["title"]
+    plan.description = parsed["description"]
+    plan.target_minutes = parsed["target_minutes"]
+    db.commit()
+
+    exercise_logs = get_logs_for_date(db, ExerciseLog, user.id, d)
+    completed, status, completed_minutes, matching_sessions = compute_plan_status(
+        plan.plan_type,
+        plan.target_minutes,
+        exercise_logs,
+        d,
+    )
+    return ExercisePlanResponse(
+        target_date=plan.target_date,
+        plan_type=plan.plan_type,
+        title=plan.title,
+        description=plan.description,
+        target_minutes=plan.target_minutes,
+        completed=completed,
+        status=status,
+        completed_minutes=completed_minutes,
+        matching_sessions=matching_sessions,
+    )
+
+
+@router.get("/checklist", response_model=DailyChecklistResponse)
+def get_daily_checklist(
+    target_date: Optional[date] = None,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    d = target_date or today_utc()
+    d_iso = d.isoformat()
+    med_structured = parse_structured_list(user.settings.medications if user.settings else None)
+    supp_structured = parse_structured_list(user.settings.supplements if user.settings else None)
+
+    states = (
+        db.query(DailyChecklistItem)
+        .filter(DailyChecklistItem.user_id == user.id, DailyChecklistItem.target_date == d_iso)
+        .all()
+    )
+    by_key = {(s.item_type, s.item_name.strip().lower()): bool(s.completed) for s in states}
+
+    med_items = [
+        ChecklistItem(
+            name=item.get("name", ""),
+            dose=item.get("dose", ""),
+            timing=item.get("timing", ""),
+            completed=by_key.get(("medication", item.get("name", "").lower()), False),
+        )
+        for item in med_structured if item.get("name")
+    ]
+    supp_items = [
+        ChecklistItem(
+            name=item.get("name", ""),
+            dose=item.get("dose", ""),
+            timing=item.get("timing", ""),
+            completed=by_key.get(("supplement", item.get("name", "").lower()), False),
+        )
+        for item in supp_structured if item.get("name")
+    ]
+    return DailyChecklistResponse(target_date=d_iso, medications=med_items, supplements=supp_items)
+
+
+@router.put("/checklist")
+def toggle_daily_checklist(
+    req: ChecklistToggleRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    item_type = req.item_type.strip().lower()
+    if item_type not in {"medication", "supplement"}:
+        raise HTTPException(status_code=400, detail="item_type must be medication or supplement")
+    name = req.item_name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="item_name is required")
+    d_iso = req.target_date or today_utc().isoformat()
+
+    row = (
+        db.query(DailyChecklistItem)
+        .filter(
+            DailyChecklistItem.user_id == user.id,
+            DailyChecklistItem.target_date == d_iso,
+            DailyChecklistItem.item_type == item_type,
+            DailyChecklistItem.item_name == name,
+        )
+        .first()
+    )
+    if not row:
+        row = DailyChecklistItem(
+            user_id=user.id,
+            target_date=d_iso,
+            item_type=item_type,
+            item_name=name,
+            completed=req.completed,
+        )
+        db.add(row)
+    else:
+        row.completed = req.completed
+    db.commit()
+    return {"status": "ok"}
 
 
 # --- Hydration Logs ---
