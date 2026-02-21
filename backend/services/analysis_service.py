@@ -30,6 +30,7 @@ from db.models import (
     User,
     VitalsLog,
 )
+from services.health_framework_service import active_frameworks_for_context, update_framework, upsert_framework
 from utils.datetime_utils import end_of_day, start_of_day, today_for_tz
 from utils.encryption import decrypt_api_key
 from utils.med_utils import parse_structured_list
@@ -73,7 +74,7 @@ Return JSON only:
       "title": "title",
       "rationale": "why",
       "confidence": 0.0,
-      "payload": {"target": "domain", "changes": ["concrete change"]},
+      "payload": {"target": "domain|framework", "changes": ["concrete change"]},
       "diff_markdown": "optional prompt diff markdown"
     }
   ]
@@ -82,6 +83,10 @@ Rules:
 - Never claim certainty beyond provided data.
 - Missing data must reduce confidence and be mentioned in summary.
 - Do not include direct medication changes unless framed as ask-user-to-confirm with clinician.
+- If active frameworks are present, align recommendations with them or explicitly explain conflicts.
+- Framework proposals must only add, reprioritize, or deactivate; never delete.
+- If proposing framework changes, use payload:
+  {"target":"framework","operations":[{"op":"upsert|update","framework_type":"...","name":"...","priority_score":0-100,"is_active":true|false,"rationale":"..."}]}
 - Keep safety-focused tone and objective language."""
 
 DEEP_SYNTHESIS_PROMPT = """You are doing monthly root-cause synthesis.
@@ -278,6 +283,7 @@ def _collect_period_metrics(
         DailyChecklistItem.target_date >= window.period_start.isoformat(),
         DailyChecklistItem.target_date <= window.period_end.isoformat(),
     ).all()
+    active_frameworks = active_frameworks_for_context(db, user.id)
 
     meds = parse_structured_list(user.settings.medications if user.settings else None)
     supps = parse_structured_list(user.settings.supplements if user.settings else None)
@@ -360,6 +366,20 @@ def _collect_period_metrics(
                 "delta_bpm": _calc_slope([float(v) for v in hr_points]) if hr_points else None,
             },
         },
+        "health_optimization_framework": {
+            "active_count": len(active_frameworks),
+            "active_items": [
+                {
+                    "id": row.id,
+                    "framework_type": row.framework_type,
+                    "classifier_label": row.classifier_label,
+                    "name": row.name,
+                    "priority_score": row.priority_score,
+                    "source": row.source,
+                }
+                for row in active_frameworks
+            ],
+        },
     }
 
     missing_domains: list[str] = []
@@ -373,6 +393,8 @@ def _collect_period_metrics(
         missing_domains.append("vitals")
     if not sleep:
         missing_domains.append("sleep")
+    if not active_frameworks:
+        missing_domains.append("health_framework")
 
     risk_flags: list[str] = []
     bp = metrics["vitals"]["blood_pressure"]
@@ -852,6 +874,62 @@ def serialize_analysis_proposal(row: AnalysisProposal) -> dict[str, Any]:
     }
 
 
+def _apply_framework_proposal(
+    db: Session,
+    user: User,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    operations = payload.get("operations")
+    if not isinstance(operations, list):
+        return {"applied": 0, "errors": ["Missing framework operations payload"]}
+
+    applied = 0
+    errors: list[str] = []
+    for idx, op in enumerate(operations):
+        if not isinstance(op, dict):
+            errors.append(f"Operation {idx} is not an object")
+            continue
+        op_kind = str(op.get("op", "upsert")).strip().lower()
+        if op_kind == "delete":
+            errors.append(f"Operation {idx}: delete is not allowed for adaptive framework updates")
+            continue
+
+        try:
+            if op_kind == "update":
+                framework_id = int(op.get("framework_id"))
+                update_framework(
+                    db=db,
+                    user_id=user.id,
+                    framework_id=framework_id,
+                    framework_type=op.get("framework_type"),
+                    name=op.get("name"),
+                    priority_score=op.get("priority_score"),
+                    is_active=op.get("is_active"),
+                    source="adaptive",
+                    rationale=op.get("rationale"),
+                    metadata={"applied_by": "analysis_proposal"},
+                    commit=False,
+                )
+            else:
+                upsert_framework(
+                    db=db,
+                    user_id=user.id,
+                    framework_type=str(op.get("framework_type", "")),
+                    name=str(op.get("name", "")),
+                    priority_score=op.get("priority_score"),
+                    is_active=op.get("is_active"),
+                    source="adaptive",
+                    rationale=op.get("rationale"),
+                    metadata={"applied_by": "analysis_proposal"},
+                    commit=False,
+                )
+            applied += 1
+        except Exception as exc:
+            errors.append(f"Operation {idx}: {exc}")
+
+    return {"applied": applied, "errors": errors}
+
+
 def review_proposal(
     db: Session,
     user: User,
@@ -870,6 +948,7 @@ def review_proposal(
     action_norm = action.strip().lower()
     if action_norm not in {"approve", "reject", "apply"}:
         raise ValueError("Action must be approve, reject, or apply")
+    apply_note: str | None = None
     if action_norm == "approve":
         proposal.status = "approved"
     elif action_norm == "reject":
@@ -877,12 +956,21 @@ def review_proposal(
     else:
         proposal.status = "applied"
         proposal.applied_at = datetime.now(timezone.utc)
+        payload = _safe_json_loads(proposal.proposal_json or "{}", fallback={})
+        if isinstance(payload, dict) and str(payload.get("target", "")).strip().lower() == "framework":
+            apply_result = _apply_framework_proposal(db, user, payload)
+            if apply_result["errors"]:
+                apply_note = "; ".join(apply_result["errors"])
+            if apply_result["applied"] <= 0:
+                proposal.status = "approved"
+                proposal.applied_at = None
 
     if proposal.status not in PROPOSAL_STATUSES:
         proposal.status = "pending"
     proposal.reviewed_at = datetime.now(timezone.utc)
     proposal.reviewer_user_id = user.id
-    proposal.review_note = (note or "").strip() or None
+    review_note_parts = [part for part in [(note or "").strip(), (apply_note or "").strip()] if part]
+    proposal.review_note = " | ".join(review_note_parts) if review_note_parts else None
     db.commit()
     db.refresh(proposal)
     return proposal
@@ -916,4 +1004,20 @@ def get_approved_guidance_for_context(db: Session, user: User, limit: int = 6) -
                 c = str(change).strip()
                 if c:
                     lines.append(f"  - {c}")
+        operations = payload_obj.get("operations")
+        if isinstance(operations, list):
+            for op in operations[:3]:
+                if not isinstance(op, dict):
+                    continue
+                op_kind = str(op.get("op", "upsert")).strip().lower()
+                op_name = str(op.get("name", "")).strip()
+                op_type = str(op.get("framework_type", "")).strip()
+                op_score = op.get("priority_score")
+                if op_name:
+                    detail = f"{op_kind} {op_name}"
+                    if op_type:
+                        detail += f" ({op_type})"
+                    if op_score is not None:
+                        detail += f" score={op_score}"
+                    lines.append(f"  - {detail}")
     return "\n".join(lines)

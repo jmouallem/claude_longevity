@@ -226,6 +226,46 @@ def run_startup_migrations() -> None:
             """
         ))
 
+        # Per-user prioritized health optimization frameworks.
+        conn.execute(text(
+            """
+            CREATE TABLE IF NOT EXISTS health_optimization_frameworks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                framework_type TEXT NOT NULL,
+                classifier_label TEXT NOT NULL,
+                name TEXT NOT NULL,
+                normalized_name TEXT NOT NULL,
+                priority_score INTEGER NOT NULL DEFAULT 50,
+                is_active BOOLEAN NOT NULL DEFAULT 0,
+                source TEXT NOT NULL DEFAULT 'seed',
+                rationale TEXT,
+                metadata_json TEXT,
+                created_at DATETIME,
+                updated_at DATETIME,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            )
+            """
+        ))
+        conn.execute(text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_health_framework_user_type
+            ON health_optimization_frameworks (user_id, framework_type, priority_score)
+            """
+        ))
+        conn.execute(text(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_health_framework_user_name
+            ON health_optimization_frameworks (user_id, normalized_name)
+            """
+        ))
+        conn.execute(text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_health_framework_user_active
+            ON health_optimization_frameworks (user_id, is_active, priority_score)
+            """
+        ))
+
         # Longitudinal analysis engine tables.
         conn.execute(text(
             """

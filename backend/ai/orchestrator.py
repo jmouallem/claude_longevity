@@ -1507,6 +1507,11 @@ async def _apply_profile_updates(
                 tool_registry.execute("profile_patch", {"patch": list_patch}, tool_ctx)
             except Exception as e:
                 logger.warning(f"Profile patch tool failed: {e}")
+        if med_items or supp_items or list_patch:
+            try:
+                tool_registry.execute("framework_sync_from_profile", {}, tool_ctx)
+            except Exception as e:
+                logger.warning(f"Framework sync tool failed: {e}")
 
         await _mark_checklist_completed_for_meds(db, provider, user, combined_input, reference_utc=reference_utc)
         await _mark_checklist_completed_for_supplements(

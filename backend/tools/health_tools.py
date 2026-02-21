@@ -7,6 +7,11 @@ from typing import Any
 from sqlalchemy import func
 
 from db.models import FoodLog, MealResponseSignal, MealTemplate, MealTemplateVersion, Message, VitalsLog
+from services.health_framework_service import (
+    FRAMEWORK_TYPES,
+    ensure_default_frameworks,
+    grouped_frameworks_for_user,
+)
 from tools.base import ToolContext, ToolExecutionError, ToolSpec, ensure_string
 from tools.registry import ToolRegistry
 from utils.med_utils import parse_structured_list
@@ -619,6 +624,67 @@ def _tool_health_search(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any
     return {"query": query, "since_days": since_days, "hits": hits[:50]}
 
 
+def _tool_framework_list(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
+    active_only = bool(args.get("active_only", False))
+    ensure_default_frameworks(ctx.db, ctx.user.id)
+    grouped = grouped_frameworks_for_user(ctx.db, ctx.user.id)
+    if active_only:
+        grouped = {
+            key: [item for item in items if bool(item.get("is_active"))]
+            for key, items in grouped.items()
+        }
+    items = [item for group in grouped.values() for item in group]
+    return {
+        "framework_types": FRAMEWORK_TYPES,
+        "grouped": grouped,
+        "items": items,
+    }
+
+
+def _tool_framework_search(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
+    query = ensure_string(args, "query")
+    framework_type = str(args.get("framework_type", "") or "").strip().lower()
+    ensure_default_frameworks(ctx.db, ctx.user.id)
+    grouped = grouped_frameworks_for_user(ctx.db, ctx.user.id)
+    items = [item for group in grouped.values() for item in group]
+    q_norm = _normalize_text(query)
+    q_tokens = _tokens(query)
+
+    matches: list[dict[str, Any]] = []
+    for item in items:
+        if framework_type and item.get("framework_type") != framework_type:
+            continue
+        name = str(item.get("name", ""))
+        name_norm = _normalize_text(name)
+        if not name_norm:
+            continue
+        score = 0.0
+        reason = "token_overlap"
+        if name_norm == q_norm:
+            score = 1.0
+            reason = "exact_name_match"
+        elif name_norm in q_norm or q_norm in name_norm:
+            score = 0.92
+            reason = "contains_match"
+        else:
+            name_tokens = _tokens(name_norm)
+            overlap = len(name_tokens & q_tokens)
+            if overlap > 0:
+                score = overlap / max(len(name_tokens), 1)
+
+        if score >= 0.34:
+            matches.append(
+                {
+                    "item": item,
+                    "score": round(score, 3),
+                    "reason": reason,
+                }
+            )
+
+    matches.sort(key=lambda m: float(m["score"]), reverse=True)
+    return {"query": query, "matches": matches}
+
+
 def register_health_tools(registry: ToolRegistry) -> None:
     registry.register(
         ToolSpec(
@@ -704,4 +770,23 @@ def register_health_tools(registry: ToolRegistry) -> None:
             tags=("search",),
         ),
         _tool_health_search,
+    )
+    registry.register(
+        ToolSpec(
+            name="framework_list",
+            description="List health optimization framework items grouped by taxonomy type.",
+            read_only=True,
+            tags=("framework", "read"),
+        ),
+        _tool_framework_list,
+    )
+    registry.register(
+        ToolSpec(
+            name="framework_search",
+            description="Search framework items by query and optional framework type.",
+            required_fields=("query",),
+            read_only=True,
+            tags=("framework", "resolve"),
+        ),
+        _tool_framework_search,
     )

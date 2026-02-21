@@ -8,6 +8,7 @@ from db.models import (
     User, FoodLog, HydrationLog, VitalsLog, ExerciseLog,
     SupplementLog, FastingLog, SleepLog, Summary, Message,
 )
+from services.health_framework_service import FRAMEWORK_TYPES, active_frameworks_for_context, ensure_default_frameworks
 from services.specialists_config import get_specialist_prompt, get_system_prompt, parse_overrides
 from utils.datetime_utils import start_of_day, end_of_day, today_utc, today_for_tz
 from utils.units import cm_to_ft_in, kg_to_lb, ml_to_oz
@@ -120,6 +121,23 @@ def format_medications(medications_json: str | None) -> str:
 
 def format_supplements(supplements_json: str | None) -> str:
     return _format_item_list(supplements_json, "supplements")
+
+
+def format_active_frameworks(db: Session, user: User) -> str:
+    ensure_default_frameworks(db, user.id)
+    rows = active_frameworks_for_context(db, user.id)
+    if not rows:
+        return "No active frameworks yet. Use Settings > Framework to activate prioritized strategies."
+
+    lines: list[str] = []
+    for row in rows:
+        label = FRAMEWORK_TYPES.get(row.framework_type, {}).get("classifier_label", row.framework_type)
+        source = f" [{row.source}]" if row.source else ""
+        score = int(row.priority_score or 0)
+        lines.append(f"- ({score}) {row.name} — {label}{source}")
+        if row.rationale:
+            lines.append(f"  - Rationale: {row.rationale}")
+    return "\n".join(lines)
 
 
 def compute_today_snapshot(db: Session, user: User, target_date: date | None = None) -> str:
@@ -302,17 +320,21 @@ def build_context(db: Session, user: User, specialist: str = "orchestrator") -> 
     profile = format_user_profile(user.settings)
     sections.append(f"## Current User Profile\n{profile}")
 
-    # 4. Medications & supplements
+    # 4. Prioritized health optimization framework
+    framework_text = format_active_frameworks(db, user)
+    sections.append(f"## Prioritized Health Optimization Framework\n{framework_text}")
+
+    # 5. Medications & supplements
     if user.settings:
         meds = format_medications(user.settings.medications)
         supps = format_supplements(user.settings.supplements)
         sections.append(f"## Medications\n{meds}\n\n## Supplements\n{supps}")
 
-    # 5. Today's snapshot
+    # 6. Today's snapshot
     snapshot = compute_today_snapshot(db, user)
     sections.append(f"## Today's Status\n{snapshot}")
 
-    # 6. Recent summaries
+    # 7. Recent summaries
     daily = get_latest_summary(db, user, "daily")
     weekly = get_latest_summary(db, user, "weekly")
     if daily:
@@ -320,7 +342,7 @@ def build_context(db: Session, user: User, specialist: str = "orchestrator") -> 
     if weekly:
         sections.append(f"## Last Week's Summary\n{weekly}")
 
-    # 7. Approved adaptive guidance (user-approved proposals only)
+    # 8. Approved adaptive guidance (user-approved proposals only)
     from services.analysis_service import get_approved_guidance_for_context
     approved_guidance = get_approved_guidance_for_context(db, user)
     if approved_guidance:

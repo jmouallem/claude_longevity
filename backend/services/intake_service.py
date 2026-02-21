@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from sqlalchemy.orm import Session
 
 from db.models import IntakeSession, UserSettings
+from services.health_framework_service import sync_frameworks_from_settings
 from utils.med_utils import cleanup_structured_list, merge_structured_items, parse_structured_list, to_structured
 from utils.units import lb_to_kg
 
@@ -627,7 +628,7 @@ def _apply_patch_to_settings(settings: UserSettings, patch: dict[str, Any]) -> N
         setattr(settings, field_id, value)
 
 
-def finalize_session(session: IntakeSession, settings: UserSettings) -> dict[str, Any]:
+def finalize_session(session: IntakeSession, settings: UserSettings, db: Session | None = None) -> dict[str, Any]:
     patch = _draft_patch(session)
     _apply_patch_to_settings(settings, patch)
 
@@ -636,6 +637,9 @@ def finalize_session(session: IntakeSession, settings: UserSettings) -> dict[str
     session.finished_at = now
     settings.intake_completed_at = now
     settings.intake_skipped_at = None
+
+    if db is not None and settings.user is not None:
+        sync_frameworks_from_settings(db, settings.user, source="intake", commit=False)
 
     return patch
 

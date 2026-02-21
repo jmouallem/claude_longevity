@@ -19,6 +19,16 @@ from db.models import (
 )
 from tools import tool_registry
 from tools.base import ToolContext, ToolExecutionError
+from services.health_framework_service import (
+    FRAMEWORK_TYPES,
+    delete_framework,
+    ensure_default_frameworks,
+    grouped_frameworks_for_user,
+    serialize_framework,
+    sync_frameworks_from_settings,
+    update_framework,
+    upsert_framework,
+)
 from services.user_reset_service import reset_user_data_for_user
 from utils.encryption import encrypt_api_key, decrypt_api_key
 
@@ -85,6 +95,26 @@ class ProfileResponse(BaseModel):
     dietary_preferences: Optional[str] = None
     health_goals: Optional[str] = None
     timezone: Optional[str] = None
+
+
+class FrameworkUpsertRequest(BaseModel):
+    framework_type: str
+    name: str
+    priority_score: int = 50
+    is_active: bool = False
+    source: str = "user"
+    rationale: Optional[str] = None
+    metadata: Optional[dict] = None
+
+
+class FrameworkUpdateRequest(BaseModel):
+    framework_type: Optional[str] = None
+    name: Optional[str] = None
+    priority_score: Optional[int] = None
+    is_active: Optional[bool] = None
+    source: Optional[str] = None
+    rationale: Optional[str] = None
+    metadata: Optional[dict] = None
 
 
 # Default models per provider
@@ -539,8 +569,111 @@ def update_profile(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Profile update failed: {str(e)}")
 
+    # Profile updates can imply strategy framework activation (e.g., keto, IF).
+    sync_frameworks_from_settings(db, user, source="user", commit=False)
     db.commit()
     return {"status": "ok"}
+
+
+@router.get("/frameworks")
+def list_frameworks(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    ensure_default_frameworks(db, user.id)
+    db.commit()
+    rows = grouped_frameworks_for_user(db, user.id)
+    return {
+        "framework_types": FRAMEWORK_TYPES,
+        "grouped": rows,
+        "items": [item for items in rows.values() for item in items],
+    }
+
+
+@router.post("/frameworks")
+def create_or_upsert_framework(
+    payload: FrameworkUpsertRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    try:
+        row, demoted_ids = upsert_framework(
+            db=db,
+            user_id=user.id,
+            framework_type=payload.framework_type,
+            name=payload.name,
+            priority_score=payload.priority_score,
+            is_active=payload.is_active,
+            source=payload.source,
+            rationale=payload.rationale,
+            metadata=payload.metadata or {},
+            commit=True,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "ok", "item": serialize_framework(row), "demoted_ids": demoted_ids}
+
+
+@router.put("/frameworks/{framework_id}")
+def patch_framework(
+    framework_id: int,
+    payload: FrameworkUpdateRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if framework_id <= 0:
+        raise HTTPException(status_code=400, detail="Invalid framework id")
+    try:
+        row, demoted_ids = update_framework(
+            db=db,
+            user_id=user.id,
+            framework_id=framework_id,
+            framework_type=payload.framework_type,
+            name=payload.name,
+            priority_score=payload.priority_score,
+            is_active=payload.is_active,
+            source=payload.source,
+            rationale=payload.rationale,
+            metadata=payload.metadata,
+            commit=True,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "ok", "item": serialize_framework(row), "demoted_ids": demoted_ids}
+
+
+@router.delete("/frameworks/{framework_id}")
+def remove_framework(
+    framework_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if framework_id <= 0:
+        raise HTTPException(status_code=400, detail="Invalid framework id")
+    try:
+        row = delete_framework(
+            db=db,
+            user_id=user.id,
+            framework_id=framework_id,
+            allow_seed_delete=True,
+            commit=True,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "ok", "deleted_id": row.id}
+
+
+@router.post("/frameworks/sync")
+def sync_frameworks_from_profile(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    rows = sync_frameworks_from_settings(db, user, source="user", commit=True)
+    return {
+        "status": "ok",
+        "count": len(rows),
+        "items": [serialize_framework(row) for row in rows],
+    }
 
 
 @router.put("/api-key")

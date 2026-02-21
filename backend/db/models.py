@@ -28,6 +28,7 @@ class User(Base):
     meal_templates = relationship("MealTemplate", back_populates="user", cascade="all, delete-orphan")
     meal_template_versions = relationship("MealTemplateVersion", back_populates="user", cascade="all, delete-orphan")
     meal_response_signals = relationship("MealResponseSignal", back_populates="user", cascade="all, delete-orphan")
+    optimization_frameworks = relationship("HealthOptimizationFramework", back_populates="user", cascade="all, delete-orphan")
     notifications = relationship("Notification", back_populates="user", cascade="all, delete-orphan")
     analysis_runs = relationship("AnalysisRun", back_populates="user", cascade="all, delete-orphan")
     analysis_proposals = relationship(
@@ -225,6 +226,26 @@ class Notification(Base):
     read_at = Column(DateTime)
 
     user = relationship("User", back_populates="notifications")
+
+
+class HealthOptimizationFramework(Base):
+    __tablename__ = "health_optimization_frameworks"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    framework_type = Column(Text, nullable=False)  # dietary | training | metabolic_timing | micronutrient | expert_derived
+    classifier_label = Column(Text, nullable=False)
+    name = Column(Text, nullable=False)
+    normalized_name = Column(Text, nullable=False)
+    priority_score = Column(Integer, nullable=False, default=50)  # 0-100
+    is_active = Column(Boolean, nullable=False, default=False)
+    source = Column(Text, nullable=False, default="seed")  # seed | intake | user | adaptive
+    rationale = Column(Text)
+    metadata_json = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    user = relationship("User", back_populates="optimization_frameworks")
 
 
 class WebSearchCache(Base):
@@ -481,6 +502,9 @@ Index("idx_meal_template_versions_user", MealTemplateVersion.user_id, MealTempla
 Index("idx_meal_response_signals_user_date", MealResponseSignal.user_id, MealResponseSignal.created_at)
 Index("idx_meal_response_signals_template", MealResponseSignal.meal_template_id, MealResponseSignal.created_at)
 Index("idx_meal_response_signals_food_log", MealResponseSignal.food_log_id)
+Index("idx_health_framework_user_type", HealthOptimizationFramework.user_id, HealthOptimizationFramework.framework_type, HealthOptimizationFramework.priority_score)
+Index("idx_health_framework_user_name", HealthOptimizationFramework.user_id, HealthOptimizationFramework.normalized_name, unique=True)
+Index("idx_health_framework_user_active", HealthOptimizationFramework.user_id, HealthOptimizationFramework.is_active, HealthOptimizationFramework.priority_score)
 Index("idx_notifications_user_date", Notification.user_id, Notification.created_at)
 Index("idx_notifications_user_read", Notification.user_id, Notification.is_read)
 Index("idx_web_search_query_key", WebSearchCache.query_key, unique=True)

@@ -1,6 +1,7 @@
 import base64
 import json
 from collections.abc import AsyncGenerator
+from typing import Any
 
 import httpx
 from fastapi import HTTPException
@@ -14,6 +15,7 @@ class OpenAIProvider(AIProvider):
     BASE_URL = "https://api.openai.com/v1/chat/completions"
     DEFAULT_REASONING_MODEL = "gpt-4o"
     DEFAULT_UTILITY_MODEL = "gpt-4o-mini"
+    DEFAULT_MAX_COMPLETION_TOKENS = 4096
 
     def __init__(
         self,
@@ -44,11 +46,11 @@ class OpenAIProvider(AIProvider):
         if system:
             full_messages.insert(0, {"role": "system", "content": system})
 
-        payload: dict = {
+        payload: dict[str, Any] = {
             "model": model,
             "messages": full_messages,
-            "max_tokens": 4096,
         }
+        payload.update(self._token_limit_field(model, self.DEFAULT_MAX_COMPLETION_TOKENS))
         if tools:
             payload["tools"] = tools
         if stream:
@@ -60,11 +62,13 @@ class OpenAIProvider(AIProvider):
     # ---- non-streaming ------------------------------------------------
     async def _non_stream_chat(self, payload: dict) -> dict:
         async with httpx.AsyncClient(timeout=120) as client:
-            resp = await client.post(
-                self.BASE_URL,
-                headers=self._headers,
-                json=payload,
-            )
+            resp = await client.post(self.BASE_URL, headers=self._headers, json=payload)
+            if resp.status_code != 200 and self._should_retry_with_alt_token_field(resp):
+                resp = await client.post(
+                    self.BASE_URL,
+                    headers=self._headers,
+                    json=self._swap_token_limit_field(payload),
+                )
             if resp.status_code != 200:
                 raise HTTPException(
                     status_code=resp.status_code,
@@ -89,20 +93,71 @@ class OpenAIProvider(AIProvider):
             tokens_in = 0
             tokens_out = 0
             model_name = payload["model"]
+            active_payload = payload
 
             async with httpx.AsyncClient(timeout=120) as client:
                 async with client.stream(
                     "POST",
                     self.BASE_URL,
                     headers=self._headers,
-                    json=payload,
+                    json=active_payload,
                 ) as resp:
                     if resp.status_code != 200:
                         body = await resp.aread()
-                        raise HTTPException(
-                            status_code=resp.status_code,
-                            detail=f"OpenAI streaming error: {body.decode()}",
-                        )
+                        body_text = body.decode()
+                        if self._should_retry_with_alt_token_field(resp, body_text):
+                            active_payload = self._swap_token_limit_field(active_payload)
+                            async with client.stream(
+                                "POST",
+                                self.BASE_URL,
+                                headers=self._headers,
+                                json=active_payload,
+                            ) as retry_resp:
+                                if retry_resp.status_code != 200:
+                                    retry_body = await retry_resp.aread()
+                                    raise HTTPException(
+                                        status_code=retry_resp.status_code,
+                                        detail=f"OpenAI streaming error: {retry_body.decode()}",
+                                    )
+                                async for line in retry_resp.aiter_lines():
+                                    if not line.startswith("data: "):
+                                        continue
+                                    raw = line[len("data: "):]
+                                    if raw.strip() == "[DONE]":
+                                        break
+
+                                    try:
+                                        event = json.loads(raw)
+                                    except json.JSONDecodeError:
+                                        continue
+
+                                    model_name = event.get("model", model_name)
+                                    usage = event.get("usage")
+                                    if usage:
+                                        tokens_in = usage.get("prompt_tokens", tokens_in)
+                                        tokens_out = usage.get("completion_tokens", tokens_out)
+
+                                    choices = event.get("choices", [])
+                                    if not choices:
+                                        continue
+
+                                    delta = choices[0].get("delta", {})
+                                    text = delta.get("content", "")
+                                    if text:
+                                        yield {"type": "chunk", "text": text}
+                        else:
+                            raise HTTPException(
+                                status_code=resp.status_code,
+                                detail=f"OpenAI streaming error: {body_text}",
+                            )
+                        # retry branch handled stream output
+                        yield {
+                            "type": "done",
+                            "tokens_in": tokens_in,
+                            "tokens_out": tokens_out,
+                            "model": model_name,
+                        }
+                        return
 
                     async for line in resp.aiter_lines():
                         if not line.startswith("data: "):
@@ -198,20 +253,51 @@ class OpenAIProvider(AIProvider):
     # validate_key
     # ------------------------------------------------------------------
     async def validate_key(self) -> bool:
-        payload = {
+        payload: dict[str, Any] = {
             "model": self.get_utility_model(),
-            "max_tokens": 10,
             "messages": [{"role": "user", "content": "Hi"}],
         }
+        payload.update(self._token_limit_field(self.get_utility_model(), 10))
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
                 self.BASE_URL,
                 headers=self._headers,
                 json=payload,
             )
+            if resp.status_code != 200 and self._should_retry_with_alt_token_field(resp):
+                resp = await client.post(
+                    self.BASE_URL,
+                    headers=self._headers,
+                    json=self._swap_token_limit_field(payload),
+                )
             if resp.status_code != 200:
                 raise HTTPException(
                     status_code=401,
                     detail=f"OpenAI key validation failed: {resp.text}",
                 )
         return True
+
+    def _token_limit_field(self, model: str, limit: int) -> dict[str, int]:
+        m = (model or "").strip().lower()
+        if m.startswith("o") or m.startswith("gpt-5") or m.startswith("gpt-4.1"):
+            return {"max_completion_tokens": limit}
+        return {"max_tokens": limit}
+
+    def _swap_token_limit_field(self, payload: dict[str, Any]) -> dict[str, Any]:
+        swapped = dict(payload)
+        if "max_tokens" in swapped:
+            value = swapped.pop("max_tokens")
+            swapped["max_completion_tokens"] = value
+            return swapped
+        if "max_completion_tokens" in swapped:
+            value = swapped.pop("max_completion_tokens")
+            swapped["max_tokens"] = value
+        return swapped
+
+    def _should_retry_with_alt_token_field(self, resp: httpx.Response, body_text: str | None = None) -> bool:
+        if resp.status_code != 400:
+            return False
+        text = (body_text or resp.text or "").lower()
+        unsupported_param = "unsupported parameter" in text
+        mentions_max_tokens = "max_tokens" in text or "max_completion_tokens" in text
+        return unsupported_param and mentions_max_tokens

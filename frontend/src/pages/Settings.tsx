@@ -11,7 +11,7 @@ import {
   type HydrationUnit,
 } from '../utils/units';
 
-type Tab = 'apikey' | 'profile' | 'models' | 'usage' | 'adaptation' | 'security';
+type Tab = 'apikey' | 'profile' | 'framework' | 'models' | 'usage' | 'adaptation' | 'security';
 type Provider = 'anthropic' | 'openai' | 'google';
 type ModelRole = 'utility' | 'reasoning' | 'deep_thinking';
 
@@ -73,6 +73,38 @@ interface ProfileData {
   family_history: string | null;
   dietary_preferences: string | null;
   health_goals: string | null;
+}
+
+type FrameworkTypeKey = 'dietary' | 'training' | 'metabolic_timing' | 'micronutrient' | 'expert_derived';
+
+interface FrameworkTypeMeta {
+  label: string;
+  classifier_label: string;
+  description?: string;
+  examples?: string[];
+}
+
+interface FrameworkItem {
+  id: number;
+  user_id: number;
+  framework_type: FrameworkTypeKey | string;
+  framework_type_label: string;
+  classifier_label: string;
+  name: string;
+  normalized_name: string;
+  priority_score: number;
+  is_active: boolean;
+  source: string;
+  rationale: string | null;
+  metadata: Record<string, unknown>;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+interface FrameworkResponse {
+  framework_types: Record<string, FrameworkTypeMeta>;
+  grouped: Record<string, FrameworkItem[]>;
+  items: FrameworkItem[];
 }
 
 const PROVIDERS: { value: Provider; label: string; description: string }[] = [
@@ -317,6 +349,13 @@ export default function Settings() {
   const [healthGoalsTags, setHealthGoalsTags] = useState<string[]>([]);
   const [profileSaving, setProfileSaving] = useState(false);
   const [profileMessage, setProfileMessage] = useState('');
+  const [frameworkData, setFrameworkData] = useState<FrameworkResponse | null>(null);
+  const [frameworkLoading, setFrameworkLoading] = useState(false);
+  const [frameworkSaving, setFrameworkSaving] = useState(false);
+  const [frameworkMessage, setFrameworkMessage] = useState('');
+  const [newFrameworkDrafts, setNewFrameworkDrafts] = useState<
+    Record<string, { name: string; priority_score: number; is_active: boolean }>
+  >({});
 
   // Models state
   const [reasoningModel, setReasoningModel] = useState('');
@@ -686,6 +725,100 @@ export default function Settings() {
     }
   }, []);
 
+  const fetchFrameworks = useCallback(async () => {
+    setFrameworkLoading(true);
+    setFrameworkMessage('');
+    try {
+      const data = await apiClient.get<FrameworkResponse>('/api/settings/frameworks');
+      setFrameworkData(data);
+      setNewFrameworkDrafts((prev) => {
+        const next = { ...prev };
+        Object.keys(data.framework_types || {}).forEach((typeKey) => {
+          if (!next[typeKey]) {
+            next[typeKey] = { name: '', priority_score: 60, is_active: true };
+          }
+        });
+        return next;
+      });
+    } catch (e: unknown) {
+      setFrameworkMessage(e instanceof Error ? e.message : 'Failed to load framework settings.');
+    } finally {
+      setFrameworkLoading(false);
+    }
+  }, []);
+
+  const patchFrameworkItem = async (
+    frameworkId: number,
+    payload: Partial<Pick<FrameworkItem, 'priority_score' | 'is_active' | 'name' | 'framework_type' | 'rationale'>>,
+  ) => {
+    setFrameworkSaving(true);
+    setFrameworkMessage('');
+    try {
+      await apiClient.put(`/api/settings/frameworks/${frameworkId}`, payload);
+      await fetchFrameworks();
+    } catch (e: unknown) {
+      setFrameworkMessage(e instanceof Error ? e.message : 'Failed to update framework item.');
+    } finally {
+      setFrameworkSaving(false);
+    }
+  };
+
+  const createFrameworkItem = async (frameworkType: string) => {
+    const draft = newFrameworkDrafts[frameworkType] || { name: '', priority_score: 60, is_active: true };
+    if (!draft.name.trim()) {
+      setFrameworkMessage('Enter a framework name before adding.');
+      return;
+    }
+    setFrameworkSaving(true);
+    setFrameworkMessage('');
+    try {
+      await apiClient.post('/api/settings/frameworks', {
+        framework_type: frameworkType,
+        name: draft.name.trim(),
+        priority_score: Number.isFinite(draft.priority_score) ? draft.priority_score : 60,
+        is_active: Boolean(draft.is_active),
+        source: 'user',
+      });
+      setNewFrameworkDrafts((prev) => ({
+        ...prev,
+        [frameworkType]: { name: '', priority_score: 60, is_active: true },
+      }));
+      await fetchFrameworks();
+      showToast('Framework item added.', 'success');
+    } catch (e: unknown) {
+      setFrameworkMessage(e instanceof Error ? e.message : 'Failed to add framework item.');
+    } finally {
+      setFrameworkSaving(false);
+    }
+  };
+
+  const removeFrameworkItem = async (frameworkId: number) => {
+    setFrameworkSaving(true);
+    setFrameworkMessage('');
+    try {
+      await apiClient.delete(`/api/settings/frameworks/${frameworkId}`);
+      await fetchFrameworks();
+    } catch (e: unknown) {
+      setFrameworkMessage(e instanceof Error ? e.message : 'Failed to remove framework item.');
+    } finally {
+      setFrameworkSaving(false);
+    }
+  };
+
+  const syncFrameworksFromProfile = async () => {
+    setFrameworkSaving(true);
+    setFrameworkMessage('');
+    try {
+      await apiClient.post('/api/settings/frameworks/sync', {});
+      await fetchFrameworks();
+      showToast('Frameworks synced from profile signals.', 'success');
+    } catch (e: unknown) {
+      setFrameworkMessage(e instanceof Error ? e.message : 'Failed to sync frameworks from profile.');
+    } finally {
+      setFrameworkSaving(false);
+    }
+  };
+
   useEffect(() => {
     fetchProfile();
   }, [fetchProfile]);
@@ -726,6 +859,10 @@ export default function Settings() {
   useEffect(() => {
     if (tab === 'usage') fetchUsage();
   }, [tab, fetchUsage]);
+
+  useEffect(() => {
+    if (tab === 'framework') fetchFrameworks();
+  }, [tab, fetchFrameworks]);
 
   useEffect(() => {
     if (tab === 'adaptation') fetchAnalysis();
@@ -835,6 +972,7 @@ export default function Settings() {
         dietary_preferences: tagsToString(dietaryPreferencesTags),
         health_goals: tagsToString(healthGoalsTags),
       });
+      await fetchFrameworks();
       setProfileMessage('Profile saved successfully.');
     } catch (e: unknown) {
       setProfileMessage(e instanceof Error ? e.message : 'Failed to save profile.');
@@ -940,6 +1078,7 @@ export default function Settings() {
       setResetPassword('');
       setResetConfirmation('');
       await fetchProfile();
+      await fetchFrameworks();
       setUsageData(null);
       window.dispatchEvent(new Event('intake:check'));
     } catch (e: unknown) {
@@ -1002,6 +1141,7 @@ export default function Settings() {
       {/* Tabs */}
       <div className="flex gap-2 mb-6">
         <TabButton active={tab === 'profile'} label="Profile" onClick={() => setTab('profile')} />
+        <TabButton active={tab === 'framework'} label="Framework" onClick={() => setTab('framework')} />
         <TabButton active={tab === 'models'} label="Models" onClick={() => setTab('models')} />
         <TabButton active={tab === 'apikey'} label="API Key" onClick={() => setTab('apikey')} />
         <TabButton active={tab === 'usage'} label="Usage" onClick={() => setTab('usage')} />
@@ -1305,6 +1445,187 @@ export default function Settings() {
           >
             {profileSaving ? 'Saving...' : 'Save Profile'}
           </button>
+        </div>
+      )}
+
+      {/* Framework Tab */}
+      {tab === 'framework' && (
+        <div className="bg-slate-800 rounded-xl p-6 border border-slate-700 space-y-5">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h2 className="text-lg font-semibold text-slate-100">Health Optimization Framework</h2>
+              <p className="text-sm text-slate-400 mt-1">
+                Strategy priorities that guide agent recommendations. Keep one active strategy per category to avoid conflicts.
+              </p>
+            </div>
+            <button
+              onClick={syncFrameworksFromProfile}
+              disabled={frameworkSaving}
+              className="px-3 py-1.5 text-sm rounded-lg border border-slate-600 text-slate-200 hover:bg-slate-700 disabled:opacity-60"
+            >
+              Sync From Profile
+            </button>
+          </div>
+
+          {frameworkLoading ? (
+            <p className="text-sm text-slate-400">Loading framework settings...</p>
+          ) : (
+            <div className="space-y-4">
+              {Object.entries(frameworkData?.framework_types || {}).map(([typeKey, meta]) => {
+                const items = frameworkData?.grouped?.[typeKey] || [];
+                const draft = newFrameworkDrafts[typeKey] || { name: '', priority_score: 60, is_active: true };
+                return (
+                  <div key={typeKey} className="rounded-xl border border-slate-700 bg-slate-900/35 p-4 space-y-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <div>
+                        <h3 className="text-sm font-semibold text-slate-100">{meta.label}</h3>
+                        <p className="text-xs text-slate-500">{meta.classifier_label}</p>
+                      </div>
+                      <span className="text-xs text-slate-500 uppercase tracking-wide">{typeKey.replace(/_/g, ' ')}</span>
+                    </div>
+
+                    <details className="rounded-lg border border-slate-700 bg-slate-800/60 px-3 py-2">
+                      <summary className="cursor-pointer select-none text-xs text-slate-300">
+                        Framework description and examples
+                      </summary>
+                      <div className="mt-2 space-y-2">
+                        <p className="text-xs text-slate-400">
+                          {meta.description || 'No description available for this framework type.'}
+                        </p>
+                        <p className="text-xs text-slate-500">
+                          Examples:{' '}
+                          {(meta.examples && meta.examples.length > 0)
+                            ? meta.examples.join(', ')
+                            : 'none'}
+                        </p>
+                      </div>
+                    </details>
+
+                    {items.length === 0 ? (
+                      <p className="text-xs text-slate-500">No items in this category yet.</p>
+                    ) : (
+                      <div className="space-y-2">
+                        {items.map((item) => (
+                          <div key={item.id} className="rounded-lg border border-slate-700 bg-slate-800/80 px-3 py-2">
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <div>
+                                <p className="text-sm text-slate-100">{item.name}</p>
+                                <p className="text-xs text-slate-500">
+                                  Source: {item.source}
+                                  {item.rationale ? ` - ${item.rationale}` : ''}
+                                </p>
+                              </div>
+                              <button
+                                onClick={() => removeFrameworkItem(item.id)}
+                                disabled={frameworkSaving}
+                                className="text-xs px-2 py-1 rounded-md border border-rose-700/60 text-rose-300 hover:bg-rose-900/30 disabled:opacity-60"
+                              >
+                                Remove
+                              </button>
+                            </div>
+                            <div className="mt-2 flex flex-wrap items-center gap-3">
+                              <label className="inline-flex items-center gap-2 text-xs text-slate-300">
+                                <input
+                                  type="checkbox"
+                                  checked={item.is_active}
+                                  onChange={(e) => patchFrameworkItem(item.id, { is_active: e.target.checked })}
+                                  disabled={frameworkSaving}
+                                  className="accent-emerald-500"
+                                />
+                                Active
+                              </label>
+                              <label className="text-xs text-slate-400">
+                                Score
+                                <input
+                                  type="number"
+                                  min={0}
+                                  max={100}
+                                  defaultValue={item.priority_score}
+                                  onBlur={(e) => {
+                                    const parsed = Number(e.target.value);
+                                    if (!Number.isFinite(parsed)) return;
+                                    const clamped = Math.max(0, Math.min(100, Math.round(parsed)));
+                                    e.target.value = String(clamped);
+                                    if (clamped !== item.priority_score) {
+                                      patchFrameworkItem(item.id, { priority_score: clamped });
+                                    }
+                                  }}
+                                  className="ml-2 w-20 bg-slate-700 border border-slate-600 rounded px-2 py-1 text-xs text-slate-100 focus:outline-none focus:border-emerald-500"
+                                />
+                              </label>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    <div className="border-t border-slate-700 pt-3">
+                      <p className="text-xs text-slate-500 mb-2">Add strategy</p>
+                      <div className="flex flex-col sm:flex-row gap-2">
+                        <input
+                          type="text"
+                          value={draft.name}
+                          onChange={(e) => {
+                            const value = e.target.value;
+                            setNewFrameworkDrafts((prev) => ({
+                              ...prev,
+                              [typeKey]: { ...draft, name: value },
+                            }));
+                          }}
+                          placeholder={`e.g. ${(meta.examples && meta.examples.length > 0)
+                            ? meta.examples.slice(0, 3).join(', ')
+                            : 'Add strategy name'}`}
+                          className="flex-1 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-emerald-500"
+                        />
+                        <input
+                          type="number"
+                          min={0}
+                          max={100}
+                          value={draft.priority_score}
+                          onChange={(e) => {
+                            const parsed = Number(e.target.value);
+                            const clamped = Number.isFinite(parsed) ? Math.max(0, Math.min(100, Math.round(parsed))) : 60;
+                            setNewFrameworkDrafts((prev) => ({
+                              ...prev,
+                              [typeKey]: { ...draft, priority_score: clamped },
+                            }));
+                          }}
+                          className="w-24 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-100 focus:outline-none focus:border-emerald-500"
+                        />
+                        <label className="inline-flex items-center gap-2 text-xs text-slate-300 px-2">
+                          <input
+                            type="checkbox"
+                            checked={draft.is_active}
+                            onChange={(e) => {
+                              setNewFrameworkDrafts((prev) => ({
+                                ...prev,
+                                [typeKey]: { ...draft, is_active: e.target.checked },
+                              }));
+                            }}
+                            className="accent-emerald-500"
+                          />
+                          Active
+                        </label>
+                        <button
+                          onClick={() => createFrameworkItem(typeKey)}
+                          disabled={frameworkSaving}
+                          className="px-3 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 text-white text-sm rounded-lg"
+                        >
+                          Add
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {frameworkMessage && (
+            <p className={`text-sm ${frameworkMessage.toLowerCase().includes('failed') || frameworkMessage.toLowerCase().includes('invalid') ? 'text-rose-400' : 'text-slate-300'}`}>
+              {frameworkMessage}
+            </p>
+          )}
         </div>
       )}
 

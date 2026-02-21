@@ -213,7 +213,7 @@ def finish_intake(
     if not session:
         raise HTTPException(status_code=404, detail="No active intake session.")
 
-    patch = finalize_session(session, settings)
+    patch = finalize_session(session, settings, db=db)
     state = session_state(session, settings)
     db.commit()
     return {"status": "completed", "applied_patch": patch, **state}

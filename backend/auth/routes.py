@@ -5,6 +5,7 @@ from auth.models import RegisterRequest, LoginRequest, TokenResponse, UserRespon
 from auth.utils import hash_password, verify_password, create_token, get_current_user, normalize_username
 from db.database import get_db
 from db.models import User, UserSettings, SpecialistConfig
+from services.health_framework_service import ensure_default_frameworks
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -34,6 +35,7 @@ def register(req: RegisterRequest, db: Session = Depends(get_db)):
     # Create default settings and specialist config
     db.add(UserSettings(user_id=user.id))
     db.add(SpecialistConfig(user_id=user.id))
+    ensure_default_frameworks(db, user.id)
     db.commit()
 
     return TokenResponse(access_token=create_token(user.id, role=user.role, token_version=user.token_version))

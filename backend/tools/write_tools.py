@@ -21,6 +21,13 @@ from db.models import (
     SupplementLog,
     VitalsLog,
 )
+from services.health_framework_service import (
+    delete_framework,
+    serialize_framework,
+    sync_frameworks_from_settings,
+    update_framework,
+    upsert_framework,
+)
 from tools.base import ToolContext, ToolExecutionError, ToolSpec, ensure_string
 from tools.health_tools import _normalize_meal_name, _resolve_structured_reference
 from tools.registry import ToolRegistry
@@ -1182,6 +1189,84 @@ def _tool_notification_mark_read(args: dict[str, Any], ctx: ToolContext) -> dict
     return {"notification_id": row.id, "is_read": True}
 
 
+def _tool_framework_upsert(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
+    framework_type = ensure_string(args, "framework_type")
+    name = ensure_string(args, "name")
+    try:
+        row, demoted_ids = upsert_framework(
+            db=ctx.db,
+            user_id=ctx.user.id,
+            framework_type=framework_type,
+            name=name,
+            priority_score=args.get("priority_score"),
+            is_active=args.get("is_active"),
+            source=str(args.get("source", "user")),
+            rationale=str(args.get("rationale", "") or ""),
+            metadata=args.get("metadata") if isinstance(args.get("metadata"), dict) else {},
+            commit=False,
+        )
+    except ValueError as exc:
+        raise ToolExecutionError(str(exc)) from exc
+    return {"item": serialize_framework(row), "demoted_ids": demoted_ids}
+
+
+def _tool_framework_update(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
+    framework_id = args.get("framework_id")
+    try:
+        fid = int(framework_id)
+    except (TypeError, ValueError) as exc:
+        raise ToolExecutionError("`framework_id` must be an integer") from exc
+    if fid <= 0:
+        raise ToolExecutionError("`framework_id` must be positive")
+
+    try:
+        row, demoted_ids = update_framework(
+            db=ctx.db,
+            user_id=ctx.user.id,
+            framework_id=fid,
+            framework_type=args.get("framework_type"),
+            name=args.get("name"),
+            priority_score=args.get("priority_score"),
+            is_active=args.get("is_active"),
+            source=args.get("source"),
+            rationale=args.get("rationale"),
+            metadata=args.get("metadata") if isinstance(args.get("metadata"), dict) else None,
+            commit=False,
+        )
+    except ValueError as exc:
+        raise ToolExecutionError(str(exc)) from exc
+    return {"item": serialize_framework(row), "demoted_ids": demoted_ids}
+
+
+def _tool_framework_delete(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
+    framework_id = args.get("framework_id")
+    source = str(args.get("source", "user") or "user").strip().lower()
+    if source == "adaptive":
+        raise ToolExecutionError("Adaptive updates cannot delete framework items; only deactivate or reprioritize.")
+    try:
+        fid = int(framework_id)
+    except (TypeError, ValueError) as exc:
+        raise ToolExecutionError("`framework_id` must be an integer") from exc
+    if fid <= 0:
+        raise ToolExecutionError("`framework_id` must be positive")
+    try:
+        row = delete_framework(
+            db=ctx.db,
+            user_id=ctx.user.id,
+            framework_id=fid,
+            allow_seed_delete=True,
+            commit=False,
+        )
+    except ValueError as exc:
+        raise ToolExecutionError(str(exc)) from exc
+    return {"deleted_id": row.id}
+
+
+def _tool_framework_sync_from_profile(_: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
+    rows = sync_frameworks_from_settings(ctx.db, ctx.user, source="user", commit=False)
+    return {"count": len(rows), "items": [serialize_framework(row) for row in rows]}
+
+
 def register_write_tools(registry: ToolRegistry) -> None:
     registry.register(
         ToolSpec(
@@ -1241,6 +1326,45 @@ def register_write_tools(registry: ToolRegistry) -> None:
             tags=("goals", "write"),
         ),
         _tool_goal_upsert,
+    )
+    registry.register(
+        ToolSpec(
+            name="framework_upsert",
+            description="Create or upsert a health optimization framework strategy item.",
+            required_fields=("framework_type", "name"),
+            read_only=False,
+            tags=("framework", "write"),
+        ),
+        _tool_framework_upsert,
+    )
+    registry.register(
+        ToolSpec(
+            name="framework_update",
+            description="Update priority/activation/details of a framework item by id.",
+            required_fields=("framework_id",),
+            read_only=False,
+            tags=("framework", "write"),
+        ),
+        _tool_framework_update,
+    )
+    registry.register(
+        ToolSpec(
+            name="framework_delete",
+            description="Delete a framework item by id (adaptive sources cannot delete).",
+            required_fields=("framework_id",),
+            read_only=False,
+            tags=("framework", "write"),
+        ),
+        _tool_framework_delete,
+    )
+    registry.register(
+        ToolSpec(
+            name="framework_sync_from_profile",
+            description="Infer and upsert framework items from current user profile fields.",
+            read_only=False,
+            tags=("framework", "write"),
+        ),
+        _tool_framework_sync_from_profile,
     )
     registry.register(
         ToolSpec(

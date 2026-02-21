@@ -14,6 +14,7 @@ from db.models import (
     FoodLog,
     HydrationLog,
     IntakeSession,
+    HealthOptimizationFramework,
     MealTemplate,
     Message,
     ModelUsageEvent,
@@ -26,6 +27,7 @@ from db.models import (
     UserSettings,
     VitalsLog,
 )
+from services.health_framework_service import ensure_default_frameworks
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +78,7 @@ def reset_user_data_for_user(db, user: User) -> dict[str, int]:
     db.query(ModelUsageEvent).filter(ModelUsageEvent.user_id == user.id).delete(synchronize_session=False)
     db.query(AnalysisProposal).filter(AnalysisProposal.user_id == user.id).delete(synchronize_session=False)
     db.query(AnalysisRun).filter(AnalysisRun.user_id == user.id).delete(synchronize_session=False)
+    db.query(HealthOptimizationFramework).filter(HealthOptimizationFramework.user_id == user.id).delete(synchronize_session=False)
 
     defaults = _anthropic_defaults()
     s = user.settings
@@ -114,6 +117,7 @@ def reset_user_data_for_user(db, user: User) -> dict[str, int]:
     cfg.active_specialist = "auto"
     cfg.specialist_overrides = None
 
+    ensure_default_frameworks(db, user.id)
     db.commit()
 
     removed_files = 0
