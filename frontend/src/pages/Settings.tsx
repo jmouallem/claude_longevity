@@ -284,6 +284,7 @@ function UnitToggle({ value, options, onChange }: { value: string; options: { va
 export default function Settings() {
   const [tab, setTab] = useState<Tab>('profile');
   const [loading, setLoading] = useState(true);
+  const [profileLoaded, setProfileLoaded] = useState(false);
 
   // API Key state
   const [provider, setProvider] = useState<Provider>('anthropic');
@@ -612,6 +613,7 @@ export default function Settings() {
 
   const fetchProfile = useCallback(async () => {
     setLoading(true);
+    setProfileLoaded(false);
     try {
       const p = await apiClient.get<ProfileData>('/api/settings/profile');
       setProvider((p.ai_provider || 'anthropic') as Provider);
@@ -671,6 +673,7 @@ export default function Settings() {
       // ignore
     } finally {
       setLoading(false);
+      setProfileLoaded(true);
     }
   }, []);
 
@@ -688,11 +691,14 @@ export default function Settings() {
   }, [fetchProfile]);
 
   useEffect(() => {
+    if (!profileLoaded) return;
     fetchModels(provider);
-  }, [provider, fetchModels]);
+  }, [provider, fetchModels, profileLoaded]);
 
   useEffect(() => {
     if (!availableModels) return;
+    if (!profileLoaded) return;
+    if (availableModels.provider !== provider) return;
     const reasoningIds = new Set(availableModels.reasoning_models.map((m) => m.id));
     const utilityIds = new Set(availableModels.utility_models.map((m) => m.id));
     const deepIds = new Set(availableModels.deep_thinking_models.map((m) => m.id));
@@ -715,7 +721,7 @@ export default function Settings() {
       }
       setDeepThinkingModel(availableModels.default_deep_thinking);
     }
-  }, [availableModels, reasoningModel, utilityModel, deepThinkingModel, provider, showToast]);
+  }, [availableModels, reasoningModel, utilityModel, deepThinkingModel, provider, showToast, profileLoaded]);
 
   useEffect(() => {
     if (tab === 'usage') fetchUsage();

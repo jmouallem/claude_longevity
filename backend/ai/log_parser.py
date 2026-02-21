@@ -11,6 +11,7 @@ PARSE_FOOD_PROMPT = """Extract structured food logging data from this message. T
 
 Return ONLY valid JSON with this structure:
 {
+    "logged_at": "ISO datetime or HH:MM or null",
     "meal_label": "Meal 1" or "Snack" or "Lunch" etc.,
     "items": [{"name": "food name", "quantity": "amount", "unit": "g/oz/cups/etc"}],
     "calories": estimated total calories (number),
@@ -28,6 +29,7 @@ PARSE_VITALS_PROMPT = """Extract structured vitals data from this message.
 
 Return ONLY valid JSON with this structure:
 {
+    "logged_at": "ISO datetime or HH:MM or null",
     "weight_kg": number or null,
     "bp_systolic": number or null,
     "bp_diastolic": number or null,
@@ -45,6 +47,7 @@ PARSE_EXERCISE_PROMPT = """Extract structured exercise data from this message.
 
 Return ONLY valid JSON with this structure:
 {
+    "logged_at": "ISO datetime or HH:MM or null",
     "exercise_type": "zone2_cardio" | "strength" | "hiit" | "mobility" | "walk" | "run" | "cycling" | "swimming" | "yoga" | "other",
     "duration_minutes": number,
     "details": {"exercises": [], "sets": null, "reps": null, "weight": null, "distance": null, "incline": null, "speed": null},
@@ -58,6 +61,7 @@ PARSE_SUPPLEMENT_PROMPT = """Extract structured supplement/medication intake dat
 
 Return ONLY valid JSON with this structure:
 {
+    "logged_at": "ISO datetime or HH:MM or null",
     "supplements": [{"name": "supplement name", "dose": "amount with unit"}],
     "timing": "morning" | "with_meal" | "evening" | "pre_workout" | "post_workout",
     "notes": "any relevant notes"
@@ -68,6 +72,8 @@ PARSE_FASTING_PROMPT = """Extract fasting intent from this message.
 Return ONLY valid JSON with this structure:
 {
     "action": "start" | "end",
+    "fast_start": "ISO datetime or HH:MM or null",
+    "fast_end": "ISO datetime or HH:MM or null",
     "fast_type": "training_day" | "recovery_day" | "extended" | null,
     "notes": "any relevant notes"
 }"""
@@ -76,17 +82,26 @@ PARSE_SLEEP_PROMPT = """Extract sleep data from this message.
 
 Return ONLY valid JSON with this structure:
 {
+    "action": "start" | "end" | "auto",
     "sleep_start": "HH:MM" or null,
     "sleep_end": "HH:MM" or null,
     "duration_minutes": number or null,
     "quality": "poor" | "fair" | "good" | "excellent" | null,
     "notes": "any relevant notes"
-}"""
+}
+
+Rules:
+- If user indicates going to bed/sleeping now, set action to "start".
+- If user indicates waking up or ending sleep, set action to "end".
+- If no explicit clock time is provided, leave sleep_start/sleep_end as null.
+- If uncertain, use action = "auto".
+"""
 
 PARSE_HYDRATION_PROMPT = """Extract hydration data from this message.
 
 Return ONLY valid JSON with this structure:
 {
+    "logged_at": "ISO datetime or HH:MM or null",
     "amount_ml": number (convert cups to ml: 1 cup = 250ml, 1 glass = 250ml, 1 bottle = 500ml, 1 liter = 1000ml),
     "source": "water" | "coffee" | "tea" | "broth" | "juice" | "other",
     "notes": "any relevant notes"

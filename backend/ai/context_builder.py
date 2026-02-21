@@ -208,6 +208,34 @@ def compute_today_snapshot(db: Session, user: User, target_date: date | None = N
             ex_lines.append(f"  - {e.exercise_type}: {e.duration_minutes or '?'} min")
         sections.append(f"Exercise today:\n" + "\n".join(ex_lines))
 
+    # Sleep (latest entry, prioritizing completed durations)
+    sleep_logs = (
+        db.query(SleepLog)
+        .filter(SleepLog.user_id == user.id)
+        .order_by(SleepLog.created_at.desc())
+        .limit(15)
+        .all()
+    )
+    if sleep_logs:
+        latest_sleep = next(
+            (s for s in sleep_logs if s.duration_minutes is not None or s.sleep_end is not None or s.sleep_start is not None),
+            None,
+        )
+        if latest_sleep:
+            sleep_parts = []
+            if latest_sleep.duration_minutes is not None:
+                hours = int(latest_sleep.duration_minutes // 60)
+                minutes = int(latest_sleep.duration_minutes % 60)
+                sleep_parts.append(f"Duration: {hours}h {minutes}m")
+            if latest_sleep.quality:
+                sleep_parts.append(f"Quality: {latest_sleep.quality}")
+            if latest_sleep.sleep_start:
+                sleep_parts.append(f"Start: {latest_sleep.sleep_start.isoformat()}")
+            if latest_sleep.sleep_end:
+                sleep_parts.append(f"End: {latest_sleep.sleep_end.isoformat()}")
+            if sleep_parts:
+                sections.append("Latest sleep: " + " | ".join(sleep_parts))
+
     # Active fasting
     active_fast = db.query(FastingLog).filter(
         FastingLog.user_id == user.id,

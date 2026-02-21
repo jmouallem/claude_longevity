@@ -1,9 +1,12 @@
+import csv
+import io
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
@@ -14,6 +17,7 @@ from db.models import (
     AdminAuditLog,
     AnalysisProposal,
     AnalysisRun,
+    FeedbackEntry,
     Message,
     ModelUsageEvent,
     User,
@@ -23,6 +27,8 @@ from services.user_reset_service import reset_user_data_for_user
 router = APIRouter(prefix="/admin", tags=["admin"])
 
 _MODELS_FILE = Path(__file__).parent.parent / "data" / "models.json"
+_CSV_DANGEROUS_PREFIXES = ("=", "+", "-", "@", "\t")
+_DELETE_BATCH_SIZE = 500
 
 
 def _pricing() -> dict:
@@ -49,6 +55,14 @@ def _audit(
         success=success,
     )
     db.add(row)
+
+
+def _csv_safe(value: object) -> str:
+    text = "" if value is None else str(value)
+    stripped = text.lstrip()
+    if stripped and stripped[0] in _CSV_DANGEROUS_PREFIXES:
+        return f"'{text}"
+    return text
 
 
 class AdminUserRow(BaseModel):
@@ -97,6 +111,49 @@ class AdminStatsResponse(BaseModel):
     estimated_cost_usd: float
     analysis_runs: int
     analysis_proposals: int
+
+
+class AdminFeedbackRow(BaseModel):
+    id: int
+    feedback_type: str
+    title: str
+    details: Optional[str] = None
+    source: str
+    specialist_id: Optional[str] = None
+    specialist_name: Optional[str] = None
+    created_by_user_id: Optional[int] = None
+    created_by_username: Optional[str] = None
+    created_at: Optional[str] = None
+
+
+def _build_admin_feedback_query(
+    db: Session,
+    feedback_type: Optional[str] = None,
+    source: Optional[str] = None,
+    specialist_id: Optional[str] = None,
+    user_search: Optional[str] = None,
+):
+    q = db.query(FeedbackEntry)
+    feedback_filter = (feedback_type or "").strip().lower()
+    source_filter = (source or "").strip().lower()
+    specialist_filter = (specialist_id or "").strip().lower()
+    user_filter = (user_search or "").strip().lower()
+
+    if feedback_filter:
+        q = q.filter(FeedbackEntry.feedback_type == feedback_filter)
+    if source_filter:
+        q = q.filter(FeedbackEntry.source == source_filter)
+    if specialist_filter:
+        q = q.filter(FeedbackEntry.specialist_id == specialist_filter)
+    if user_filter:
+        needle = f"%{user_filter}%"
+        q = q.join(User, User.id == FeedbackEntry.created_by_user_id).filter(
+            or_(
+                func.lower(User.username).like(needle),
+                func.lower(User.display_name).like(needle),
+            )
+        )
+    return q
 
 
 @router.get("/users", response_model=AdminUserListResponse)
@@ -262,6 +319,224 @@ def admin_delete_user(
     )
     db.commit()
     return AdminDeleteUserResponse(status="ok", removed_files=result["removed_files"])
+
+
+@router.get("/feedback", response_model=list[AdminFeedbackRow])
+def admin_list_feedback(
+    feedback_type: Optional[str] = Query(default=None),
+    source: Optional[str] = Query(default=None),
+    specialist_id: Optional[str] = Query(default=None),
+    user_search: Optional[str] = Query(default=None, alias="user"),
+    limit: int = Query(default=500, ge=1, le=5000),
+    admin_user: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    rows = (
+        _build_admin_feedback_query(
+            db=db,
+            feedback_type=feedback_type,
+            source=source,
+            specialist_id=specialist_id,
+            user_search=user_search,
+        )
+        .order_by(FeedbackEntry.created_at.desc(), FeedbackEntry.id.desc())
+        .limit(limit)
+        .all()
+    )
+    user_ids = {r.created_by_user_id for r in rows if r.created_by_user_id}
+    username_by_id: dict[int, str] = {}
+    if user_ids:
+        users = db.query(User.id, User.username).filter(User.id.in_(list(user_ids))).all()
+        username_by_id = {u.id: u.username for u in users}
+
+    _audit(
+        db=db,
+        admin_user_id=admin_user.id,
+        action="admin.feedback.list",
+        details={
+            "feedback_type": feedback_type or "",
+            "source": source or "",
+            "specialist_id": specialist_id or "",
+            "user": user_search or "",
+            "limit": limit,
+            "returned": len(rows),
+        },
+        success=True,
+    )
+    db.commit()
+    return [
+        AdminFeedbackRow(
+            id=r.id,
+            feedback_type=r.feedback_type,
+            title=r.title,
+            details=r.details,
+            source=r.source,
+            specialist_id=r.specialist_id,
+            specialist_name=r.specialist_name,
+            created_by_user_id=r.created_by_user_id,
+            created_by_username=username_by_id.get(r.created_by_user_id or -1),
+            created_at=r.created_at.isoformat() if r.created_at else None,
+        )
+        for r in rows
+    ]
+
+
+@router.get("/feedback/export")
+def admin_export_feedback_csv(
+    feedback_type: Optional[str] = Query(default=None),
+    source: Optional[str] = Query(default=None),
+    specialist_id: Optional[str] = Query(default=None),
+    user_search: Optional[str] = Query(default=None, alias="user"),
+    admin_user: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    rows = (
+        _build_admin_feedback_query(
+            db=db,
+            feedback_type=feedback_type,
+            source=source,
+            specialist_id=specialist_id,
+            user_search=user_search,
+        )
+        .order_by(FeedbackEntry.created_at.desc(), FeedbackEntry.id.desc())
+        .all()
+    )
+
+    user_ids = {r.created_by_user_id for r in rows if r.created_by_user_id}
+    username_by_id: dict[int, str] = {}
+    if user_ids:
+        users = db.query(User.id, User.username).filter(User.id.in_(list(user_ids))).all()
+        username_by_id = {u.id: u.username for u in users}
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(
+        [
+            "id",
+            "created_at",
+            "feedback_type",
+            "title",
+            "details",
+            "source",
+            "specialist_id",
+            "specialist_name",
+            "created_by_user_id",
+            "created_by_username",
+        ]
+    )
+    for r in rows:
+        writer.writerow(
+            [
+                r.id,
+                r.created_at.isoformat() if r.created_at else "",
+                _csv_safe(r.feedback_type),
+                _csv_safe(r.title),
+                _csv_safe(r.details or ""),
+                _csv_safe(r.source),
+                _csv_safe(r.specialist_id or ""),
+                _csv_safe(r.specialist_name or ""),
+                r.created_by_user_id or "",
+                _csv_safe(username_by_id.get(r.created_by_user_id or -1, "")),
+            ]
+        )
+
+    _audit(
+        db=db,
+        admin_user_id=admin_user.id,
+        action="admin.feedback.export_csv",
+        details={
+            "feedback_type": feedback_type or "",
+            "source": source or "",
+            "specialist_id": specialist_id or "",
+            "user": user_search or "",
+            "rows": len(rows),
+        },
+        success=True,
+    )
+    db.commit()
+
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="feedback_export.csv"'},
+    )
+
+
+@router.delete("/feedback/{feedback_id}")
+def admin_delete_feedback_entry(
+    feedback_id: int,
+    admin_user: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    row = db.query(FeedbackEntry).filter(FeedbackEntry.id == feedback_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Feedback entry not found")
+    snapshot = {
+        "feedback_id": row.id,
+        "feedback_type": row.feedback_type,
+        "source": row.source,
+        "created_by_user_id": row.created_by_user_id,
+    }
+    db.delete(row)
+    _audit(
+        db=db,
+        admin_user_id=admin_user.id,
+        target_user_id=snapshot["created_by_user_id"],
+        action="admin.feedback.delete",
+        details=snapshot,
+        success=True,
+    )
+    db.commit()
+    return {"status": "ok"}
+
+
+@router.delete("/feedback")
+def admin_clear_feedback(
+    feedback_type: Optional[str] = Query(default=None),
+    source: Optional[str] = Query(default=None),
+    specialist_id: Optional[str] = Query(default=None),
+    user_search: Optional[str] = Query(default=None, alias="user"),
+    admin_user: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    user_filter = (user_search or "").strip()
+    q = _build_admin_feedback_query(
+        db=db,
+        feedback_type=feedback_type,
+        source=source,
+        specialist_id=specialist_id,
+        user_search=user_filter,
+    )
+    count = 0
+    if user_filter:
+        # Join-based filters cannot use query.delete() in SQLAlchemy.
+        while True:
+            batch_ids = [row.id for row in q.with_entities(FeedbackEntry.id).limit(_DELETE_BATCH_SIZE).all()]
+            if not batch_ids:
+                break
+            db.query(FeedbackEntry).filter(FeedbackEntry.id.in_(batch_ids)).delete(synchronize_session=False)
+            db.flush()
+            count += len(batch_ids)
+    else:
+        count = q.count()
+        if count:
+            q.delete(synchronize_session=False)
+
+    _audit(
+        db=db,
+        admin_user_id=admin_user.id,
+        action="admin.feedback.clear",
+        details={
+            "feedback_type": feedback_type or "",
+            "source": source or "",
+            "specialist_id": specialist_id or "",
+            "user": user_filter,
+            "deleted": int(count),
+        },
+        success=True,
+    )
+    db.commit()
+    return {"status": "ok", "deleted": int(count)}
 
 
 @router.get("/stats/overview", response_model=AdminStatsResponse)

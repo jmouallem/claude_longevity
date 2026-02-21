@@ -23,7 +23,7 @@ from services.specialists_config import get_enabled_specialist_ids, get_effectiv
 from tools import tool_registry
 from tools.base import ToolContext, ToolExecutionError
 from utils.encryption import decrypt_api_key
-from utils.datetime_utils import today_utc
+from utils.time_inference import infer_event_datetime, infer_target_date_iso
 from utils.units import kg_to_lb
 
 logger = logging.getLogger(__name__)
@@ -61,6 +61,7 @@ TIME_QUERY_PATTERNS = (
     r"\bwhat(?:'s| is)?\s+today(?:'s)?\s+date\b",
     r"\bcurrent\s+date\b",
 )
+CHAT_VERBOSITY_MODES = {"normal", "summarized", "straight"}
 MENU_SAVE_KEYWORDS = (
     "save to menu",
     "save this to menu",
@@ -94,6 +95,23 @@ MENU_CONFIRM_WORDS = {
     "save it",
     "add it",
 }
+SLEEP_START_CUES = (
+    "heading to bed",
+    "going to bed",
+    "go to bed",
+    "bed now",
+    "sleep now",
+    "going to sleep",
+    "good night",
+)
+SLEEP_END_CUES = (
+    "woke up",
+    "wake up",
+    "waking up",
+    "awake now",
+    "got up",
+    "morning",
+)
 GI_SYMPTOM_KEYWORDS = {
     "bloating": {"bloating", "bloated"},
     "gas": {"gas", "gassy", "flatulence"},
@@ -378,8 +396,147 @@ def _format_time_context(result: dict) -> str:
     return "\n".join(lines)
 
 
+def _normalize_chat_verbosity(value: str | None) -> str:
+    if not value:
+        return "normal"
+    norm = str(value).strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "summary": "summarized",
+        "summarize": "summarized",
+        "straight_to_the_point": "straight",
+        "to_the_point": "straight",
+        "direct": "straight",
+    }
+    norm = aliases.get(norm, norm)
+    if norm not in CHAT_VERBOSITY_MODES:
+        return "normal"
+    return norm
+
+
+def _verbosity_style_context(mode: str) -> str:
+    if mode == "summarized":
+        return (
+            "## Response Style Override\n"
+            "Use summarized mode for this reply.\n"
+            "- Be concise and easy to scan.\n"
+            "- Prefer short bullets or very short sections.\n"
+            "- Keep only the most relevant context and actions.\n"
+            "- Avoid motivational filler or long explanations.\n"
+            "- If this is a logging response, still include totals/macros when applicable.\n"
+            "- End with one concrete next step."
+        )
+    if mode == "straight":
+        return (
+            "## Response Style Override\n"
+            "Use straight-to-the-point mode for this reply.\n"
+            "- Be direct, minimal, and actionable.\n"
+            "- Default to 2-4 short lines.\n"
+            "- No long preambles, no motivational filler, no emoji.\n"
+            "- Avoid numbered lists unless the user explicitly asks for a list.\n"
+            "- Keep explanation to essentials unless safety requires more detail.\n"
+            "- If this is a logging response, still include totals/macros when applicable.\n"
+            "- End with one concrete next step."
+        )
+    return ""
+
+
 def _normalize_whitespace(text: str) -> str:
     return " ".join(text.lower().split())
+
+
+def _extract_clock_time_token(text: str) -> str | None:
+    match = re.search(r"\b(\d{1,2}:\d{2}\s?(?:am|pm)?)\b", text, flags=re.IGNORECASE)
+    if not match:
+        return None
+    return match.group(1).strip()
+
+
+def _normalize_sleep_payload(message_text: str, payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return payload
+
+    text = _normalize_whitespace(message_text)
+    action = str(payload.get("action", "")).strip().lower()
+    if action not in {"start", "end", "auto"}:
+        has_start_cue = any(cue in text for cue in SLEEP_START_CUES)
+        has_end_cue = any(cue in text for cue in SLEEP_END_CUES)
+        if has_end_cue and not has_start_cue:
+            action = "end"
+        elif has_start_cue and not has_end_cue:
+            action = "start"
+        else:
+            action = "auto"
+    payload["action"] = action
+
+    time_token = _extract_clock_time_token(text)
+    if action == "start" and not payload.get("sleep_start") and time_token:
+        payload["sleep_start"] = time_token
+    elif action == "end" and not payload.get("sleep_end") and time_token:
+        payload["sleep_end"] = time_token
+
+    return payload
+
+
+def _apply_inferred_event_time(
+    category: str,
+    message_text: str,
+    payload: dict[str, Any] | None,
+    reference_utc: datetime | None,
+    timezone_name: str | None,
+) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return payload
+
+    inference = infer_event_datetime(message_text, reference_utc, timezone_name)
+    inferred = inference.event_utc.isoformat()
+
+    def _attach_confidence_metadata() -> None:
+        payload["_inferred_time_confidence"] = inference.confidence
+        payload["_inferred_time_reason"] = inference.reason
+
+    if category in {"log_food", "log_vitals", "log_exercise", "log_hydration", "log_supplement"}:
+        if not payload.get("logged_at") and not payload.get("event_time"):
+            payload["logged_at"] = inferred
+            _attach_confidence_metadata()
+        return payload
+
+    if category == "log_fasting":
+        action = str(payload.get("action", "")).strip().lower()
+        if action == "start" and not payload.get("fast_start"):
+            payload["fast_start"] = inferred
+            _attach_confidence_metadata()
+        elif action == "end" and not payload.get("fast_end"):
+            payload["fast_end"] = inferred
+            _attach_confidence_metadata()
+        return payload
+
+    if category == "log_sleep":
+        action = str(payload.get("action", "")).strip().lower()
+        if action == "start" and not payload.get("sleep_start"):
+            payload["sleep_start"] = inferred
+            _attach_confidence_metadata()
+        elif action == "end" and not payload.get("sleep_end"):
+            payload["sleep_end"] = inferred
+            _attach_confidence_metadata()
+        return payload
+
+    return payload
+
+
+def _build_time_inference_context(payload: dict[str, Any] | None) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    confidence = str(payload.get("_inferred_time_confidence", "")).strip().lower()
+    if confidence != "low":
+        return ""
+    reason = str(payload.get("_inferred_time_reason", "")).strip() or "unknown"
+    return (
+        "## Time Confirmation\n"
+        "Event time was inferred with low confidence.\n"
+        f"- Inference reason: {reason}\n"
+        "- In your reply, include one short confirmation question about the logged time/date.\n"
+        "- Keep the log as recorded unless the user corrects it."
+    )
 
 
 def _last_assistant_message(db: Session, user: User) -> Message | None:
@@ -951,6 +1108,7 @@ async def _mark_checklist_completed_for_meds(
     provider,
     user: User,
     combined_input: str,
+    reference_utc: datetime | None = None,
 ):
     """Mark today's medication checklist items completed based on message intent."""
     settings = user.settings
@@ -985,7 +1143,7 @@ async def _mark_checklist_completed_for_meds(
             resolved = tool_registry.execute(
                 "medication_resolve_reference",
                 {"query": combined_input},
-                ToolContext(db=db, user=user, specialist_id="orchestrator"),
+                ToolContext(db=db, user=user, specialist_id="orchestrator", reference_utc=reference_utc),
             )
             for match in resolved.get("matches", []):
                 name = str(match.get("name", "")).strip()
@@ -1043,16 +1201,22 @@ async def _mark_checklist_completed_for_meds(
     if not targets:
         return
 
+    target_date = infer_target_date_iso(
+        combined_input,
+        reference_utc,
+        getattr(getattr(user, "settings", None), "timezone", None),
+    )
+
     try:
         tool_registry.execute(
             "checklist_mark_taken",
             {
                 "item_type": "medication",
                 "names": targets,
-                "target_date": today_utc().isoformat(),
+                "target_date": target_date,
                 "completed": True,
             },
-            ToolContext(db=db, user=user, specialist_id="orchestrator"),
+            ToolContext(db=db, user=user, specialist_id="orchestrator", reference_utc=reference_utc),
         )
     except Exception as e:
         logger.warning(f"Checklist medication write tool failed: {e}")
@@ -1063,6 +1227,7 @@ async def _mark_checklist_completed_for_supplements(
     provider,
     user: User,
     combined_input: str,
+    reference_utc: datetime | None = None,
 ):
     """Mark today's supplement checklist items completed based on intake intent."""
     settings = user.settings
@@ -1098,7 +1263,7 @@ async def _mark_checklist_completed_for_supplements(
             resolved = tool_registry.execute(
                 "supplement_resolve_reference",
                 {"query": combined_input},
-                ToolContext(db=db, user=user, specialist_id="orchestrator"),
+                ToolContext(db=db, user=user, specialist_id="orchestrator", reference_utc=reference_utc),
             )
             for match in resolved.get("matches", []):
                 name = str(match.get("name", "")).strip()
@@ -1155,16 +1320,22 @@ async def _mark_checklist_completed_for_supplements(
     if not targets:
         return
 
+    target_date = infer_target_date_iso(
+        combined_input,
+        reference_utc,
+        getattr(getattr(user, "settings", None), "timezone", None),
+    )
+
     try:
         tool_registry.execute(
             "checklist_mark_taken",
             {
                 "item_type": "supplement",
                 "names": targets,
-                "target_date": today_utc().isoformat(),
+                "target_date": target_date,
                 "completed": True,
             },
-            ToolContext(db=db, user=user, specialist_id="orchestrator"),
+            ToolContext(db=db, user=user, specialist_id="orchestrator", reference_utc=reference_utc),
         )
     except Exception as e:
         logger.warning(f"Checklist supplement write tool failed: {e}")
@@ -1220,6 +1391,7 @@ async def _apply_profile_updates(
     message_text: str,
     combined_input: str,
     category: str,
+    reference_utc: datetime | None = None,
 ):
     """Auto-sync profile meds/supplements/conditions from message context."""
     settings = user.settings
@@ -1293,11 +1465,17 @@ async def _apply_profile_updates(
             cleaned = cleanup_structured_list(settings.supplements)
             if cleaned != settings.supplements:
                 settings.supplements = cleaned
-            await _mark_checklist_completed_for_meds(db, provider, user, combined_input)
-            await _mark_checklist_completed_for_supplements(db, provider, user, combined_input)
+            await _mark_checklist_completed_for_meds(db, provider, user, combined_input, reference_utc=reference_utc)
+            await _mark_checklist_completed_for_supplements(
+                db,
+                provider,
+                user,
+                combined_input,
+                reference_utc=reference_utc,
+            )
             return
 
-        tool_ctx = ToolContext(db=db, user=user, specialist_id="orchestrator")
+        tool_ctx = ToolContext(db=db, user=user, specialist_id="orchestrator", reference_utc=reference_utc)
 
         # Standardized structured upserts via tools
         if med_items:
@@ -1330,29 +1508,48 @@ async def _apply_profile_updates(
             except Exception as e:
                 logger.warning(f"Profile patch tool failed: {e}")
 
-        await _mark_checklist_completed_for_meds(db, provider, user, combined_input)
-        await _mark_checklist_completed_for_supplements(db, provider, user, combined_input)
+        await _mark_checklist_completed_for_meds(db, provider, user, combined_input, reference_utc=reference_utc)
+        await _mark_checklist_completed_for_supplements(
+            db,
+            provider,
+            user,
+            combined_input,
+            reference_utc=reference_utc,
+        )
     except Exception as e:
         logger.warning(f"Profile auto-sync extraction failed: {e}")
         # Even if profile extraction fails, still try checklist updates from intent text.
         try:
-            await _mark_checklist_completed_for_meds(db, provider, user, combined_input)
+            await _mark_checklist_completed_for_meds(db, provider, user, combined_input, reference_utc=reference_utc)
         except Exception as med_err:
             logger.warning(f"Checklist medication fallback failed: {med_err}")
         try:
-            await _mark_checklist_completed_for_supplements(db, provider, user, combined_input)
+            await _mark_checklist_completed_for_supplements(
+                db,
+                provider,
+                user,
+                combined_input,
+                reference_utc=reference_utc,
+            )
         except Exception as supp_err:
             logger.warning(f"Checklist supplement fallback failed: {supp_err}")
 
 
-async def save_structured_log(db: Session, user: User, category: str, data: dict):
+async def save_structured_log(
+    db: Session,
+    user: User,
+    category: str,
+    data: dict,
+    reference_utc: datetime | None = None,
+):
     """Save parsed structured data to the appropriate log table."""
-    tool_ctx = ToolContext(db=db, user=user, specialist_id="orchestrator")
+    tool_ctx = ToolContext(db=db, user=user, specialist_id="orchestrator", reference_utc=reference_utc)
     out: dict[str, Any] | None = None
     if category == "log_food" and data:
         out = tool_registry.execute(
             "food_log_write",
             {
+                "logged_at": data.get("logged_at") or data.get("event_time"),
                 "meal_label": data.get("meal_label"),
                 "items": data.get("items", []),
                 "calories": data.get("calories"),
@@ -1372,6 +1569,7 @@ async def save_structured_log(db: Session, user: User, category: str, data: dict
         out = tool_registry.execute(
             "vitals_log_write",
             {
+                "logged_at": data.get("logged_at") or data.get("event_time"),
                 "weight_kg": data.get("weight_kg"),
                 "bp_systolic": data.get("bp_systolic"),
                 "bp_diastolic": data.get("bp_diastolic"),
@@ -1388,6 +1586,7 @@ async def save_structured_log(db: Session, user: User, category: str, data: dict
         out = tool_registry.execute(
             "exercise_log_write",
             {
+                "logged_at": data.get("logged_at") or data.get("event_time"),
                 "exercise_type": data.get("exercise_type", "other"),
                 "duration_minutes": data.get("duration_minutes"),
                 "details": data.get("details"),
@@ -1403,6 +1602,7 @@ async def save_structured_log(db: Session, user: User, category: str, data: dict
         out = tool_registry.execute(
             "supplement_log_write",
             {
+                "logged_at": data.get("logged_at") or data.get("event_time"),
                 "supplements": data.get("supplements", []),
                 "timing": data.get("timing"),
                 "notes": data.get("notes"),
@@ -1415,6 +1615,8 @@ async def save_structured_log(db: Session, user: User, category: str, data: dict
             "fasting_manage",
             {
                 "action": data.get("action", "start"),
+                "fast_start": data.get("fast_start"),
+                "fast_end": data.get("fast_end"),
                 "fast_type": data.get("fast_type"),
                 "notes": data.get("notes"),
             },
@@ -1425,6 +1627,9 @@ async def save_structured_log(db: Session, user: User, category: str, data: dict
         out = tool_registry.execute(
             "sleep_log_write",
             {
+                "action": data.get("action"),
+                "sleep_start": data.get("sleep_start"),
+                "sleep_end": data.get("sleep_end"),
                 "duration_minutes": data.get("duration_minutes"),
                 "quality": data.get("quality"),
                 "notes": data.get("notes"),
@@ -1436,6 +1641,7 @@ async def save_structured_log(db: Session, user: User, category: str, data: dict
         out = tool_registry.execute(
             "hydration_log_write",
             {
+                "logged_at": data.get("logged_at") or data.get("event_time"),
                 "amount_ml": data.get("amount_ml", 250),
                 "source": data.get("source", "water"),
                 "notes": data.get("notes"),
@@ -1452,20 +1658,22 @@ async def process_chat(
     user: User,
     message: str,
     image_bytes: bytes | None = None,
+    verbosity: str | None = None,
 ) -> AsyncGenerator[dict, None]:
     """Main chat orchestration. Yields streaming response chunks."""
-    settings = user.settings
-    if not settings or not settings.api_key_encrypted:
+    user_settings = user.settings
+    if not user_settings or not user_settings.api_key_encrypted:
         yield {"type": "error", "text": "Please configure your API key in Settings before chatting."}
         return
 
-    api_key = decrypt_api_key(settings.api_key_encrypted)
+    api_key = decrypt_api_key(user_settings.api_key_encrypted)
+    message_received_utc = datetime.now(timezone.utc)
     provider = get_provider(
-        settings.ai_provider,
+        user_settings.ai_provider,
         api_key,
-        reasoning_model=settings.reasoning_model,
-        utility_model=settings.utility_model,
-        deep_thinking_model=getattr(settings, "deep_thinking_model", None),
+        reasoning_model=user_settings.reasoning_model,
+        utility_model=user_settings.utility_model,
+        deep_thinking_model=getattr(user_settings, "deep_thinking_model", None),
     )
 
     # 1. If image attached, analyze it first
@@ -1511,8 +1719,20 @@ async def process_chat(
     # This keeps dashboard meds/supplement checkboxes in sync even if
     # category extraction/profile extraction misses on a turn.
     try:
-        await _mark_checklist_completed_for_meds(db, provider, user, combined_input)
-        await _mark_checklist_completed_for_supplements(db, provider, user, combined_input)
+        await _mark_checklist_completed_for_meds(
+            db,
+            provider,
+            user,
+            combined_input,
+            reference_utc=message_received_utc,
+        )
+        await _mark_checklist_completed_for_supplements(
+            db,
+            provider,
+            user,
+            combined_input,
+            reference_utc=message_received_utc,
+        )
         db.commit()
     except Exception as e:
         logger.warning(f"Checklist sync from chat failed: {e}")
@@ -1534,11 +1754,11 @@ async def process_chat(
     saved_log_out: dict[str, Any] | None = None
     if category.startswith("log_") and not menu_command_only:
         user_profile = ""
-        if settings.current_weight_kg:
-            if settings.weight_unit == "lb":
-                user_profile = f"Weight: {kg_to_lb(settings.current_weight_kg):.1f}lb"
+        if user_settings.current_weight_kg:
+            if user_settings.weight_unit == "lb":
+                user_profile = f"Weight: {kg_to_lb(user_settings.current_weight_kg):.1f}lb"
             else:
-                user_profile = f"Weight: {settings.current_weight_kg}kg"
+                user_profile = f"Weight: {user_settings.current_weight_kg}kg"
         parsed_log_data = await parse_log_data(
             provider,
             combined_input,
@@ -1547,9 +1767,24 @@ async def process_chat(
             db=db,
             user_id=user.id,
         )
+        if category == "log_sleep":
+            parsed_log_data = _normalize_sleep_payload(message, parsed_log_data)
+        parsed_log_data = _apply_inferred_event_time(
+            category=category,
+            message_text=message,
+            payload=parsed_log_data,
+            reference_utc=message_received_utc,
+            timezone_name=getattr(user_settings, "timezone", None),
+        )
         if parsed_log_data:
             try:
-                saved_log_out = await save_structured_log(db, user, category, parsed_log_data)
+                saved_log_out = await save_structured_log(
+                    db,
+                    user,
+                    category,
+                    parsed_log_data,
+                    reference_utc=message_received_utc,
+                )
             except ToolExecutionError as e:
                 logger.warning(f"Structured log tool write failed ({category}): {e}")
             except Exception as e:
@@ -1593,6 +1828,7 @@ async def process_chat(
             message_text=message,
             combined_input=combined_input,
             category=category,
+            reference_utc=message_received_utc,
         )
         db.commit()
 
@@ -1626,6 +1862,8 @@ async def process_chat(
             logger.warning(f"time_now tool failed: {e}")
 
     menu_context = _format_menu_context(menu_action_result, menu_followup_hint)
+    verbosity_context = _verbosity_style_context(_normalize_chat_verbosity(verbosity))
+    time_inference_context = _build_time_inference_context(parsed_log_data)
 
     # 3e. Trigger due longitudinal analysis windows in background to keep chat latency low.
     if settings.ENABLE_LONGITUDINAL_ANALYSIS and settings.ANALYSIS_AUTORUN_ON_CHAT:
@@ -1642,6 +1880,10 @@ async def process_chat(
         system_context = f"{system_context}\n\n{time_context}"
     if menu_context:
         system_context = f"{system_context}\n\n{menu_context}"
+    if time_inference_context:
+        system_context = f"{system_context}\n\n{time_inference_context}"
+    if verbosity_context:
+        system_context = f"{system_context}\n\n{verbosity_context}"
 
     # 5. Get recent messages for conversation history
     recent = get_recent_messages(db, user, limit=20)
@@ -1653,6 +1895,7 @@ async def process_chat(
         role="user",
         content=message,
         has_image=bool(image_bytes),
+        created_at=message_received_utc,
     )
     db.add(user_msg)
     db.commit()

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, timezone
+from datetime import datetime, time, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -24,7 +24,6 @@ from db.models import (
 from tools.base import ToolContext, ToolExecutionError, ToolSpec, ensure_string
 from tools.health_tools import _normalize_meal_name, _resolve_structured_reference
 from tools.registry import ToolRegistry
-from utils.datetime_utils import today_utc
 from utils.med_utils import (
     StructuredItem,
     cleanup_structured_list,
@@ -131,6 +130,82 @@ def _to_int(value: Any, field: str) -> int | None:
         return int(value)
     except (TypeError, ValueError) as exc:
         raise ToolExecutionError(f"`{field}` must be an integer") from exc
+
+
+def _get_user_timezone(ctx: ToolContext) -> ZoneInfo:
+    tz_name = str(getattr(getattr(ctx.user, "settings", None), "timezone", "") or "UTC").strip() or "UTC"
+    try:
+        return ZoneInfo(tz_name)
+    except ZoneInfoNotFoundError:
+        return ZoneInfo("UTC")
+
+
+def _context_now_utc(ctx: ToolContext) -> datetime:
+    reference = getattr(ctx, "reference_utc", None)
+    if isinstance(reference, datetime):
+        if reference.tzinfo is None:
+            return reference.replace(tzinfo=timezone.utc)
+        return reference.astimezone(timezone.utc)
+    return datetime.now(timezone.utc)
+
+
+def _resolve_logged_at(args: dict[str, Any], ctx: ToolContext) -> datetime:
+    default_dt = _context_now_utc(ctx)
+    raw_value = args.get("logged_at")
+    if raw_value is None:
+        raw_value = args.get("event_time")
+    return _resolve_local_datetime(ctx, raw_value, default_dt)
+
+
+def _default_target_date(ctx: ToolContext) -> str:
+    user_tz = _get_user_timezone(ctx)
+    return _context_now_utc(ctx).astimezone(user_tz).date().isoformat()
+
+
+def _parse_clock_time(value: Any) -> time | None:
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if not text:
+        return None
+
+    patterns = ("%H:%M", "%H:%M:%S", "%I:%M%p", "%I:%M %p", "%I%p", "%I %p")
+    normalized = text.replace(".", "").upper()
+    for fmt in patterns:
+        try:
+            return datetime.strptime(normalized, fmt).time()
+        except ValueError:
+            continue
+    return None
+
+
+def _resolve_local_datetime(ctx: ToolContext, value: Any, default_dt_utc: datetime) -> datetime:
+    if value is None:
+        return default_dt_utc
+    text = str(value).strip()
+    if not text:
+        return default_dt_utc
+
+    # First try full datetime input.
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=_get_user_timezone(ctx)).astimezone(timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except ValueError:
+        pass
+
+    clock = _parse_clock_time(text)
+    if clock is None:
+        return default_dt_utc
+
+    user_tz = _get_user_timezone(ctx)
+    local_now = default_dt_utc.astimezone(user_tz)
+    candidate_local = datetime.combine(local_now.date(), clock, user_tz)
+    # If parsed time appears too far in the future, assume it referred to the previous day.
+    if candidate_local > local_now + timedelta(hours=2):
+        candidate_local = candidate_local - timedelta(days=1)
+    return candidate_local.astimezone(timezone.utc)
 
 
 def _tool_profile_patch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
@@ -357,7 +432,7 @@ def _tool_checklist_mark_taken(args: dict[str, Any], ctx: ToolContext) -> dict[s
 
     target_date = args.get("target_date")
     if target_date is None:
-        target_date = today_utc().isoformat()
+        target_date = _default_target_date(ctx)
     else:
         target_date = str(target_date).strip()
         if not re.match(r"^\d{4}-\d{2}-\d{2}$", target_date):
@@ -408,7 +483,7 @@ def _tool_vitals_log_write(args: dict[str, Any], ctx: ToolContext) -> dict[str, 
 
     row = VitalsLog(
         user_id=ctx.user.id,
-        logged_at=datetime.now(timezone.utc),
+        logged_at=_resolve_logged_at(args, ctx),
         **payload,
     )
     ctx.db.add(row)
@@ -424,7 +499,7 @@ def _tool_exercise_log_write(args: dict[str, Any], ctx: ToolContext) -> dict[str
     exercise_type = ensure_string(args, "exercise_type")
     row = ExerciseLog(
         user_id=ctx.user.id,
-        logged_at=datetime.now(timezone.utc),
+        logged_at=_resolve_logged_at(args, ctx),
         exercise_type=exercise_type,
         duration_minutes=_to_int(args.get("duration_minutes"), "duration_minutes"),
         details=_json_dumps(args["details"]) if isinstance(args.get("details"), (dict, list)) else args.get("details"),
@@ -481,6 +556,7 @@ def _tool_food_log_write(args: dict[str, Any], ctx: ToolContext) -> dict[str, An
                 break
 
     if resolved_template is not None and bool(args.get("use_template_if_found", True)):
+        logged_at = _resolve_logged_at(args, ctx)
         servings = _to_float(args.get("servings", 1.0), "servings") or 1.0
         if servings <= 0:
             raise ToolExecutionError("`servings` must be > 0")
@@ -491,7 +567,7 @@ def _tool_food_log_write(args: dict[str, Any], ctx: ToolContext) -> dict[str, An
         row = FoodLog(
             user_id=ctx.user.id,
             meal_template_id=resolved_template.id,
-            logged_at=datetime.now(timezone.utc),
+            logged_at=logged_at,
             meal_label=meal_label or resolved_template.name,
             items=_json_dumps(template_items),
             calories=(resolved_template.calories * mult) if resolved_template.calories is not None else None,
@@ -508,7 +584,7 @@ def _tool_food_log_write(args: dict[str, Any], ctx: ToolContext) -> dict[str, An
 
     row = FoodLog(
         user_id=ctx.user.id,
-        logged_at=datetime.now(timezone.utc),
+        logged_at=_resolve_logged_at(args, ctx),
         meal_label=meal_label,
         items=_json_dumps(items),
         calories=_coerce_float_field(args, "calories"),
@@ -530,7 +606,7 @@ def _tool_hydration_log_write(args: dict[str, Any], ctx: ToolContext) -> dict[st
         raise ToolExecutionError("`amount_ml` must be > 0")
     row = HydrationLog(
         user_id=ctx.user.id,
-        logged_at=datetime.now(timezone.utc),
+        logged_at=_resolve_logged_at(args, ctx),
         amount_ml=amount_ml,
         source=str(args.get("source", "water")).strip() or "water",
         notes=str(args.get("notes", "")).strip() or None,
@@ -555,7 +631,7 @@ def _tool_supplement_log_write(args: dict[str, Any], ctx: ToolContext) -> dict[s
         raise ToolExecutionError("`supplements` must resolve to a list")
     row = SupplementLog(
         user_id=ctx.user.id,
-        logged_at=datetime.now(timezone.utc),
+        logged_at=_resolve_logged_at(args, ctx),
         supplements=_json_dumps(supplements),
         timing=str(args.get("timing", "")).strip() or None,
         notes=str(args.get("notes", "")).strip() or None,
@@ -566,29 +642,118 @@ def _tool_supplement_log_write(args: dict[str, Any], ctx: ToolContext) -> dict[s
 
 
 def _tool_sleep_log_write(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
-    row = SleepLog(
-        user_id=ctx.user.id,
-        sleep_start=None,
-        sleep_end=None,
-        duration_minutes=_to_int(args.get("duration_minutes"), "duration_minutes"),
-        quality=str(args.get("quality", "")).strip() or None,
-        notes=str(args.get("notes", "")).strip() or None,
+    now = _context_now_utc(ctx)
+    action = str(args.get("action", "auto")).strip().lower() or "auto"
+    duration = _to_int(args.get("duration_minutes"), "duration_minutes")
+    quality = str(args.get("quality", "")).strip() or None
+    notes = str(args.get("notes", "")).strip() or None
+
+    if action not in {"auto", "start", "end"}:
+        raise ToolExecutionError("`action` must be auto, start, or end")
+
+    start_dt = _resolve_local_datetime(ctx, args.get("sleep_start"), now)
+    end_dt = _resolve_local_datetime(ctx, args.get("sleep_end"), now)
+
+    if action == "auto":
+        if args.get("sleep_start") and not args.get("sleep_end"):
+            action = "start"
+        elif args.get("sleep_end"):
+            action = "end"
+        elif duration is not None:
+            action = "duration_only"
+        else:
+            active = (
+                ctx.db.query(SleepLog)
+                .filter(
+                    SleepLog.user_id == ctx.user.id,
+                    SleepLog.sleep_start.isnot(None),
+                    SleepLog.sleep_end.is_(None),
+                )
+                .order_by(SleepLog.created_at.desc())
+                .first()
+            )
+            action = "end" if active else "start"
+
+    if action == "start":
+        row = SleepLog(
+            user_id=ctx.user.id,
+            sleep_start=start_dt,
+            sleep_end=None,
+            duration_minutes=None,
+            quality=quality,
+            notes=notes,
+        )
+        ctx.db.add(row)
+        ctx.db.flush()
+        return {"status": "started", "sleep_log_id": row.id, "sleep_start": row.sleep_start.isoformat()}
+
+    if action == "duration_only":
+        row = SleepLog(
+            user_id=ctx.user.id,
+            sleep_start=None,
+            sleep_end=None,
+            duration_minutes=duration,
+            quality=quality,
+            notes=notes,
+        )
+        ctx.db.add(row)
+        ctx.db.flush()
+        return {"status": "created", "sleep_log_id": row.id, "duration_minutes": row.duration_minutes}
+
+    # action == "end"
+    active = (
+        ctx.db.query(SleepLog)
+        .filter(
+            SleepLog.user_id == ctx.user.id,
+            SleepLog.sleep_start.isnot(None),
+            SleepLog.sleep_end.is_(None),
+        )
+        .order_by(SleepLog.created_at.desc())
+        .first()
     )
-    ctx.db.add(row)
+    if not active:
+        row = SleepLog(
+            user_id=ctx.user.id,
+            sleep_start=None,
+            sleep_end=end_dt,
+            duration_minutes=duration,
+            quality=quality,
+            notes=notes,
+        )
+        ctx.db.add(row)
+        ctx.db.flush()
+        return {"status": "created", "sleep_log_id": row.id, "sleep_end": row.sleep_end.isoformat() if row.sleep_end else None}
+
+    if end_dt < active.sleep_start:
+        end_dt = end_dt + timedelta(days=1)
+    computed_minutes = int((end_dt - active.sleep_start).total_seconds() / 60)
+    active.sleep_end = end_dt
+    active.duration_minutes = computed_minutes if computed_minutes >= 0 else duration
+    if quality:
+        active.quality = quality
+    if notes:
+        active.notes = notes
     ctx.db.flush()
-    return {"sleep_log_id": row.id}
+    return {
+        "status": "ended",
+        "sleep_log_id": active.id,
+        "sleep_start": active.sleep_start.isoformat() if active.sleep_start else None,
+        "sleep_end": active.sleep_end.isoformat() if active.sleep_end else None,
+        "duration_minutes": active.duration_minutes,
+    }
 
 
 def _tool_fasting_manage(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
     action = str(args.get("action", "")).strip().lower()
-    now = datetime.now(timezone.utc)
+    now = _context_now_utc(ctx)
     if action not in {"start", "end"}:
         raise ToolExecutionError("`action` must be `start` or `end`")
 
     if action == "start":
+        fast_start = _resolve_local_datetime(ctx, args.get("fast_start"), now)
         row = FastingLog(
             user_id=ctx.user.id,
-            fast_start=now,
+            fast_start=fast_start,
             fast_type=str(args.get("fast_type", "")).strip() or None,
             notes=str(args.get("notes", "")).strip() or None,
         )
@@ -604,9 +769,9 @@ def _tool_fasting_manage(args: dict[str, Any], ctx: ToolContext) -> dict[str, An
     )
     if not active:
         return {"status": "no_active_fast"}
-    active.fast_end = now
+    active.fast_end = _resolve_local_datetime(ctx, args.get("fast_end"), now)
     start = active.fast_start if active.fast_start.tzinfo else active.fast_start.replace(tzinfo=timezone.utc)
-    active.duration_minutes = int((now - start).total_seconds() / 60)
+    active.duration_minutes = int((active.fast_end - start).total_seconds() / 60)
     return {"status": "ended", "fasting_log_id": active.id, "duration_minutes": active.duration_minutes}
 
 
@@ -786,7 +951,7 @@ def _tool_meal_log_from_template(args: dict[str, Any], ctx: ToolContext) -> dict
     log = FoodLog(
         user_id=ctx.user.id,
         meal_template_id=row.id,
-        logged_at=datetime.now(timezone.utc),
+        logged_at=_resolve_logged_at(args, ctx),
         meal_label=str(args.get("meal_label", row.name)).strip() or row.name,
         items=_json_dumps(meal_items),
         calories=(row.calories * mult) if row.calories is not None else None,

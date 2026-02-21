@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Callable
 
 from sqlalchemy.orm import Session
@@ -20,6 +21,7 @@ class ToolContext:
     db: Session
     user: User
     specialist_id: str = "orchestrator"
+    reference_utc: datetime | None = None
 
 
 @dataclass(frozen=True)

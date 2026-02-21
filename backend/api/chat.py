@@ -17,6 +17,7 @@ router = APIRouter(prefix="/chat", tags=["chat"], dependencies=[Depends(require_
 async def chat(
     message: str = Form(...),
     image: UploadFile | None = File(None),
+    verbosity: str | None = Form(None),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -47,7 +48,7 @@ async def chat(
         stream_db = SessionLocal()
         try:
             stream_user = stream_db.query(User).get(user_id)
-            async for chunk in process_chat(stream_db, stream_user, message, image_bytes):
+            async for chunk in process_chat(stream_db, stream_user, message, image_bytes, verbosity):
                 yield f"data: {json.dumps(chunk)}\n\n"
         finally:
             stream_db.close()

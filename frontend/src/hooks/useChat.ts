@@ -1,6 +1,8 @@
 import { useState, useCallback, useRef } from 'react';
 import { apiClient } from '../api/client';
 
+export type ChatVerbosity = 'normal' | 'summarized' | 'straight';
+
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
@@ -59,7 +61,7 @@ export function useChat() {
     }
   }, []);
 
-  const sendMessage = useCallback(async (text: string, imageFile?: File) => {
+  const sendMessage = useCallback(async (text: string, imageFile?: File, verbosity: ChatVerbosity = 'normal') => {
     if (!text.trim() && !imageFile) return;
 
     setError(null);
@@ -103,6 +105,7 @@ export function useChat() {
       if (imageFile) {
         formData.append('image', imageFile);
       }
+      formData.append('verbosity', verbosity);
 
       const token = apiClient.getToken();
       const controller = new AbortController();

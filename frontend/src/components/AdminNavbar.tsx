@@ -5,6 +5,7 @@ import { useAuthStore } from '../stores/authStore';
 const adminNavLinks = [
   { to: '/admin/stats', label: 'Stats' },
   { to: '/admin/users', label: 'Users' },
+  { to: '/admin/feedback', label: 'Feedback' },
   { to: '/admin/security', label: 'Security' },
 ];
 

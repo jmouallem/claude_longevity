@@ -16,6 +16,7 @@ import Menu from './pages/Menu';
 import AdminStats from './pages/AdminStats';
 import AdminUsers from './pages/AdminUsers';
 import AdminSecurity from './pages/AdminSecurity';
+import AdminFeedback from './pages/AdminFeedback';
 import { apiClient } from './api/client';
 import { useAuthStore } from './stores/authStore';
 
@@ -63,6 +64,7 @@ function AuthenticatedLayout() {
         <Routes>
           <Route path="admin/stats" element={forcePasswordChange ? <Navigate to="/admin/security" replace /> : <AdminStats />} />
           <Route path="admin/users" element={forcePasswordChange ? <Navigate to="/admin/security" replace /> : <AdminUsers />} />
+          <Route path="admin/feedback" element={forcePasswordChange ? <Navigate to="/admin/security" replace /> : <AdminFeedback />} />
           <Route path="admin/security" element={<AdminSecurity />} />
           <Route path="*" element={<Navigate to={forcePasswordChange ? "/admin/security" : "/admin/stats"} replace />} />
         </Routes>

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { useChat } from '../hooks/useChat';
+import { useChat, type ChatVerbosity } from '../hooks/useChat';
 import ChatMessage from '../components/ChatMessage';
 import ChatInput from '../components/ChatInput';
 
@@ -34,8 +34,14 @@ function fileToDataUrl(file: File): Promise<string> {
 export default function Chat() {
   const { messages, loading, error, sendMessage, loadHistory } = useChat();
   const [selectedImage, setSelectedImage] = useState<File | null>(null);
+  const [verbosity, setVerbosity] = useState<ChatVerbosity>('normal');
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const hasLoadedRef = useRef(false);
+  const verbosityOptions: Array<{ key: ChatVerbosity; label: string; hover: string }> = [
+    { key: 'normal', label: 'Normal', hover: 'Balanced detail' },
+    { key: 'summarized', label: 'Summarized', hover: 'Key points and actions' },
+    { key: 'straight', label: 'Straight', hover: 'Direct and brief' },
+  ];
 
   // Load history on mount
   useEffect(() => {
@@ -84,7 +90,7 @@ export default function Chat() {
   };
 
   const handleSend = (text: string, imageFile?: File) => {
-    sendMessage(text, imageFile);
+    sendMessage(text, imageFile, verbosity);
     setSelectedImage(null);
     sessionStorage.removeItem(PENDING_IMAGE_KEY);
     sessionStorage.removeItem(PENDING_IMAGE_NAME_KEY);
@@ -95,6 +101,30 @@ export default function Chat() {
 
   return (
     <div className="flex flex-col h-[calc(100vh-3.5rem)]">
+      <div className="px-4 py-2 border-b border-slate-700/70 bg-slate-900/50">
+        <div className="max-w-3xl mx-auto flex items-center justify-center gap-2">
+          <div className="inline-flex rounded-lg border border-slate-700 bg-slate-800/70 p-0.5">
+            {verbosityOptions.map((option) => (
+              <button
+                key={option.key}
+                type="button"
+                onClick={() => setVerbosity(option.key)}
+                title={option.hover}
+                aria-label={`${option.label}: ${option.hover}`}
+                className={[
+                  'px-2.5 py-1 text-xs rounded-md transition-colors',
+                  verbosity === option.key
+                    ? 'bg-emerald-600 text-white'
+                    : 'text-slate-300 hover:bg-slate-700/70 hover:text-slate-100',
+                ].join(' ')}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
       {/* Messages area */}
       <div className="flex-1 overflow-y-auto px-4 py-4">
         {messages.length === 0 && !loading ? (
