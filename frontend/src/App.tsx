@@ -9,6 +9,7 @@ import History from './pages/History';
 import Settings from './pages/Settings';
 import Specialists from './pages/Specialists';
 import Feedback from './pages/Feedback';
+import Menu from './pages/Menu';
 
 // Layout with Navbar for authenticated pages
 function AuthenticatedLayout() {
@@ -19,6 +20,7 @@ function AuthenticatedLayout() {
         <Route path="chat" element={<Chat />} />
         <Route path="dashboard" element={<Dashboard />} />
         <Route path="history" element={<History />} />
+        <Route path="menu" element={<Menu />} />
         <Route path="feedback" element={<Feedback />} />
         <Route path="settings" element={<Settings />} />
         <Route path="specialists" element={<Specialists />} />

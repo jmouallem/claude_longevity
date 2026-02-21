@@ -11,7 +11,7 @@ import {
   type HydrationUnit,
 } from '../utils/units';
 
-type Tab = 'apikey' | 'profile' | 'models' | 'usage';
+type Tab = 'apikey' | 'profile' | 'models' | 'usage' | 'security';
 type Provider = 'anthropic' | 'openai' | 'google';
 
 interface ProfileData {
@@ -308,6 +308,17 @@ export default function Settings() {
   const [usageLoading, setUsageLoading] = useState(false);
   const [resetConfirm, setResetConfirm] = useState(false);
 
+  // Security state
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmNewPassword, setConfirmNewPassword] = useState('');
+  const [passwordSaving, setPasswordSaving] = useState(false);
+  const [passwordMessage, setPasswordMessage] = useState('');
+  const [resetPassword, setResetPassword] = useState('');
+  const [resetConfirmation, setResetConfirmation] = useState('');
+  const [resetDataSaving, setResetDataSaving] = useState(false);
+  const [resetDataMessage, setResetDataMessage] = useState('');
+
   const fetchUsage = useCallback(async () => {
     setUsageLoading(true);
     try {
@@ -537,6 +548,19 @@ export default function Settings() {
   }, [provider, fetchModels]);
 
   useEffect(() => {
+    if (!availableModels) return;
+    const reasoningIds = new Set(availableModels.reasoning_models.map((m) => m.id));
+    const utilityIds = new Set(availableModels.utility_models.map((m) => m.id));
+
+    if (!reasoningIds.has(reasoningModel)) {
+      setReasoningModel(availableModels.default_reasoning);
+    }
+    if (!utilityIds.has(utilityModel)) {
+      setUtilityModel(availableModels.default_utility);
+    }
+  }, [availableModels, reasoningModel, utilityModel]);
+
+  useEffect(() => {
     if (tab === 'usage') fetchUsage();
   }, [tab, fetchUsage]);
 
@@ -649,6 +673,67 @@ export default function Settings() {
     }
   };
 
+  const changePassword = async () => {
+    setPasswordMessage('');
+    if (!currentPassword || !newPassword) {
+      setPasswordMessage('Current and new password are required.');
+      return;
+    }
+    if (newPassword.length < 8) {
+      setPasswordMessage('New password must be at least 8 characters.');
+      return;
+    }
+    if (newPassword !== confirmNewPassword) {
+      setPasswordMessage('New password and confirmation do not match.');
+      return;
+    }
+
+    setPasswordSaving(true);
+    try {
+      await apiClient.post('/api/settings/password/change', {
+        current_password: currentPassword,
+        new_password: newPassword,
+      });
+      setPasswordMessage('Password updated successfully.');
+      setCurrentPassword('');
+      setNewPassword('');
+      setConfirmNewPassword('');
+    } catch (e: unknown) {
+      setPasswordMessage(e instanceof Error ? e.message : 'Failed to change password.');
+    } finally {
+      setPasswordSaving(false);
+    }
+  };
+
+  const resetUserData = async () => {
+    setResetDataMessage('');
+    if (!resetPassword) {
+      setResetDataMessage('Current password is required for reset.');
+      return;
+    }
+    if (resetConfirmation.trim().toUpperCase() !== 'RESET') {
+      setResetDataMessage('Type RESET to confirm data reset.');
+      return;
+    }
+
+    setResetDataSaving(true);
+    try {
+      await apiClient.post('/api/settings/reset-data', {
+        current_password: resetPassword,
+        confirmation: resetConfirmation,
+      });
+      setResetDataMessage('User data reset successfully. Password unchanged.');
+      setResetPassword('');
+      setResetConfirmation('');
+      await fetchProfile();
+      setUsageData(null);
+    } catch (e: unknown) {
+      setResetDataMessage(e instanceof Error ? e.message : 'Failed to reset data.');
+    } finally {
+      setResetDataSaving(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-[calc(100vh-3.5rem)]">
@@ -679,6 +764,7 @@ export default function Settings() {
         <TabButton active={tab === 'models'} label="Models" onClick={() => setTab('models')} />
         <TabButton active={tab === 'apikey'} label="API Key" onClick={() => setTab('apikey')} />
         <TabButton active={tab === 'usage'} label="Usage" onClick={() => setTab('usage')} />
+        <TabButton active={tab === 'security'} label="Security" onClick={() => setTab('security')} />
       </div>
 
       {/* API Key Tab */}
@@ -1120,6 +1206,103 @@ export default function Settings() {
           <p className="text-xs text-slate-500">
             Costs are estimates based on pricing in <code className="text-slate-400">data/models.json</code>. Edit that file to update rates.
           </p>
+        </div>
+      )}
+
+      {tab === 'security' && (
+        <div className="space-y-5">
+          <div className="bg-slate-800 rounded-xl p-6 border border-slate-700 space-y-4">
+            <h2 className="text-lg font-semibold text-slate-100">Change Password</h2>
+            <p className="text-sm text-slate-400">Update your account password.</p>
+
+            <div className="space-y-3">
+              <div>
+                <label className="block text-sm text-slate-400 mb-1">Current Password</label>
+                <input
+                  type="password"
+                  value={currentPassword}
+                  onChange={(e) => setCurrentPassword(e.target.value)}
+                  className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-slate-100 text-sm focus:outline-none focus:border-emerald-500"
+                />
+              </div>
+              <div>
+                <label className="block text-sm text-slate-400 mb-1">New Password</label>
+                <input
+                  type="password"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-slate-100 text-sm focus:outline-none focus:border-emerald-500"
+                />
+              </div>
+              <div>
+                <label className="block text-sm text-slate-400 mb-1">Confirm New Password</label>
+                <input
+                  type="password"
+                  value={confirmNewPassword}
+                  onChange={(e) => setConfirmNewPassword(e.target.value)}
+                  className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-slate-100 text-sm focus:outline-none focus:border-emerald-500"
+                />
+              </div>
+            </div>
+
+            {passwordMessage && (
+              <p className={`text-sm ${passwordMessage.includes('success') ? 'text-emerald-400' : 'text-rose-400'}`}>
+                {passwordMessage}
+              </p>
+            )}
+
+            <button
+              onClick={changePassword}
+              disabled={passwordSaving}
+              className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium rounded-lg transition-colors"
+            >
+              {passwordSaving ? 'Updating...' : 'Change Password'}
+            </button>
+          </div>
+
+          <div className="bg-slate-800 rounded-xl p-6 border border-rose-700/40 space-y-4">
+            <h2 className="text-lg font-semibold text-rose-300">Reset User Data</h2>
+            <p className="text-sm text-slate-400">
+              This removes your profile data, logs, chat history, summaries, checklists, templates, notifications, and feedback entries.
+              Your account and password are kept.
+            </p>
+
+            <div className="space-y-3">
+              <div>
+                <label className="block text-sm text-slate-400 mb-1">Current Password</label>
+                <input
+                  type="password"
+                  value={resetPassword}
+                  onChange={(e) => setResetPassword(e.target.value)}
+                  className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-slate-100 text-sm focus:outline-none focus:border-rose-500"
+                />
+              </div>
+              <div>
+                <label className="block text-sm text-slate-400 mb-1">Type RESET to confirm</label>
+                <input
+                  type="text"
+                  value={resetConfirmation}
+                  onChange={(e) => setResetConfirmation(e.target.value)}
+                  placeholder="RESET"
+                  className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-slate-100 text-sm focus:outline-none focus:border-rose-500"
+                />
+              </div>
+            </div>
+
+            {resetDataMessage && (
+              <p className={`text-sm ${resetDataMessage.includes('successfully') ? 'text-emerald-400' : 'text-rose-400'}`}>
+                {resetDataMessage}
+              </p>
+            )}
+
+            <button
+              onClick={resetUserData}
+              disabled={resetDataSaving}
+              className="px-4 py-2 bg-rose-600 hover:bg-rose-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium rounded-lg transition-colors"
+            >
+              {resetDataSaving ? 'Resetting...' : 'Reset My Data'}
+            </button>
+          </div>
         </div>
       )}
     </div>

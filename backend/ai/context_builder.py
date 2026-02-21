@@ -259,6 +259,17 @@ def build_context(db: Session, user: User, specialist: str = "orchestrator") -> 
         if specialist_prompt:
             sections.append(specialist_prompt)
 
+    # 2b. User identity
+    display_name = (user.display_name or "").strip()
+    username = (user.username or "").strip()
+    if display_name or username:
+        identity_lines = []
+        if display_name:
+            identity_lines.append(f"- Name: {display_name}")
+        if username and username != display_name:
+            identity_lines.append(f"- Username: {username}")
+        sections.append(f"## User Identity\n" + "\n".join(identity_lines))
+
     # 3. User profile
     profile = format_user_profile(user.settings)
     sections.append(f"## Current User Profile\n{profile}")

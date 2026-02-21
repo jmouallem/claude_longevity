@@ -22,6 +22,8 @@ class User(Base):
     messages = relationship("Message", back_populates="user", cascade="all, delete-orphan")
     intake_sessions = relationship("IntakeSession", back_populates="user", cascade="all, delete-orphan")
     meal_templates = relationship("MealTemplate", back_populates="user", cascade="all, delete-orphan")
+    meal_template_versions = relationship("MealTemplateVersion", back_populates="user", cascade="all, delete-orphan")
+    meal_response_signals = relationship("MealResponseSignal", back_populates="user", cascade="all, delete-orphan")
     notifications = relationship("Notification", back_populates="user", cascade="all, delete-orphan")
 
 
@@ -88,11 +90,25 @@ class Message(Base):
     user = relationship("User", back_populates="messages")
 
 
+class ModelUsageEvent(Base):
+    __tablename__ = "model_usage_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    usage_type = Column(Text, nullable=False, default="utility")  # utility | reasoning | other
+    operation = Column(Text)  # intent_classification, log_parse, summary_generate, etc.
+    model_used = Column(Text, nullable=False)
+    tokens_in = Column(Integer, default=0)
+    tokens_out = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class FoodLog(Base):
     __tablename__ = "food_log"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    meal_template_id = Column(Integer, ForeignKey("meal_templates.id"), nullable=True)
     logged_at = Column(DateTime, nullable=False)
     meal_label = Column(Text)
     items = Column(Text, nullable=False)  # JSON array
@@ -104,6 +120,9 @@ class FoodLog(Base):
     sodium_mg = Column(Float)
     notes = Column(Text)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+    meal_template = relationship("MealTemplate", back_populates="food_logs")
+    meal_response_signals = relationship("MealResponseSignal", back_populates="food_log", cascade="all, delete-orphan")
 
 
 class MealTemplate(Base):
@@ -123,10 +142,49 @@ class MealTemplate(Base):
     fiber_g = Column(Float)
     sodium_mg = Column(Float)
     notes = Column(Text)
+    is_archived = Column(Boolean, default=False)
+    archived_at = Column(DateTime)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     user = relationship("User", back_populates="meal_templates")
+    food_logs = relationship("FoodLog", back_populates="meal_template")
+    versions = relationship("MealTemplateVersion", back_populates="meal_template", cascade="all, delete-orphan")
+    response_signals = relationship("MealResponseSignal", back_populates="meal_template", cascade="all, delete-orphan")
+
+
+class MealTemplateVersion(Base):
+    __tablename__ = "meal_template_versions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    meal_template_id = Column(Integer, ForeignKey("meal_templates.id"), nullable=False)
+    version_number = Column(Integer, nullable=False)
+    snapshot_json = Column(Text, nullable=False)
+    change_note = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    user = relationship("User", back_populates="meal_template_versions")
+    meal_template = relationship("MealTemplate", back_populates="versions")
+
+
+class MealResponseSignal(Base):
+    __tablename__ = "meal_response_signals"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    meal_template_id = Column(Integer, ForeignKey("meal_templates.id"), nullable=True)
+    food_log_id = Column(Integer, ForeignKey("food_log.id"), nullable=True)
+    source_message_id = Column(Integer, ForeignKey("messages.id"), nullable=True)
+    energy_level = Column(Integer)  # -2 very low, -1 low, 0 neutral, 1 good, 2 high
+    gi_symptom_tags = Column(Text)  # JSON array
+    gi_severity = Column(Integer)  # 1-5 scale
+    notes = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    user = relationship("User", back_populates="meal_response_signals")
+    meal_template = relationship("MealTemplate", back_populates="response_signals")
+    food_log = relationship("FoodLog", back_populates="meal_response_signals")
 
 
 class Notification(Base):
@@ -324,13 +382,22 @@ class IntakeSession(Base):
 
 # Indexes
 Index("idx_messages_user_date", Message.user_id, Message.created_at)
+Index("idx_model_usage_user_date", ModelUsageEvent.user_id, ModelUsageEvent.created_at)
+Index("idx_model_usage_model", ModelUsageEvent.model_used)
 Index("idx_meal_templates_user", MealTemplate.user_id)
 Index("idx_meal_templates_user_name", MealTemplate.user_id, MealTemplate.normalized_name, unique=True)
+Index("idx_meal_templates_user_archived", MealTemplate.user_id, MealTemplate.is_archived)
+Index("idx_meal_template_versions_template", MealTemplateVersion.meal_template_id, MealTemplateVersion.version_number)
+Index("idx_meal_template_versions_user", MealTemplateVersion.user_id, MealTemplateVersion.created_at)
+Index("idx_meal_response_signals_user_date", MealResponseSignal.user_id, MealResponseSignal.created_at)
+Index("idx_meal_response_signals_template", MealResponseSignal.meal_template_id, MealResponseSignal.created_at)
+Index("idx_meal_response_signals_food_log", MealResponseSignal.food_log_id)
 Index("idx_notifications_user_date", Notification.user_id, Notification.created_at)
 Index("idx_notifications_user_read", Notification.user_id, Notification.is_read)
 Index("idx_web_search_query_key", WebSearchCache.query_key, unique=True)
 Index("idx_web_search_fetched_at", WebSearchCache.fetched_at)
 Index("idx_food_log_user_date", FoodLog.user_id, FoodLog.logged_at)
+Index("idx_food_log_template", FoodLog.meal_template_id, FoodLog.logged_at)
 Index("idx_vitals_log_user_date", VitalsLog.user_id, VitalsLog.logged_at)
 Index("idx_exercise_log_user_date", ExerciseLog.user_id, ExerciseLog.logged_at)
 Index("idx_exercise_plan_user_date", ExercisePlan.user_id, ExercisePlan.target_date)

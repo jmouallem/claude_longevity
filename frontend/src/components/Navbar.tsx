@@ -6,6 +6,7 @@ const primaryNavLinks = [
   { to: '/chat', label: 'Chat' },
   { to: '/dashboard', label: 'Dashboard' },
   { to: '/history', label: 'History' },
+  { to: '/menu', label: 'Menu' },
   { to: '/specialists', label: 'Specialists' },
   { to: '/settings', label: 'Settings' },
 ];

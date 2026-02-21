@@ -43,6 +43,8 @@ When platform tools are available, follow this contract:
    - For latest/current/recent/evidence questions, use web-search tools when enabled and cite sources/URLs.
 6. **Keep data normalized and specific.**
    - Preserve brand names, doses, timing, and units; avoid vague placeholders.
+7. **Use the time tool for clock/date requests.**
+   - When a user asks for the current time/date/day, use tool-provided time context and answer directly.
 
 ## Response Format for Logging
 When a user logs food, vitals, exercise, or supplements, respond with:

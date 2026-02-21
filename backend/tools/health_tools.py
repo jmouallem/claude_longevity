@@ -4,8 +4,9 @@ import json
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from sqlalchemy import func
 
-from db.models import MealTemplate, Message
+from db.models import FoodLog, MealResponseSignal, MealTemplate, MealTemplateVersion, Message, VitalsLog
 from tools.base import ToolContext, ToolExecutionError, ToolSpec, ensure_string
 from tools.registry import ToolRegistry
 from utils.med_utils import parse_structured_list
@@ -178,16 +179,15 @@ def _normalize_meal_name(text: str) -> str:
     return t
 
 
-def _meal_templates_for_user(ctx: ToolContext) -> list[MealTemplate]:
-    return (
-        ctx.db.query(MealTemplate)
-        .filter(MealTemplate.user_id == ctx.user.id)
-        .order_by(MealTemplate.updated_at.desc(), MealTemplate.created_at.desc())
-        .all()
-    )
+def _meal_templates_for_user(ctx: ToolContext, include_archived: bool = False) -> list[MealTemplate]:
+    query = ctx.db.query(MealTemplate).filter(MealTemplate.user_id == ctx.user.id)
+    if not include_archived:
+        query = query.filter(MealTemplate.is_archived.is_(False))
+    return query.order_by(MealTemplate.updated_at.desc(), MealTemplate.created_at.desc()).all()
 
 
 def _serialize_template(row: MealTemplate) -> dict[str, Any]:
+    version_count = len(row.versions) if row.versions is not None else 0
     return {
         "id": row.id,
         "name": row.name,
@@ -204,8 +204,282 @@ def _serialize_template(row: MealTemplate) -> dict[str, Any]:
             "sodium_mg": row.sodium_mg,
         },
         "notes": row.notes,
+        "is_archived": bool(row.is_archived),
+        "archived_at": row.archived_at.isoformat() if row.archived_at else None,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+        "version_count": version_count,
     }
+
+
+def _resolve_template_from_args(
+    args: dict[str, Any],
+    ctx: ToolContext,
+    include_archived: bool = True,
+) -> MealTemplate:
+    template_id = args.get("template_id")
+    template_name = args.get("template_name")
+    query = ctx.db.query(MealTemplate).filter(MealTemplate.user_id == ctx.user.id)
+    if not include_archived:
+        query = query.filter(MealTemplate.is_archived.is_(False))
+
+    if template_id is not None:
+        try:
+            tid = int(template_id)
+        except (TypeError, ValueError) as exc:
+            raise ToolExecutionError("`template_id` must be an integer") from exc
+        row = query.filter(MealTemplate.id == tid).first()
+    elif template_name:
+        row = query.filter(MealTemplate.normalized_name == _normalize_meal_name(str(template_name))).first()
+    else:
+        raise ToolExecutionError("Provide `template_id` or `template_name`")
+
+    if not row:
+        raise ToolExecutionError("Meal template not found")
+    return row
+
+
+def _template_usage_stats(ctx: ToolContext, template_id: int) -> dict[str, Any]:
+    usage_count = (
+        ctx.db.query(func.count(FoodLog.id))
+        .filter(FoodLog.user_id == ctx.user.id, FoodLog.meal_template_id == template_id)
+        .scalar()
+    ) or 0
+    last_logged_at = (
+        ctx.db.query(FoodLog.logged_at)
+        .filter(FoodLog.user_id == ctx.user.id, FoodLog.meal_template_id == template_id)
+        .order_by(FoodLog.logged_at.desc())
+        .scalar()
+    )
+    return {
+        "usage_count": int(usage_count),
+        "last_logged_at": last_logged_at.isoformat() if last_logged_at else None,
+    }
+
+
+def _batch_template_usage_stats(ctx: ToolContext, template_ids: list[int]) -> dict[int, dict[str, Any]]:
+    if not template_ids:
+        return {}
+    rows = (
+        ctx.db.query(
+            FoodLog.meal_template_id,
+            func.count(FoodLog.id),
+            func.max(FoodLog.logged_at),
+        )
+        .filter(
+            FoodLog.user_id == ctx.user.id,
+            FoodLog.meal_template_id.in_(template_ids),
+        )
+        .group_by(FoodLog.meal_template_id)
+        .all()
+    )
+    out: dict[int, dict[str, Any]] = {}
+    for template_id, count_val, last_logged in rows:
+        if template_id is None:
+            continue
+        out[int(template_id)] = {
+            "usage_count": int(count_val or 0),
+            "last_logged_at": last_logged.isoformat() if last_logged else None,
+        }
+    return out
+
+
+def _tool_meal_template_get(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
+    row = _resolve_template_from_args(args, ctx, include_archived=True)
+    payload = _serialize_template(row)
+    payload.update(_template_usage_stats(ctx, row.id))
+    return {"template": payload}
+
+
+def _tool_meal_template_versions(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
+    row = _resolve_template_from_args(args, ctx, include_archived=True)
+    versions = (
+        ctx.db.query(MealTemplateVersion)
+        .filter(MealTemplateVersion.user_id == ctx.user.id, MealTemplateVersion.meal_template_id == row.id)
+        .order_by(MealTemplateVersion.version_number.desc())
+        .all()
+    )
+    items: list[dict[str, Any]] = []
+    for version in versions:
+        try:
+            snapshot = json.loads(version.snapshot_json) if version.snapshot_json else {}
+        except json.JSONDecodeError:
+            snapshot = {}
+        items.append(
+            {
+                "id": version.id,
+                "version_number": version.version_number,
+                "change_note": version.change_note,
+                "snapshot": snapshot,
+                "created_at": version.created_at.isoformat() if version.created_at else None,
+            }
+        )
+    return {"template_id": row.id, "name": row.name, "versions": items}
+
+
+def _weight_daily_map(ctx: ToolContext, since: datetime) -> dict[str, float]:
+    vitals_rows = (
+        ctx.db.query(VitalsLog)
+        .filter(
+            VitalsLog.user_id == ctx.user.id,
+            VitalsLog.logged_at >= since,
+            VitalsLog.weight_kg.isnot(None),
+        )
+        .order_by(VitalsLog.logged_at.asc())
+        .all()
+    )
+    bucket: dict[str, list[float]] = {}
+    for row in vitals_rows:
+        if row.weight_kg is None or not row.logged_at:
+            continue
+        key = row.logged_at.date().isoformat()
+        bucket.setdefault(key, []).append(float(row.weight_kg))
+    out: dict[str, float] = {}
+    for key, vals in bucket.items():
+        if vals:
+            out[key] = sum(vals) / len(vals)
+    return out
+
+
+def _find_weight_delta(weight_map: dict[str, float], day: datetime) -> float | None:
+    today_key = day.date().isoformat()
+    next_key = (day + timedelta(days=1)).date().isoformat()
+    if today_key not in weight_map or next_key not in weight_map:
+        return None
+    return weight_map[next_key] - weight_map[today_key]
+
+
+def _tool_meal_response_insights(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
+    since_days = args.get("since_days", 90)
+    if not isinstance(since_days, int) or since_days < 7 or since_days > 365:
+        since_days = 90
+
+    only_template_id = args.get("template_id")
+    if only_template_id is not None:
+        try:
+            only_template_id = int(only_template_id)
+        except (TypeError, ValueError) as exc:
+            raise ToolExecutionError("`template_id` must be an integer") from exc
+
+    since = datetime.now(timezone.utc) - timedelta(days=since_days)
+    templates = _meal_templates_for_user(ctx, include_archived=True)
+    template_by_id = {t.id: t for t in templates}
+    if only_template_id is not None:
+        template_by_id = {tid: t for tid, t in template_by_id.items() if tid == only_template_id}
+        if not template_by_id:
+            raise ToolExecutionError("Meal template not found")
+
+    usage_rows = (
+        ctx.db.query(FoodLog)
+        .filter(
+            FoodLog.user_id == ctx.user.id,
+            FoodLog.meal_template_id.isnot(None),
+            FoodLog.logged_at >= since,
+        )
+        .order_by(FoodLog.logged_at.asc())
+        .all()
+    )
+    if only_template_id is not None:
+        usage_rows = [r for r in usage_rows if r.meal_template_id == only_template_id]
+
+    signals_rows = (
+        ctx.db.query(MealResponseSignal)
+        .filter(
+            MealResponseSignal.user_id == ctx.user.id,
+            MealResponseSignal.created_at >= since,
+            MealResponseSignal.meal_template_id.isnot(None),
+        )
+        .order_by(MealResponseSignal.created_at.asc())
+        .all()
+    )
+    if only_template_id is not None:
+        signals_rows = [r for r in signals_rows if r.meal_template_id == only_template_id]
+
+    weight_map = _weight_daily_map(ctx, since)
+
+    by_template: dict[int, dict[str, Any]] = {}
+    for row in usage_rows:
+        tid = int(row.meal_template_id or 0)
+        if tid == 0:
+            continue
+        entry = by_template.setdefault(
+            tid,
+            {
+                "usage_count": 0,
+                "weight_deltas_kg": [],
+            },
+        )
+        entry["usage_count"] += 1
+        delta = _find_weight_delta(weight_map, row.logged_at if row.logged_at else datetime.now(timezone.utc))
+        if delta is not None:
+            entry["weight_deltas_kg"].append(delta)
+
+    for row in signals_rows:
+        tid = int(row.meal_template_id or 0)
+        if tid == 0:
+            continue
+        entry = by_template.setdefault(
+            tid,
+            {
+                "usage_count": 0,
+                "weight_deltas_kg": [],
+            },
+        )
+        entry.setdefault("signal_count", 0)
+        entry.setdefault("energy_values", [])
+        entry.setdefault("gi_events", 0)
+        entry.setdefault("gi_severity_values", [])
+        entry.setdefault("gi_tag_counts", {})
+        entry["signal_count"] += 1
+        if row.energy_level is not None:
+            entry["energy_values"].append(int(row.energy_level))
+        tag_list = _json_or_csv_list(row.gi_symptom_tags)
+        if tag_list or row.gi_severity is not None:
+            entry["gi_events"] += 1
+        for tag in tag_list:
+            key = tag.lower()
+            entry["gi_tag_counts"][key] = int(entry["gi_tag_counts"].get(key, 0)) + 1
+        if row.gi_severity is not None:
+            entry["gi_severity_values"].append(int(row.gi_severity))
+
+    results: list[dict[str, Any]] = []
+    for tid, agg in by_template.items():
+        template = template_by_id.get(tid)
+        if not template:
+            continue
+        usage_count = int(agg.get("usage_count", 0))
+        signal_count = int(agg.get("signal_count", 0))
+        energy_values = list(agg.get("energy_values", []))
+        gi_events = int(agg.get("gi_events", 0))
+        gi_severity_values = list(agg.get("gi_severity_values", []))
+        gi_tag_counts = dict(agg.get("gi_tag_counts", {}))
+        weight_deltas = list(agg.get("weight_deltas_kg", []))
+
+        avg_energy = (sum(energy_values) / len(energy_values)) if energy_values else None
+        gi_event_rate = (gi_events / signal_count) if signal_count else None
+        avg_gi_severity = (sum(gi_severity_values) / len(gi_severity_values)) if gi_severity_values else None
+        avg_weight_delta = (sum(weight_deltas) / len(weight_deltas)) if weight_deltas else None
+
+        top_gi_tags = sorted(gi_tag_counts.items(), key=lambda kv: kv[1], reverse=True)[:5]
+
+        results.append(
+            {
+                "template_id": template.id,
+                "template_name": template.name,
+                "is_archived": bool(template.is_archived),
+                "usage_count": usage_count,
+                "signal_count": signal_count,
+                "energy_avg": round(avg_energy, 3) if avg_energy is not None else None,
+                "gi_event_rate": round(gi_event_rate, 3) if gi_event_rate is not None else None,
+                "gi_severity_avg": round(avg_gi_severity, 3) if avg_gi_severity is not None else None,
+                "weight_delta_next_day_kg_avg": round(avg_weight_delta, 4) if avg_weight_delta is not None else None,
+                "weight_delta_sample_size": len(weight_deltas),
+                "top_gi_tags": [{"tag": tag, "count": count} for tag, count in top_gi_tags],
+            }
+        )
+
+    results.sort(key=lambda x: (x["usage_count"], x["signal_count"]), reverse=True)
+    return {"since_days": since_days, "items": results}
 
 
 def _tool_profile_read(_: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
@@ -248,9 +522,16 @@ def _tool_supplement_resolve_reference(args: dict[str, Any], ctx: ToolContext) -
     return {"query": query, "matches": matches}
 
 
-def _tool_meal_template_list(_: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
-    rows = _meal_templates_for_user(ctx)
-    return {"templates": [_serialize_template(r) for r in rows]}
+def _tool_meal_template_list(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
+    include_archived = bool(args.get("include_archived", False))
+    rows = _meal_templates_for_user(ctx, include_archived=include_archived)
+    usage_map = _batch_template_usage_stats(ctx, [int(r.id) for r in rows])
+    templates: list[dict[str, Any]] = []
+    for row in rows:
+        payload = _serialize_template(row)
+        payload.update(usage_map.get(int(row.id), {"usage_count": 0, "last_logged_at": None}))
+        templates.append(payload)
+    return {"templates": templates}
 
 
 def _tool_meal_template_resolve_name(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
@@ -379,6 +660,24 @@ def register_health_tools(registry: ToolRegistry) -> None:
     )
     registry.register(
         ToolSpec(
+            name="meal_template_get",
+            description="Get one meal template by template id or name, with usage stats.",
+            read_only=True,
+            tags=("meal_template", "read"),
+        ),
+        _tool_meal_template_get,
+    )
+    registry.register(
+        ToolSpec(
+            name="meal_template_versions",
+            description="List saved version snapshots for a meal template.",
+            read_only=True,
+            tags=("meal_template", "read"),
+        ),
+        _tool_meal_template_versions,
+    )
+    registry.register(
+        ToolSpec(
             name="meal_template_resolve_name",
             description="Resolve a named meal phrase like `power pancakes` to known meal templates.",
             required_fields=("query",),
@@ -386,6 +685,15 @@ def register_health_tools(registry: ToolRegistry) -> None:
             tags=("meal_template", "resolve"),
         ),
         _tool_meal_template_resolve_name,
+    )
+    registry.register(
+        ToolSpec(
+            name="meal_response_insights",
+            description="Analyze meal response trends (weight, GI symptoms, energy) per meal template.",
+            read_only=True,
+            tags=("meal_response", "read"),
+        ),
+        _tool_meal_response_insights,
     )
     registry.register(
         ToolSpec(

@@ -1,4 +1,5 @@
 import json
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -9,13 +10,36 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from auth.utils import get_current_user
+from auth.utils import hash_password, verify_password
+from config import settings as app_settings
 from db.database import get_db
-from db.models import User, UserSettings, Message
+from db.models import (
+    User,
+    UserSettings,
+    SpecialistConfig,
+    Message,
+    ModelUsageEvent,
+    FoodLog,
+    HydrationLog,
+    VitalsLog,
+    ExerciseLog,
+    ExercisePlan,
+    DailyChecklistItem,
+    SupplementLog,
+    FastingLog,
+    SleepLog,
+    Summary,
+    MealTemplate,
+    Notification,
+    IntakeSession,
+    FeedbackEntry,
+)
 from tools import tool_registry
 from tools.base import ToolContext, ToolExecutionError
 from utils.encryption import encrypt_api_key, decrypt_api_key
 
 router = APIRouter(prefix="/settings", tags=["settings"])
+logger = logging.getLogger(__name__)
 ALLOWED_HEIGHT_UNITS = {"cm", "ft"}
 ALLOWED_WEIGHT_UNITS = {"kg", "lb"}
 ALLOWED_HYDRATION_UNITS = {"ml", "oz"}
@@ -128,6 +152,46 @@ def _get_pricing() -> dict:
         return {}
 
 
+def _available_model_ids(provider: str) -> tuple[set[str], set[str]]:
+    available = _get_available_models()
+    provider_models = available.get(provider, available.get("anthropic", {}))
+    reasoning_ids = {str(m.get("id", "")).strip() for m in provider_models.get("reasoning", []) if str(m.get("id", "")).strip()}
+    utility_ids = {str(m.get("id", "")).strip() for m in provider_models.get("utility", []) if str(m.get("id", "")).strip()}
+    return reasoning_ids, utility_ids
+
+
+def _normalize_models_for_provider(
+    provider: str,
+    reasoning_model: str | None,
+    utility_model: str | None,
+) -> tuple[str, str]:
+    defaults = _get_default_models().get(provider, _get_default_models().get("anthropic", _FALLBACK_DEFAULTS["anthropic"]))
+    reasoning_ids, utility_ids = _available_model_ids(provider)
+
+    reasoning = (reasoning_model or "").strip()
+    utility = (utility_model or "").strip()
+
+    normalized_reasoning = reasoning if reasoning and (not reasoning_ids or reasoning in reasoning_ids) else defaults["reasoning"]
+    normalized_utility = utility if utility and (not utility_ids or utility in utility_ids) else defaults["utility"]
+    return normalized_reasoning, normalized_utility
+
+
+def _sync_user_models_for_provider(user_settings: UserSettings) -> bool:
+    normalized_reasoning, normalized_utility = _normalize_models_for_provider(
+        user_settings.ai_provider,
+        user_settings.reasoning_model,
+        user_settings.utility_model,
+    )
+    changed = False
+    if user_settings.reasoning_model != normalized_reasoning:
+        user_settings.reasoning_model = normalized_reasoning
+        changed = True
+    if user_settings.utility_model != normalized_utility:
+        user_settings.utility_model = normalized_utility
+        changed = True
+    return changed
+
+
 def _get_model_name(model_id: str) -> str:
     """Look up a friendly model name from the available models config."""
     available = _get_available_models()
@@ -160,6 +224,8 @@ def get_profile(user: User = Depends(get_current_user), db: Session = Depends(ge
     s = user.settings
     if not s:
         raise HTTPException(status_code=404, detail="Settings not found")
+    if _sync_user_models_for_provider(s):
+        db.commit()
     return ProfileResponse(
         ai_provider=s.ai_provider,
         has_api_key=bool(s.api_key_encrypted),
@@ -189,6 +255,16 @@ class ModelsUpdate(BaseModel):
     utility_model: str
 
 
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+
+class ResetUserDataRequest(BaseModel):
+    current_password: str
+    confirmation: str
+
+
 @router.put("/models")
 def update_models(
     update: ModelsUpdate,
@@ -196,10 +272,15 @@ def update_models(
     db: Session = Depends(get_db),
 ):
     s = user.settings
-    s.reasoning_model = update.reasoning_model
-    s.utility_model = update.utility_model
+    normalized_reasoning, normalized_utility = _normalize_models_for_provider(
+        s.ai_provider,
+        update.reasoning_model,
+        update.utility_model,
+    )
+    s.reasoning_model = normalized_reasoning
+    s.utility_model = normalized_utility
     db.commit()
-    return {"status": "ok"}
+    return {"status": "ok", "reasoning_model": normalized_reasoning, "utility_model": normalized_utility}
 
 
 @router.put("/profile")
@@ -265,19 +346,28 @@ def set_api_key(
     s.ai_provider = req.ai_provider
     s.api_key_encrypted = encrypt_api_key(req.api_key)
 
-    # Set default models for the provider if not specified
-    default_models = _get_default_models()
-    defaults = default_models.get(req.ai_provider, default_models.get("anthropic", {}))
-    s.reasoning_model = req.reasoning_model or defaults["reasoning"]
-    s.utility_model = req.utility_model or defaults["utility"]
+    normalized_reasoning, normalized_utility = _normalize_models_for_provider(
+        req.ai_provider,
+        req.reasoning_model,
+        req.utility_model,
+    )
+    s.reasoning_model = normalized_reasoning
+    s.utility_model = normalized_utility
 
     db.commit()
-    return {"status": "ok", "ai_provider": s.ai_provider}
+    return {
+        "status": "ok",
+        "ai_provider": s.ai_provider,
+        "reasoning_model": s.reasoning_model,
+        "utility_model": s.utility_model,
+    }
 
 
 @router.get("/api-key/status", response_model=APIKeyStatusResponse)
-def get_api_key_status(user: User = Depends(get_current_user)):
+def get_api_key_status(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     s = user.settings
+    if _sync_user_models_for_provider(s):
+        db.commit()
     return APIKeyStatusResponse(
         ai_provider=s.ai_provider,
         has_api_key=bool(s.api_key_encrypted),
@@ -289,6 +379,7 @@ def get_api_key_status(user: User = Depends(get_current_user)):
 @router.post("/api-key/validate")
 async def validate_api_key(
     user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     """Validate the stored API key by making a test API call."""
     s = user.settings
@@ -300,7 +391,14 @@ async def validate_api_key(
     # Import here to avoid circular imports
     from ai.providers import get_provider
     try:
-        provider = get_provider(s.ai_provider, api_key)
+        if _sync_user_models_for_provider(s):
+            db.commit()
+        provider = get_provider(
+            s.ai_provider,
+            api_key,
+            reasoning_model=s.reasoning_model,
+            utility_model=s.utility_model,
+        )
         await provider.validate_key()
         return {"status": "valid", "ai_provider": s.ai_provider}
     except Exception as e:
@@ -316,7 +414,7 @@ def get_usage(
     s = user.settings
     reset_at = s.usage_reset_at if s else None
 
-    query = db.query(
+    assistant_query = db.query(
         Message.model_used,
         func.sum(Message.tokens_in).label("tokens_in"),
         func.sum(Message.tokens_out).label("tokens_out"),
@@ -327,17 +425,45 @@ def get_usage(
         Message.model_used.isnot(None),
     )
     if reset_at:
-        query = query.filter(Message.created_at > reset_at)
-    rows = query.group_by(Message.model_used).all()
+        assistant_query = assistant_query.filter(Message.created_at > reset_at)
+    assistant_rows = assistant_query.group_by(Message.model_used).all()
+
+    utility_query = db.query(
+        ModelUsageEvent.model_used,
+        func.sum(ModelUsageEvent.tokens_in).label("tokens_in"),
+        func.sum(ModelUsageEvent.tokens_out).label("tokens_out"),
+        func.count().label("request_count"),
+    ).filter(
+        ModelUsageEvent.user_id == user.id,
+        ModelUsageEvent.model_used.isnot(None),
+    )
+    if reset_at:
+        utility_query = utility_query.filter(ModelUsageEvent.created_at > reset_at)
+    utility_rows = utility_query.group_by(ModelUsageEvent.model_used).all()
+
+    usage_by_model: dict[str, dict[str, int]] = {}
+
+    def _accumulate(rows):
+        for row in rows:
+            model_id = row.model_used or "unknown"
+            rec = usage_by_model.setdefault(
+                model_id,
+                {"tokens_in": 0, "tokens_out": 0, "request_count": 0},
+            )
+            rec["tokens_in"] += int(row.tokens_in or 0)
+            rec["tokens_out"] += int(row.tokens_out or 0)
+            rec["request_count"] += int(row.request_count or 0)
+
+    _accumulate(assistant_rows)
+    _accumulate(utility_rows)
 
     pricing = _get_pricing()
     models = []
     total_cost = 0.0
 
-    for row in rows:
-        model_id = row.model_used or "unknown"
-        t_in = row.tokens_in or 0
-        t_out = row.tokens_out or 0
+    for model_id, rec in usage_by_model.items():
+        t_in = rec["tokens_in"]
+        t_out = rec["tokens_out"]
         price = pricing.get(model_id, {})
         cost_in = t_in * price.get("input_per_mtok", 0) / 1_000_000
         cost_out = t_out * price.get("output_per_mtok", 0) / 1_000_000
@@ -348,7 +474,7 @@ def get_usage(
             "model_name": _get_model_name(model_id),
             "tokens_in": t_in,
             "tokens_out": t_out,
-            "request_count": row.request_count,
+            "request_count": rec["request_count"],
             "cost_usd": cost,
         })
 
@@ -371,3 +497,122 @@ def reset_usage(
     s.usage_reset_at = datetime.now(timezone.utc)
     db.commit()
     return {"status": "ok", "reset_at": s.usage_reset_at.isoformat()}
+
+
+@router.post("/password/change")
+def change_password(
+    req: ChangePasswordRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    current = (req.current_password or "").strip()
+    new_password = req.new_password or ""
+    if not current:
+        raise HTTPException(status_code=400, detail="Current password is required")
+    if not verify_password(current, user.password_hash):
+        raise HTTPException(status_code=401, detail="Current password is incorrect")
+    if len(new_password) < 8:
+        raise HTTPException(status_code=400, detail="New password must be at least 8 characters")
+    if verify_password(new_password, user.password_hash):
+        raise HTTPException(status_code=400, detail="New password must be different from current password")
+
+    user.password_hash = hash_password(new_password)
+    db.commit()
+    return {"status": "ok"}
+
+
+@router.post("/reset-data")
+def reset_user_data(
+    req: ResetUserDataRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    current = (req.current_password or "").strip()
+    if not current:
+        raise HTTPException(status_code=400, detail="Current password is required")
+    if not verify_password(current, user.password_hash):
+        raise HTTPException(status_code=401, detail="Current password is incorrect")
+    if (req.confirmation or "").strip().upper() != "RESET":
+        raise HTTPException(status_code=400, detail='Type "RESET" to confirm')
+
+    image_paths = [
+        str(row.image_path).strip()
+        for row in db.query(Message.image_path)
+        .filter(Message.user_id == user.id, Message.image_path.isnot(None))
+        .all()
+        if str(row.image_path).strip()
+    ]
+
+    # Clear user-linked datasets while preserving the user account/password.
+    db.query(FoodLog).filter(FoodLog.user_id == user.id).delete(synchronize_session=False)
+    db.query(HydrationLog).filter(HydrationLog.user_id == user.id).delete(synchronize_session=False)
+    db.query(VitalsLog).filter(VitalsLog.user_id == user.id).delete(synchronize_session=False)
+    db.query(ExerciseLog).filter(ExerciseLog.user_id == user.id).delete(synchronize_session=False)
+    db.query(ExercisePlan).filter(ExercisePlan.user_id == user.id).delete(synchronize_session=False)
+    db.query(DailyChecklistItem).filter(DailyChecklistItem.user_id == user.id).delete(synchronize_session=False)
+    db.query(SupplementLog).filter(SupplementLog.user_id == user.id).delete(synchronize_session=False)
+    db.query(FastingLog).filter(FastingLog.user_id == user.id).delete(synchronize_session=False)
+    db.query(SleepLog).filter(SleepLog.user_id == user.id).delete(synchronize_session=False)
+    db.query(Summary).filter(Summary.user_id == user.id).delete(synchronize_session=False)
+    db.query(Message).filter(Message.user_id == user.id).delete(synchronize_session=False)
+    db.query(MealTemplate).filter(MealTemplate.user_id == user.id).delete(synchronize_session=False)
+    db.query(Notification).filter(Notification.user_id == user.id).delete(synchronize_session=False)
+    db.query(IntakeSession).filter(IntakeSession.user_id == user.id).delete(synchronize_session=False)
+    db.query(FeedbackEntry).filter(FeedbackEntry.created_by_user_id == user.id).delete(synchronize_session=False)
+    db.query(ModelUsageEvent).filter(ModelUsageEvent.user_id == user.id).delete(synchronize_session=False)
+
+    defaults = _get_default_models().get("anthropic", _FALLBACK_DEFAULTS["anthropic"])
+    s = user.settings
+    if not s:
+        s = UserSettings(user_id=user.id)
+        db.add(s)
+    s.ai_provider = "anthropic"
+    s.api_key_encrypted = None
+    s.reasoning_model = defaults["reasoning"]
+    s.utility_model = defaults["utility"]
+    s.age = None
+    s.sex = None
+    s.height_cm = None
+    s.current_weight_kg = None
+    s.goal_weight_kg = None
+    s.height_unit = "cm"
+    s.weight_unit = "kg"
+    s.hydration_unit = "ml"
+    s.medical_conditions = None
+    s.medications = None
+    s.supplements = None
+    s.family_history = None
+    s.fitness_level = None
+    s.dietary_preferences = None
+    s.health_goals = None
+    s.timezone = "America/Edmonton"
+    s.usage_reset_at = None
+    s.intake_completed_at = None
+    s.intake_skipped_at = None
+
+    cfg = user.specialist_config
+    if not cfg:
+        cfg = SpecialistConfig(user_id=user.id)
+        db.add(cfg)
+    cfg.active_specialist = "auto"
+    cfg.specialist_overrides = None
+
+    db.commit()
+
+    removed_files = 0
+    upload_root = app_settings.UPLOAD_DIR.resolve()
+    for raw in image_paths:
+        path = Path(raw)
+        if not path.is_absolute():
+            path = (Path.cwd() / path).resolve()
+        else:
+            path = path.resolve()
+        try:
+            # Only delete files within configured upload directory.
+            if upload_root in path.parents and path.exists():
+                path.unlink()
+                removed_files += 1
+        except Exception as e:
+            logger.warning(f"Failed to remove uploaded file '{path}': {e}")
+
+    return {"status": "ok", "removed_files": removed_files}

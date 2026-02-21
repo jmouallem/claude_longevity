@@ -1,6 +1,9 @@
 import json
 import logging
-from datetime import datetime, timezone
+
+from sqlalchemy.orm import Session
+
+from ai.usage_tracker import track_usage_from_result
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +103,14 @@ CATEGORY_TO_PROMPT = {
 }
 
 
-async def parse_log_data(provider, message: str, category: str, user_profile: str = "") -> dict | None:
+async def parse_log_data(
+    provider,
+    message: str,
+    category: str,
+    user_profile: str = "",
+    db: Session | None = None,
+    user_id: int | None = None,
+) -> dict | None:
     """Use utility model to parse structured data from free-form text."""
     prompt = CATEGORY_TO_PROMPT.get(category)
     if not prompt:
@@ -117,6 +127,15 @@ async def parse_log_data(provider, message: str, category: str, user_profile: st
             system="You are a data extraction assistant. Return only valid JSON, no explanation.",
             stream=False,
         )
+        if db is not None and user_id is not None:
+            track_usage_from_result(
+                db=db,
+                user_id=user_id,
+                result=result,
+                model_used=provider.get_utility_model(),
+                operation=f"log_parse:{category}",
+                usage_type="utility",
+            )
 
         text = result["content"].strip()
         # Handle markdown code blocks

@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from ai.context_builder import format_user_profile
 from ai.providers import get_provider
+from ai.usage_tracker import track_usage_from_result
 from db.models import (
     User, Summary, FoodLog, VitalsLog, ExerciseLog,
     HydrationLog, SupplementLog, FastingLog, SleepLog, DailyChecklistItem,
@@ -140,7 +141,12 @@ async def generate_summary(db: Session, user: User, summary_type: str, target_da
         target_date = today_for_tz(tz_name)
 
     api_key = decrypt_api_key(settings.api_key_encrypted)
-    provider = get_provider(settings.ai_provider, api_key)
+    provider = get_provider(
+        settings.ai_provider,
+        api_key,
+        reasoning_model=settings.reasoning_model,
+        utility_model=settings.utility_model,
+    )
     profile = format_user_profile(settings)
 
     if summary_type == "daily":
@@ -190,6 +196,14 @@ async def generate_summary(db: Session, user: User, summary_type: str, target_da
         model=provider.get_utility_model(),
         system="You are a health data summarization assistant. Provide clear, structured summaries.",
         stream=False,
+    )
+    track_usage_from_result(
+        db=db,
+        user_id=user.id,
+        result=result,
+        model_used=provider.get_utility_model(),
+        operation=f"summary_generate:{summary_type}",
+        usage_type="utility",
     )
 
     narrative = result["content"]

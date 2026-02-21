@@ -14,6 +14,8 @@ from db.models import (
     FoodLog,
     HydrationLog,
     MealTemplate,
+    MealTemplateVersion,
+    MealResponseSignal,
     Notification,
     SleepLog,
     SupplementLog,
@@ -465,7 +467,7 @@ def _tool_food_log_write(args: dict[str, Any], ctx: ToolContext) -> dict[str, An
         norm_query = _normalize_meal_name(query_name)
         templates = (
             ctx.db.query(MealTemplate)
-            .filter(MealTemplate.user_id == ctx.user.id)
+            .filter(MealTemplate.user_id == ctx.user.id, MealTemplate.is_archived.is_(False))
             .order_by(MealTemplate.updated_at.desc(), MealTemplate.created_at.desc())
             .all()
         )
@@ -488,6 +490,7 @@ def _tool_food_log_write(args: dict[str, Any], ctx: ToolContext) -> dict[str, An
         template_items = [{"name": x} for x in ing] if ing else [{"name": resolved_template.name}]
         row = FoodLog(
             user_id=ctx.user.id,
+            meal_template_id=resolved_template.id,
             logged_at=datetime.now(timezone.utc),
             meal_label=meal_label or resolved_template.name,
             items=_json_dumps(template_items),
@@ -646,6 +649,47 @@ def _coerce_float_field(args: dict[str, Any], field: str) -> float | None:
     return _to_float(args.get(field), field)
 
 
+def _meal_template_snapshot(row: MealTemplate) -> dict[str, Any]:
+    return {
+        "name": row.name,
+        "normalized_name": row.normalized_name,
+        "aliases": _parse_string_list(row.aliases or ""),
+        "ingredients": _parse_string_list(row.ingredients or ""),
+        "servings": row.servings,
+        "calories": row.calories,
+        "protein_g": row.protein_g,
+        "carbs_g": row.carbs_g,
+        "fat_g": row.fat_g,
+        "fiber_g": row.fiber_g,
+        "sodium_mg": row.sodium_mg,
+        "notes": row.notes,
+        "is_archived": bool(row.is_archived),
+    }
+
+
+def _create_template_version(
+    ctx: ToolContext,
+    row: MealTemplate,
+    change_note: str | None = None,
+) -> int:
+    latest = (
+        ctx.db.query(MealTemplateVersion)
+        .filter(MealTemplateVersion.meal_template_id == row.id)
+        .order_by(MealTemplateVersion.version_number.desc())
+        .first()
+    )
+    next_version = 1 if not latest else int(latest.version_number) + 1
+    version = MealTemplateVersion(
+        user_id=ctx.user.id,
+        meal_template_id=row.id,
+        version_number=next_version,
+        snapshot_json=_json_dumps(_meal_template_snapshot(row)),
+        change_note=(change_note or "").strip() or None,
+    )
+    ctx.db.add(version)
+    return next_version
+
+
 def _tool_meal_template_upsert(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
     name = ensure_string(args, "name")
     normalized_name = _normalize_meal_name(name)
@@ -664,6 +708,7 @@ def _tool_meal_template_upsert(args: dict[str, Any], ctx: ToolContext) -> dict[s
         .first()
     )
     created = False
+    before_snapshot: dict[str, Any] | None = None
     if not row:
         row = MealTemplate(
             user_id=ctx.user.id,
@@ -672,6 +717,8 @@ def _tool_meal_template_upsert(args: dict[str, Any], ctx: ToolContext) -> dict[s
         )
         ctx.db.add(row)
         created = True
+    else:
+        before_snapshot = _meal_template_snapshot(row)
 
     row.name = name
     row.normalized_name = normalized_name
@@ -685,9 +732,23 @@ def _tool_meal_template_upsert(args: dict[str, Any], ctx: ToolContext) -> dict[s
     row.fiber_g = _coerce_float_field(args, "fiber_g")
     row.sodium_mg = _coerce_float_field(args, "sodium_mg")
     row.notes = str(args.get("notes", "")).strip() or None
+    row.is_archived = False
+    row.archived_at = None
 
     ctx.db.flush()
-    return {"meal_template_id": row.id, "created": created, "name": row.name}
+
+    after_snapshot = _meal_template_snapshot(row)
+    change_note = str(args.get("change_note", "")).strip() or ("Created template" if created else "Updated template")
+    version_number = None
+    if created or before_snapshot != after_snapshot:
+        version_number = _create_template_version(ctx, row, change_note=change_note)
+
+    return {
+        "meal_template_id": row.id,
+        "created": created,
+        "name": row.name,
+        "version_number": version_number,
+    }
 
 
 def _tool_meal_log_from_template(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
@@ -724,6 +785,7 @@ def _tool_meal_log_from_template(args: dict[str, Any], ctx: ToolContext) -> dict
     meal_items = [{"name": item} for item in ingredients] if ingredients else [{"name": row.name}]
     log = FoodLog(
         user_id=ctx.user.id,
+        meal_template_id=row.id,
         logged_at=datetime.now(timezone.utc),
         meal_label=str(args.get("meal_label", row.name)).strip() or row.name,
         items=_json_dumps(meal_items),
@@ -738,6 +800,143 @@ def _tool_meal_log_from_template(args: dict[str, Any], ctx: ToolContext) -> dict
     ctx.db.add(log)
     ctx.db.flush()
     return {"food_log_id": log.id, "meal_template_id": row.id, "servings": servings}
+
+
+def _resolve_meal_template_row(ctx: ToolContext, args: dict[str, Any], include_archived: bool = True) -> MealTemplate:
+    template_id = args.get("template_id")
+    template_name = args.get("template_name")
+    query = ctx.db.query(MealTemplate).filter(MealTemplate.user_id == ctx.user.id)
+    if not include_archived:
+        query = query.filter(MealTemplate.is_archived.is_(False))
+    row = None
+    if template_id is not None:
+        try:
+            tid = int(template_id)
+        except (TypeError, ValueError) as exc:
+            raise ToolExecutionError("`template_id` must be an integer") from exc
+        row = query.filter(MealTemplate.id == tid).first()
+    elif template_name:
+        norm = _normalize_meal_name(str(template_name))
+        row = query.filter(MealTemplate.normalized_name == norm).first()
+    else:
+        raise ToolExecutionError("Provide `template_id` or `template_name`")
+
+    if not row:
+        raise ToolExecutionError("Meal template not found")
+    return row
+
+
+def _tool_meal_template_archive(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
+    row = _resolve_meal_template_row(ctx, args, include_archived=True)
+    archive = bool(args.get("archive", True))
+    if archive:
+        if not row.is_archived:
+            _create_template_version(ctx, row, change_note="Archived template")
+        row.is_archived = True
+        row.archived_at = datetime.now(timezone.utc)
+    else:
+        if row.is_archived:
+            _create_template_version(ctx, row, change_note="Restored template")
+        row.is_archived = False
+        row.archived_at = None
+    ctx.db.flush()
+    return {"meal_template_id": row.id, "archived": bool(row.is_archived)}
+
+
+def _tool_meal_template_delete(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
+    row = _resolve_meal_template_row(ctx, args, include_archived=True)
+    template_id = row.id
+    name = row.name
+    ctx.db.query(MealTemplateVersion).filter(MealTemplateVersion.meal_template_id == template_id).delete()
+    ctx.db.query(MealResponseSignal).filter(MealResponseSignal.meal_template_id == template_id).update(
+        {"meal_template_id": None}
+    )
+    ctx.db.query(FoodLog).filter(FoodLog.meal_template_id == template_id).update({"meal_template_id": None})
+    ctx.db.delete(row)
+    return {"deleted": True, "meal_template_id": template_id, "name": name}
+
+
+def _tool_meal_response_signal_write(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
+    meal_template_id = args.get("meal_template_id")
+    food_log_id = args.get("food_log_id")
+    source_message_id = args.get("source_message_id")
+    energy_level = args.get("energy_level")
+    gi_severity = args.get("gi_severity")
+    notes = str(args.get("notes", "")).strip() or None
+    tags = _parse_string_list(args.get("gi_symptom_tags", []))
+
+    if meal_template_id is not None:
+        try:
+            meal_template_id = int(meal_template_id)
+        except (TypeError, ValueError) as exc:
+            raise ToolExecutionError("`meal_template_id` must be an integer") from exc
+    if food_log_id is not None:
+        try:
+            food_log_id = int(food_log_id)
+        except (TypeError, ValueError) as exc:
+            raise ToolExecutionError("`food_log_id` must be an integer") from exc
+    if source_message_id is not None:
+        try:
+            source_message_id = int(source_message_id)
+        except (TypeError, ValueError) as exc:
+            raise ToolExecutionError("`source_message_id` must be an integer") from exc
+
+    template_row = None
+    if meal_template_id is not None:
+        template_row = (
+            ctx.db.query(MealTemplate)
+            .filter(MealTemplate.user_id == ctx.user.id, MealTemplate.id == meal_template_id)
+            .first()
+        )
+        if not template_row:
+            raise ToolExecutionError("Meal template not found for this user")
+
+    food_log_row = None
+    if food_log_id is not None:
+        food_log_row = (
+            ctx.db.query(FoodLog)
+            .filter(FoodLog.user_id == ctx.user.id, FoodLog.id == food_log_id)
+            .first()
+        )
+        if not food_log_row:
+            raise ToolExecutionError("Food log not found for this user")
+
+    if food_log_row and food_log_row.meal_template_id is not None:
+        linked_template_id = int(food_log_row.meal_template_id)
+        if meal_template_id is None:
+            meal_template_id = linked_template_id
+        elif int(meal_template_id) != linked_template_id:
+            raise ToolExecutionError("`meal_template_id` does not match the provided `food_log_id`")
+
+    if energy_level is not None:
+        try:
+            energy_level = int(energy_level)
+        except (TypeError, ValueError) as exc:
+            raise ToolExecutionError("`energy_level` must be an integer") from exc
+        if energy_level < -2 or energy_level > 2:
+            raise ToolExecutionError("`energy_level` must be between -2 and 2")
+
+    if gi_severity is not None:
+        try:
+            gi_severity = int(gi_severity)
+        except (TypeError, ValueError) as exc:
+            raise ToolExecutionError("`gi_severity` must be an integer") from exc
+        if gi_severity < 1 or gi_severity > 5:
+            raise ToolExecutionError("`gi_severity` must be between 1 and 5")
+
+    row = MealResponseSignal(
+        user_id=ctx.user.id,
+        meal_template_id=meal_template_id,
+        food_log_id=food_log_id,
+        source_message_id=source_message_id,
+        energy_level=energy_level,
+        gi_symptom_tags=_json_dumps(tags) if tags else None,
+        gi_severity=gi_severity,
+        notes=notes,
+    )
+    ctx.db.add(row)
+    ctx.db.flush()
+    return {"meal_response_signal_id": row.id}
 
 
 def _tool_notification_create(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
@@ -978,12 +1177,39 @@ def register_write_tools(registry: ToolRegistry) -> None:
     )
     registry.register(
         ToolSpec(
+            name="meal_template_archive",
+            description="Archive or restore a meal template by id or name.",
+            read_only=False,
+            tags=("meal_template", "write"),
+        ),
+        _tool_meal_template_archive,
+    )
+    registry.register(
+        ToolSpec(
+            name="meal_template_delete",
+            description="Delete a meal template by id or name.",
+            read_only=False,
+            tags=("meal_template", "write"),
+        ),
+        _tool_meal_template_delete,
+    )
+    registry.register(
+        ToolSpec(
             name="meal_log_from_template",
             description="Create a food log entry from a saved meal template by template id or name.",
             read_only=False,
             tags=("meal_template", "write"),
         ),
         _tool_meal_log_from_template,
+    )
+    registry.register(
+        ToolSpec(
+            name="meal_response_signal_write",
+            description="Write a meal response signal (energy/GI outcomes) for user-level meal analysis.",
+            read_only=False,
+            tags=("meal_response", "write"),
+        ),
+        _tool_meal_response_signal_write,
     )
     registry.register(
         ToolSpec(

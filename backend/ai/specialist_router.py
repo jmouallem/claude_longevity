@@ -1,6 +1,10 @@
 import json
 import logging
 
+from sqlalchemy.orm import Session
+
+from ai.usage_tracker import track_usage_from_result
+
 logger = logging.getLogger(__name__)
 
 ROUTING_PROMPT_TEMPLATE = """Classify this user message into ONE category and identify the best specialist.
@@ -48,6 +52,8 @@ async def classify_intent(
     message: str,
     user_override: str | None = None,
     allowed_specialists: list[str] | None = None,
+    db: Session | None = None,
+    user_id: int | None = None,
 ) -> dict:
     """Classify user message intent and route to appropriate specialist."""
     allowed = allowed_specialists or [
@@ -60,9 +66,9 @@ async def classify_intent(
         "orchestrator",
     ]
 
+    forced_specialist = None
     if user_override and user_override != "auto":
-        specialist = user_override if user_override in allowed else "orchestrator"
-        return {"category": "manual_override", "specialist": specialist, "confidence": 1.0}
+        forced_specialist = user_override if user_override in allowed else "orchestrator"
 
     try:
         routing_prompt = ROUTING_PROMPT_TEMPLATE.format(specialists=", ".join(allowed))
@@ -72,6 +78,15 @@ async def classify_intent(
             system="You are a classification assistant. Return only valid JSON.",
             stream=False,
         )
+        if db is not None and user_id is not None:
+            track_usage_from_result(
+                db=db,
+                user_id=user_id,
+                result=result,
+                model_used=provider.get_utility_model(),
+                operation="intent_classification",
+                usage_type="utility",
+            )
 
         text = result["content"].strip()
         # Extract JSON from response (handle markdown code blocks)
@@ -83,7 +98,7 @@ async def classify_intent(
 
         parsed = json.loads(text)
         category = parsed.get("category", "general_chat")
-        specialist = parsed.get("specialist", "orchestrator")
+        specialist = forced_specialist or parsed.get("specialist", "orchestrator")
         if specialist not in allowed:
             specialist = CATEGORY_TO_SPECIALIST.get(category, "orchestrator")
         if specialist not in allowed:
@@ -95,4 +110,7 @@ async def classify_intent(
         }
     except Exception as e:
         logger.warning(f"Intent classification failed: {e}, defaulting to orchestrator")
-        return {"category": "general_chat", "specialist": "orchestrator", "confidence": 0.0}
+        fallback = forced_specialist or "orchestrator"
+        if fallback not in allowed:
+            fallback = "orchestrator"
+        return {"category": "general_chat", "specialist": fallback, "confidence": 0.0}

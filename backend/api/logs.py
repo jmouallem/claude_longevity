@@ -14,6 +14,7 @@ from db.models import (
 )
 from ai.context_builder import build_context
 from ai.providers import get_provider
+from ai.usage_tracker import track_usage_from_result
 from tools import tool_registry
 from tools.base import ToolContext, ToolExecutionError
 from utils.encryption import decrypt_api_key
@@ -254,7 +255,19 @@ def get_food_logs(
     db: Session = Depends(get_db),
 ):
     logs = get_logs_for_date(db, FoodLog, user.id, target_date)
-    fields = ["logged_at", "meal_label", "items", "calories", "protein_g", "carbs_g", "fat_g", "fiber_g", "sodium_mg", "notes"]
+    fields = [
+        "logged_at",
+        "meal_label",
+        "meal_template_id",
+        "items",
+        "calories",
+        "protein_g",
+        "carbs_g",
+        "fat_g",
+        "fiber_g",
+        "sodium_mg",
+        "notes",
+    ]
     return [serialize_log(l, fields) for l in logs]
 
 
@@ -404,7 +417,12 @@ async def generate_exercise_plan(
     d = target_date or today_utc()
     d_iso = d.isoformat()
     api_key = decrypt_api_key(settings.api_key_encrypted)
-    provider = get_provider(settings.ai_provider, api_key)
+    provider = get_provider(
+        settings.ai_provider,
+        api_key,
+        reasoning_model=settings.reasoning_model,
+        utility_model=settings.utility_model,
+    )
     system = build_context(db, user, "movement_coach")
     user_prompt = (
         "Create a practical exercise plan for this date based on user context.\n"
@@ -422,6 +440,14 @@ async def generate_exercise_plan(
         model=provider.get_utility_model(),
         system=system,
         stream=False,
+    )
+    track_usage_from_result(
+        db=db,
+        user_id=user.id,
+        result=result,
+        model_used=provider.get_utility_model(),
+        operation="exercise_plan_generate",
+        usage_type="utility",
     )
     parsed = parse_plan_json(result["content"])
 
