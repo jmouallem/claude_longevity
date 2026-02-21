@@ -4,12 +4,12 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from auth.utils import get_current_user
+from auth.utils import get_current_user, require_non_admin
 from db.database import get_db
 from db.models import User, Summary
 from utils.datetime_utils import today_utc
 
-router = APIRouter(prefix="/summaries", tags=["summaries"])
+router = APIRouter(prefix="/summaries", tags=["summaries"], dependencies=[Depends(require_non_admin)])
 
 
 @router.get("")

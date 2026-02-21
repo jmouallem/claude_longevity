@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from auth.utils import get_current_user
+from auth.utils import get_current_user, require_non_admin
 from db.database import get_db
 from db.models import User, SpecialistConfig
 from services.specialists_config import (
@@ -18,7 +18,7 @@ from services.specialists_config import (
     save_overrides,
 )
 
-router = APIRouter(prefix="/specialists", tags=["specialists"])
+router = APIRouter(prefix="/specialists", tags=["specialists"], dependencies=[Depends(require_non_admin)])
 
 class SpecialistUpdate(BaseModel):
     active_specialist: str

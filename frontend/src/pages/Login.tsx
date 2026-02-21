@@ -12,7 +12,12 @@ export default function Login() {
     e.preventDefault();
     try {
       await login(username, password);
-      navigate('/chat');
+      const loggedInUser = useAuthStore.getState().user;
+      if (loggedInUser?.role === 'admin') {
+        navigate(loggedInUser.force_password_change ? '/admin/security' : '/admin/stats');
+      } else {
+        navigate('/chat');
+      }
     } catch {
       // error is set in store
     }

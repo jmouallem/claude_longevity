@@ -6,6 +6,7 @@ from fastapi.staticfiles import StaticFiles
 
 from config import settings
 from db.database import engine, Base, run_startup_migrations
+from auth.bootstrap import ensure_admin_account
 from auth.routes import router as auth_router
 from api.settings import router as settings_router
 from api.chat import router as chat_router
@@ -17,10 +18,12 @@ from api.feedback import router as feedback_router
 from api.intake import router as intake_router
 from api.menu import router as menu_router
 from api.analysis import router as analysis_router
+from api.admin import router as admin_router
 
 # Create all tables
 Base.metadata.create_all(bind=engine)
 run_startup_migrations()
+ensure_admin_account()
 
 app = FastAPI(title="The Longevity Alchemist", version="1.0.0")
 
@@ -45,6 +48,7 @@ app.include_router(feedback_router, prefix="/api")
 app.include_router(intake_router, prefix="/api")
 app.include_router(menu_router, prefix="/api")
 app.include_router(analysis_router, prefix="/api")
+app.include_router(admin_router, prefix="/api")
 
 # Serve frontend static files (in production)
 static_dir = Path(__file__).parent / "static"

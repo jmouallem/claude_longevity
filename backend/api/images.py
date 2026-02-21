@@ -1,12 +1,12 @@
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
 from sqlalchemy.orm import Session
 
-from auth.utils import get_current_user
+from auth.utils import get_current_user, require_non_admin
 from db.database import get_db
 from db.models import User
 from utils.image_utils import save_image, validate_image_size, MAX_IMAGE_SIZE
 
-router = APIRouter(prefix="/images", tags=["images"])
+router = APIRouter(prefix="/images", tags=["images"], dependencies=[Depends(require_non_admin)])
 
 
 @router.post("/upload")

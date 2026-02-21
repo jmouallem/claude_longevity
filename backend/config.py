@@ -11,6 +11,12 @@ class Settings(BaseSettings):
     CORS_ORIGINS: list[str] = ["http://localhost:8050", "http://localhost:8001"]
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRY_HOURS: int = 72
+    ADMIN_JWT_EXPIRY_HOURS: int = 12
+    ADMIN_USERNAME: str = "longadmin"
+    ADMIN_PASSWORD: str = "L0ngevity!123"
+    ADMIN_DISPLAY_NAME: str = "Long Admin"
+    ADMIN_FORCE_PASSWORD_CHANGE: bool = True
+    ADMIN_RESET_PASSWORD_ON_STARTUP: bool = False
     ENABLE_WEB_SEARCH: bool = True
     WEB_SEARCH_ALLOWED_SPECIALISTS: list[str] = [
         "orchestrator",

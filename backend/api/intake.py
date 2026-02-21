@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from auth.utils import get_current_user
+from auth.utils import get_current_user, require_non_admin
 from db.database import get_db
 from db.models import User
 from services.intake_service import (
@@ -18,7 +18,7 @@ from services.intake_service import (
     skip_session,
 )
 
-router = APIRouter(prefix="/intake", tags=["intake"])
+router = APIRouter(prefix="/intake", tags=["intake"], dependencies=[Depends(require_non_admin)])
 
 
 class IntakeStartRequest(BaseModel):

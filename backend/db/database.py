@@ -39,20 +39,34 @@ def run_startup_migrations() -> None:
     """Apply lightweight schema fixes for existing SQLite databases."""
     inspector = inspect(engine)
 
+    def _normalize_username(username: str) -> str:
+        return " ".join((username or "").strip().split()).lower()
+
     def _table_columns(table_name: str) -> set[str]:
         try:
             return {col["name"] for col in inspector.get_columns(table_name)}
         except Exception:
             return set()
 
+    user_columns = _table_columns("users")
     user_settings_columns = _table_columns("user_settings")
     meal_template_columns = _table_columns("meal_templates")
     food_log_columns = _table_columns("food_log")
-    if not user_settings_columns and not meal_template_columns and not food_log_columns:
+    if not user_columns and not user_settings_columns and not meal_template_columns and not food_log_columns:
         # Tables may not exist yet on first boot.
         return
 
     alter_statements: list[str] = []
+    if user_columns:
+        if "username_normalized" not in user_columns:
+            alter_statements.append("ALTER TABLE users ADD COLUMN username_normalized TEXT")
+        if "role" not in user_columns:
+            alter_statements.append("ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'user'")
+        if "token_version" not in user_columns:
+            alter_statements.append("ALTER TABLE users ADD COLUMN token_version INTEGER DEFAULT 0")
+        if "force_password_change" not in user_columns:
+            alter_statements.append("ALTER TABLE users ADD COLUMN force_password_change BOOLEAN DEFAULT 0")
+
     if user_settings_columns:
         if "height_unit" not in user_settings_columns:
             alter_statements.append("ALTER TABLE user_settings ADD COLUMN height_unit TEXT DEFAULT 'cm'")
@@ -81,6 +95,54 @@ def run_startup_migrations() -> None:
     with engine.begin() as conn:
         for stmt in alter_statements:
             conn.execute(text(stmt))
+
+        if user_columns:
+            users = conn.execute(text("SELECT id, username, created_at FROM users ORDER BY created_at, id")).mappings().all()
+            used_normalized: set[str] = set()
+            used_usernames: set[str] = {str(row["username"]).strip() for row in users if row.get("username") is not None}
+            for row in users:
+                user_id = int(row["id"])
+                raw_username = str(row["username"] or "").strip()
+                if not raw_username:
+                    raw_username = f"user{user_id}"
+                normalized = _normalize_username(raw_username)
+                if not normalized:
+                    normalized = f"user{user_id}"
+
+                final_username = raw_username
+                final_normalized = normalized
+                if final_normalized in used_normalized:
+                    suffix = 2
+                    base = raw_username
+                    while True:
+                        candidate_username = f"{base}_{suffix}"
+                        candidate_normalized = _normalize_username(candidate_username)
+                        if candidate_normalized not in used_normalized and candidate_username not in used_usernames:
+                            final_username = candidate_username
+                            final_normalized = candidate_normalized
+                            break
+                        suffix += 1
+                    conn.execute(
+                        text("UPDATE users SET username = :username WHERE id = :id"),
+                        {"id": user_id, "username": final_username},
+                    )
+                    used_usernames.add(final_username)
+                used_normalized.add(final_normalized)
+                conn.execute(
+                    text(
+                        """
+                        UPDATE users
+                        SET username_normalized = :normalized,
+                            role = COALESCE(role, 'user'),
+                            token_version = COALESCE(token_version, 0),
+                            force_password_change = COALESCE(force_password_change, 0)
+                        WHERE id = :id
+                        """
+                    ),
+                    {"id": user_id, "normalized": final_normalized},
+                )
+            conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_normalized ON users (username_normalized)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_users_role ON users (role)"))
 
         if user_settings_columns:
             # Backfill nulls for any rows created before defaults existed.
@@ -237,5 +299,39 @@ def run_startup_migrations() -> None:
             """
             CREATE INDEX IF NOT EXISTS idx_analysis_proposals_run
             ON analysis_proposals (analysis_run_id, status)
+            """
+        ))
+
+        conn.execute(text(
+            """
+            CREATE TABLE IF NOT EXISTS admin_audit_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                admin_user_id INTEGER NOT NULL,
+                target_user_id INTEGER,
+                action TEXT NOT NULL,
+                details_json TEXT,
+                success BOOLEAN NOT NULL DEFAULT 1,
+                created_at DATETIME,
+                FOREIGN KEY(admin_user_id) REFERENCES users(id),
+                FOREIGN KEY(target_user_id) REFERENCES users(id)
+            )
+            """
+        ))
+        conn.execute(text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_admin_audit_created_at
+            ON admin_audit_logs (created_at)
+            """
+        ))
+        conn.execute(text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_admin_audit_admin
+            ON admin_audit_logs (admin_user_id, created_at)
+            """
+        ))
+        conn.execute(text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_admin_audit_target
+            ON admin_audit_logs (target_user_id, created_at)
             """
         ))

@@ -8,11 +8,11 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from auth.utils import get_current_user
+from auth.utils import get_current_user, require_non_admin
 from db.database import get_db
 from db.models import FeedbackEntry, User
 
-router = APIRouter(prefix="/feedback", tags=["feedback"])
+router = APIRouter(prefix="/feedback", tags=["feedback"], dependencies=[Depends(require_non_admin)])
 
 ALLOWED_TYPES = {"bug", "enhancement", "missing", "other"}
 ALLOWED_SOURCES = {"user", "agent"}

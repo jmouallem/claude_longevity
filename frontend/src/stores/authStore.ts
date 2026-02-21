@@ -2,9 +2,11 @@ import { create } from 'zustand';
 import { apiClient } from '../api/client';
 
 export interface User {
-  id: string;
+  id: number;
   username: string;
   display_name: string;
+  role: 'user' | 'admin';
+  force_password_change: boolean;
 }
 
 interface AuthState {

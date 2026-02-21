@@ -13,6 +13,10 @@ from db.models import User
 security = HTTPBearer()
 
 
+def normalize_username(username: str) -> str:
+    return " ".join((username or "").strip().split()).lower()
+
+
 def hash_password(password: str) -> str:
     return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
 
@@ -21,19 +25,21 @@ def verify_password(password: str, hashed: str) -> bool:
     return bcrypt.checkpw(password.encode(), hashed.encode())
 
 
-def create_token(user_id: int) -> str:
+def create_token(user_id: int, role: str = "user", token_version: int = 0) -> str:
+    expiry_hours = settings.ADMIN_JWT_EXPIRY_HOURS if role == "admin" else settings.JWT_EXPIRY_HOURS
     payload = {
         "sub": str(user_id),
-        "exp": datetime.now(timezone.utc) + timedelta(hours=settings.JWT_EXPIRY_HOURS),
+        "role": role,
+        "tv": int(token_version or 0),
+        "exp": datetime.now(timezone.utc) + timedelta(hours=expiry_hours),
         "iat": datetime.now(timezone.utc),
     }
     return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
 
 
-def decode_token(token: str) -> int:
+def decode_token(token: str) -> dict:
     try:
-        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
-        return int(payload["sub"])
+        return jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired")
     except jwt.InvalidTokenError:
@@ -44,8 +50,32 @@ def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
     db: Session = Depends(get_db),
 ) -> User:
-    user_id = decode_token(credentials.credentials)
+    token_payload = decode_token(credentials.credentials)
+    user_id = int(token_payload.get("sub", 0))
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+    token_version = int(token_payload.get("tv", 0))
+    if token_version != int(user.token_version or 0):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session invalidated. Please sign in again.")
+    return user
+
+
+def require_admin(user: User = Depends(get_current_user)) -> User:
+    if (user.role or "").lower() != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
+    if bool(user.force_password_change):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin password change required before accessing admin functions",
+        )
+    return user
+
+
+def require_non_admin(user: User = Depends(get_current_user)) -> User:
+    if (user.role or "").lower() == "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin accounts cannot access user-only endpoints",
+        )
     return user

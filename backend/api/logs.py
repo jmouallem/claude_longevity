@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from auth.utils import get_current_user
+from auth.utils import get_current_user, require_non_admin
 from db.database import get_db
 from db.models import (
     User, FoodLog, HydrationLog, VitalsLog, ExerciseLog,
@@ -21,7 +21,7 @@ from utils.encryption import decrypt_api_key
 from utils.datetime_utils import start_of_day, end_of_day, today_utc
 from utils.med_utils import parse_structured_list, structured_to_display
 
-router = APIRouter(prefix="/logs", tags=["logs"])
+router = APIRouter(prefix="/logs", tags=["logs"], dependencies=[Depends(require_non_admin)])
 
 DOSE_TOKEN_RE = re.compile(r"^\d[\d,.\s]*(mcg|mg|g|kg|iu|ml|units?|tabs?|caps?)\b", re.IGNORECASE)
 

@@ -13,7 +13,12 @@ export default function Register() {
     e.preventDefault();
     try {
       await register(username, password, displayName);
-      navigate('/chat');
+      const registeredUser = useAuthStore.getState().user;
+      if (registeredUser?.role === 'admin') {
+        navigate(registeredUser.force_password_change ? '/admin/security' : '/admin/stats');
+      } else {
+        navigate('/chat');
+      }
     } catch {
       // error is set in store
     }

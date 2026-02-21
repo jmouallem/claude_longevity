@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from auth.utils import get_current_user
+from auth.utils import get_current_user, require_non_admin
 from db.database import get_db
 from db.models import AnalysisProposal, AnalysisRun, User
 from services.analysis_service import (
@@ -18,7 +18,7 @@ from services.analysis_service import (
     serialize_analysis_run,
 )
 
-router = APIRouter(prefix="/analysis", tags=["analysis"])
+router = APIRouter(prefix="/analysis", tags=["analysis"], dependencies=[Depends(require_non_admin)])
 
 
 class RunRequest(BaseModel):

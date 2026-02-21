@@ -21,5 +21,7 @@ class UserResponse(BaseModel):
     id: int
     username: str
     display_name: str
+    role: str
+    force_password_change: bool
 
     model_config = {"from_attributes": True}

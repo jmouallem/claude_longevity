@@ -4,13 +4,13 @@ from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from auth.utils import get_current_user
+from auth.utils import get_current_user, require_non_admin
 from db.database import get_db, SessionLocal
 from db.models import User
 from ai.orchestrator import process_chat
 from utils.image_utils import validate_image_size, MAX_IMAGE_SIZE
 
-router = APIRouter(prefix="/chat", tags=["chat"])
+router = APIRouter(prefix="/chat", tags=["chat"], dependencies=[Depends(require_non_admin)])
 
 
 @router.post("")

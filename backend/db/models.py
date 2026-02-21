@@ -12,8 +12,12 @@ class User(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     username = Column(Text, unique=True, nullable=False)
+    username_normalized = Column(Text, unique=True, nullable=False)
     password_hash = Column(Text, nullable=False)
     display_name = Column(Text, nullable=False)
+    role = Column(Text, nullable=False, default="user")  # user | admin
+    token_version = Column(Integer, nullable=False, default=0)
+    force_password_change = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -31,6 +35,18 @@ class User(Base):
         back_populates="user",
         cascade="all, delete-orphan",
         foreign_keys="AnalysisProposal.user_id",
+    )
+    admin_actions = relationship(
+        "AdminAuditLog",
+        back_populates="admin_user",
+        cascade="all, delete-orphan",
+        foreign_keys="AdminAuditLog.admin_user_id",
+    )
+    admin_target_actions = relationship(
+        "AdminAuditLog",
+        back_populates="target_user",
+        cascade="all, delete-orphan",
+        foreign_keys="AdminAuditLog.target_user_id",
     )
 
 
@@ -420,6 +436,21 @@ class FeedbackEntry(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class AdminAuditLog(Base):
+    __tablename__ = "admin_audit_logs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    admin_user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    target_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    action = Column(Text, nullable=False)
+    details_json = Column(Text)
+    success = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    admin_user = relationship("User", back_populates="admin_actions", foreign_keys=[admin_user_id])
+    target_user = relationship("User", back_populates="admin_target_actions", foreign_keys=[target_user_id])
+
+
 class IntakeSession(Base):
     __tablename__ = "intake_sessions"
 
@@ -464,6 +495,11 @@ Index("idx_summaries_user_type", Summary.user_id, Summary.summary_type, Summary.
 Index("idx_fasting_log_user_date", FastingLog.user_id, FastingLog.fast_start)
 Index("idx_feedback_created_at", FeedbackEntry.created_at)
 Index("idx_feedback_type", FeedbackEntry.feedback_type)
+Index("idx_users_username_normalized", User.username_normalized, unique=True)
+Index("idx_users_role", User.role)
+Index("idx_admin_audit_created_at", AdminAuditLog.created_at)
+Index("idx_admin_audit_admin", AdminAuditLog.admin_user_id, AdminAuditLog.created_at)
+Index("idx_admin_audit_target", AdminAuditLog.target_user_id, AdminAuditLog.created_at)
 Index("idx_intake_session_user_status", IntakeSession.user_id, IntakeSession.status, IntakeSession.updated_at)
 Index("idx_analysis_runs_user_type_period", AnalysisRun.user_id, AnalysisRun.run_type, AnalysisRun.period_end)
 Index("idx_analysis_runs_user_status", AnalysisRun.user_id, AnalysisRun.status, AnalysisRun.created_at)

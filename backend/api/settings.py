@@ -1,5 +1,4 @@
 import json
-import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -9,39 +8,21 @@ from pydantic import BaseModel
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from auth.utils import get_current_user
+from auth.utils import get_current_user, require_non_admin
 from auth.utils import hash_password, verify_password
-from config import settings as app_settings
 from db.database import get_db
 from db.models import (
     User,
     UserSettings,
-    SpecialistConfig,
     Message,
     ModelUsageEvent,
-    FoodLog,
-    HydrationLog,
-    VitalsLog,
-    ExerciseLog,
-    ExercisePlan,
-    DailyChecklistItem,
-    SupplementLog,
-    FastingLog,
-    SleepLog,
-    Summary,
-    AnalysisRun,
-    AnalysisProposal,
-    MealTemplate,
-    Notification,
-    IntakeSession,
-    FeedbackEntry,
 )
 from tools import tool_registry
 from tools.base import ToolContext, ToolExecutionError
+from services.user_reset_service import reset_user_data_for_user
 from utils.encryption import encrypt_api_key, decrypt_api_key
 
-router = APIRouter(prefix="/settings", tags=["settings"])
-logger = logging.getLogger(__name__)
+router = APIRouter(prefix="/settings", tags=["settings"], dependencies=[Depends(require_non_admin)])
 ALLOWED_HEIGHT_UNITS = {"cm", "ft"}
 ALLOWED_WEIGHT_UNITS = {"kg", "lb"}
 ALLOWED_HYDRATION_UNITS = {"ml", "oz"}
@@ -748,6 +729,8 @@ def change_password(
         raise HTTPException(status_code=400, detail="New password must be different from current password")
 
     user.password_hash = hash_password(new_password)
+    user.force_password_change = False
+    user.token_version = int(user.token_version or 0) + 1
     db.commit()
     return {"status": "ok"}
 
@@ -765,88 +748,5 @@ def reset_user_data(
         raise HTTPException(status_code=401, detail="Current password is incorrect")
     if (req.confirmation or "").strip().upper() != "RESET":
         raise HTTPException(status_code=400, detail='Type "RESET" to confirm')
-
-    image_paths = [
-        str(row.image_path).strip()
-        for row in db.query(Message.image_path)
-        .filter(Message.user_id == user.id, Message.image_path.isnot(None))
-        .all()
-        if str(row.image_path).strip()
-    ]
-
-    # Clear user-linked datasets while preserving the user account/password.
-    db.query(FoodLog).filter(FoodLog.user_id == user.id).delete(synchronize_session=False)
-    db.query(HydrationLog).filter(HydrationLog.user_id == user.id).delete(synchronize_session=False)
-    db.query(VitalsLog).filter(VitalsLog.user_id == user.id).delete(synchronize_session=False)
-    db.query(ExerciseLog).filter(ExerciseLog.user_id == user.id).delete(synchronize_session=False)
-    db.query(ExercisePlan).filter(ExercisePlan.user_id == user.id).delete(synchronize_session=False)
-    db.query(DailyChecklistItem).filter(DailyChecklistItem.user_id == user.id).delete(synchronize_session=False)
-    db.query(SupplementLog).filter(SupplementLog.user_id == user.id).delete(synchronize_session=False)
-    db.query(FastingLog).filter(FastingLog.user_id == user.id).delete(synchronize_session=False)
-    db.query(SleepLog).filter(SleepLog.user_id == user.id).delete(synchronize_session=False)
-    db.query(Summary).filter(Summary.user_id == user.id).delete(synchronize_session=False)
-    db.query(Message).filter(Message.user_id == user.id).delete(synchronize_session=False)
-    db.query(MealTemplate).filter(MealTemplate.user_id == user.id).delete(synchronize_session=False)
-    db.query(Notification).filter(Notification.user_id == user.id).delete(synchronize_session=False)
-    db.query(IntakeSession).filter(IntakeSession.user_id == user.id).delete(synchronize_session=False)
-    db.query(FeedbackEntry).filter(FeedbackEntry.created_by_user_id == user.id).delete(synchronize_session=False)
-    db.query(ModelUsageEvent).filter(ModelUsageEvent.user_id == user.id).delete(synchronize_session=False)
-    db.query(AnalysisProposal).filter(AnalysisProposal.user_id == user.id).delete(synchronize_session=False)
-    db.query(AnalysisRun).filter(AnalysisRun.user_id == user.id).delete(synchronize_session=False)
-
-    defaults = _get_default_models().get("anthropic", _FALLBACK_DEFAULTS["anthropic"])
-    s = user.settings
-    if not s:
-        s = UserSettings(user_id=user.id)
-        db.add(s)
-    s.ai_provider = "anthropic"
-    s.api_key_encrypted = None
-    s.reasoning_model = defaults["reasoning"]
-    s.utility_model = defaults["utility"]
-    s.deep_thinking_model = defaults.get("deep_thinking", defaults["reasoning"])
-    s.age = None
-    s.sex = None
-    s.height_cm = None
-    s.current_weight_kg = None
-    s.goal_weight_kg = None
-    s.height_unit = "cm"
-    s.weight_unit = "kg"
-    s.hydration_unit = "ml"
-    s.medical_conditions = None
-    s.medications = None
-    s.supplements = None
-    s.family_history = None
-    s.fitness_level = None
-    s.dietary_preferences = None
-    s.health_goals = None
-    s.timezone = "America/Edmonton"
-    s.usage_reset_at = None
-    s.intake_completed_at = None
-    s.intake_skipped_at = None
-
-    cfg = user.specialist_config
-    if not cfg:
-        cfg = SpecialistConfig(user_id=user.id)
-        db.add(cfg)
-    cfg.active_specialist = "auto"
-    cfg.specialist_overrides = None
-
-    db.commit()
-
-    removed_files = 0
-    upload_root = app_settings.UPLOAD_DIR.resolve()
-    for raw in image_paths:
-        path = Path(raw)
-        if not path.is_absolute():
-            path = (Path.cwd() / path).resolve()
-        else:
-            path = path.resolve()
-        try:
-            # Only delete files within configured upload directory.
-            if upload_root in path.parents and path.exists():
-                path.unlink()
-                removed_files += 1
-        except Exception as e:
-            logger.warning(f"Failed to remove uploaded file '{path}': {e}")
-
-    return {"status": "ok", "removed_files": removed_files}
+    result = reset_user_data_for_user(db, user)
+    return {"status": "ok", "removed_files": result["removed_files"]}

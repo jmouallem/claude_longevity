@@ -4,14 +4,14 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from auth.utils import get_current_user
+from auth.utils import get_current_user, require_non_admin
 from db.database import get_db
 from db.models import User
 from tools import tool_registry
 from tools.base import ToolContext, ToolExecutionError
 
 
-router = APIRouter(prefix="/menu", tags=["menu"])
+router = APIRouter(prefix="/menu", tags=["menu"], dependencies=[Depends(require_non_admin)])
 
 
 class ArchiveRequest(BaseModel):
@@ -125,4 +125,3 @@ def get_insights(
         return out
     except ToolExecutionError as e:
         raise HTTPException(status_code=400, detail=str(e))
-
