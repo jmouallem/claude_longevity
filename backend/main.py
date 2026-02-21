@@ -16,6 +16,7 @@ from api.specialists import router as specialists_router
 from api.feedback import router as feedback_router
 from api.intake import router as intake_router
 from api.menu import router as menu_router
+from api.analysis import router as analysis_router
 
 # Create all tables
 Base.metadata.create_all(bind=engine)
@@ -43,6 +44,7 @@ app.include_router(specialists_router, prefix="/api")
 app.include_router(feedback_router, prefix="/api")
 app.include_router(intake_router, prefix="/api")
 app.include_router(menu_router, prefix="/api")
+app.include_router(analysis_router, prefix="/api")
 
 # Serve frontend static files (in production)
 static_dir = Path(__file__).parent / "static"

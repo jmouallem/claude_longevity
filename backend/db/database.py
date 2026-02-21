@@ -60,6 +60,8 @@ def run_startup_migrations() -> None:
             alter_statements.append("ALTER TABLE user_settings ADD COLUMN weight_unit TEXT DEFAULT 'kg'")
         if "hydration_unit" not in user_settings_columns:
             alter_statements.append("ALTER TABLE user_settings ADD COLUMN hydration_unit TEXT DEFAULT 'ml'")
+        if "deep_thinking_model" not in user_settings_columns:
+            alter_statements.append("ALTER TABLE user_settings ADD COLUMN deep_thinking_model TEXT")
         if "usage_reset_at" not in user_settings_columns:
             alter_statements.append("ALTER TABLE user_settings ADD COLUMN usage_reset_at DATETIME")
         if "intake_completed_at" not in user_settings_columns:
@@ -85,6 +87,12 @@ def run_startup_migrations() -> None:
             conn.execute(text("UPDATE user_settings SET height_unit = COALESCE(height_unit, 'cm')"))
             conn.execute(text("UPDATE user_settings SET weight_unit = COALESCE(weight_unit, 'kg')"))
             conn.execute(text("UPDATE user_settings SET hydration_unit = COALESCE(hydration_unit, 'ml')"))
+            conn.execute(text(
+                """
+                UPDATE user_settings
+                SET deep_thinking_model = COALESCE(deep_thinking_model, reasoning_model, 'claude-sonnet-4-20250514')
+                """
+            ))
         if meal_template_columns:
             conn.execute(text("UPDATE meal_templates SET is_archived = COALESCE(is_archived, 0)"))
         if food_log_columns:
@@ -153,5 +161,81 @@ def run_startup_migrations() -> None:
             """
             CREATE INDEX IF NOT EXISTS idx_meal_response_signals_template
             ON meal_response_signals (meal_template_id, created_at)
+            """
+        ))
+
+        # Longitudinal analysis engine tables.
+        conn.execute(text(
+            """
+            CREATE TABLE IF NOT EXISTS analysis_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                run_type TEXT NOT NULL,
+                period_start TEXT NOT NULL,
+                period_end TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'completed',
+                confidence FLOAT,
+                used_utility_model TEXT,
+                used_reasoning_model TEXT,
+                used_deep_model TEXT,
+                metrics_json TEXT,
+                missing_data_json TEXT,
+                risk_flags_json TEXT,
+                synthesis_json TEXT,
+                summary_markdown TEXT,
+                created_at DATETIME,
+                completed_at DATETIME,
+                error_message TEXT,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            )
+            """
+        ))
+        conn.execute(text(
+            """
+            CREATE TABLE IF NOT EXISTS analysis_proposals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                analysis_run_id INTEGER NOT NULL,
+                proposal_kind TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                title TEXT NOT NULL,
+                rationale TEXT NOT NULL,
+                confidence FLOAT,
+                requires_approval BOOLEAN DEFAULT 1,
+                proposal_json TEXT NOT NULL,
+                diff_markdown TEXT,
+                created_at DATETIME,
+                reviewed_at DATETIME,
+                reviewer_user_id INTEGER,
+                review_note TEXT,
+                applied_at DATETIME,
+                FOREIGN KEY(user_id) REFERENCES users(id),
+                FOREIGN KEY(analysis_run_id) REFERENCES analysis_runs(id),
+                FOREIGN KEY(reviewer_user_id) REFERENCES users(id)
+            )
+            """
+        ))
+        conn.execute(text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_analysis_runs_user_type_period
+            ON analysis_runs (user_id, run_type, period_end)
+            """
+        ))
+        conn.execute(text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_analysis_runs_user_status
+            ON analysis_runs (user_id, status, created_at)
+            """
+        ))
+        conn.execute(text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_analysis_proposals_user_status
+            ON analysis_proposals (user_id, status, created_at)
+            """
+        ))
+        conn.execute(text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_analysis_proposals_run
+            ON analysis_proposals (analysis_run_id, status)
             """
         ))

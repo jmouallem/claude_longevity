@@ -10,10 +10,12 @@ class AIProvider(ABC):
         api_key: str,
         reasoning_model: str | None = None,
         utility_model: str | None = None,
+        deep_thinking_model: str | None = None,
     ):
         self.api_key = api_key
         self._reasoning_model = reasoning_model
         self._utility_model = utility_model
+        self._deep_thinking_model = deep_thinking_model
 
     @abstractmethod
     async def chat(
@@ -79,6 +81,10 @@ class AIProvider(ABC):
     def get_utility_model(self) -> str:
         """Return the utility (faster/cheaper) model identifier."""
         return self._utility_model or self.DEFAULT_UTILITY_MODEL
+
+    def get_deep_thinking_model(self) -> str:
+        """Return the deep-thinking model identifier, defaulting to reasoning model."""
+        return self._deep_thinking_model or self.get_reasoning_model()
 
     def supports_web_search(self) -> bool:
         """Whether this provider supports web search tools."""

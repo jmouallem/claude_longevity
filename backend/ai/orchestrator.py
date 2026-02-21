@@ -2,6 +2,7 @@ import json
 import logging
 import inspect
 import re
+import asyncio
 from datetime import datetime, timezone, timedelta
 from typing import Any, AsyncGenerator
 
@@ -17,6 +18,7 @@ from ai.usage_tracker import track_usage_from_result
 from db.models import (
     User, Message, FeedbackEntry, FoodLog, MealTemplate,
 )
+from services.analysis_service import run_due_analyses_for_user_id
 from services.specialists_config import get_enabled_specialist_ids, get_effective_specialists, parse_overrides
 from tools import tool_registry
 from tools.base import ToolContext, ToolExecutionError
@@ -1463,6 +1465,7 @@ async def process_chat(
         api_key,
         reasoning_model=settings.reasoning_model,
         utility_model=settings.utility_model,
+        deep_thinking_model=getattr(settings, "deep_thinking_model", None),
     )
 
     # 1. If image attached, analyze it first
@@ -1623,6 +1626,13 @@ async def process_chat(
             logger.warning(f"time_now tool failed: {e}")
 
     menu_context = _format_menu_context(menu_action_result, menu_followup_hint)
+
+    # 3e. Trigger due longitudinal analysis windows in background to keep chat latency low.
+    if settings.ENABLE_LONGITUDINAL_ANALYSIS and settings.ANALYSIS_AUTORUN_ON_CHAT:
+        try:
+            asyncio.create_task(run_due_analyses_for_user_id(user.id, trigger="chat"))
+        except Exception as e:
+            logger.warning(f"Due longitudinal analysis dispatch failed: {e}")
 
     # 4. Build context
     system_context = build_context(db, user, specialist)

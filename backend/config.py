@@ -23,6 +23,11 @@ class Settings(BaseSettings):
     WEB_SEARCH_MAX_RESULTS: int = 5
     WEB_SEARCH_TIMEOUT_SECONDS: int = 8
     WEB_SEARCH_CACHE_TTL_HOURS: int = 12
+    ENABLE_LONGITUDINAL_ANALYSIS: bool = True
+    ANALYSIS_AUTORUN_ON_CHAT: bool = True
+    ANALYSIS_DAILY_HOUR_LOCAL: int = 20
+    ANALYSIS_WEEKLY_WEEKDAY_LOCAL: int = 6  # Sunday
+    ANALYSIS_MONTHLY_DAY_LOCAL: int = 1
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

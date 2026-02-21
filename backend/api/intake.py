@@ -34,6 +34,76 @@ class IntakeSkipRequest(BaseModel):
     skip_all: bool = False
 
 
+class IntakePromptStatusResponse(BaseModel):
+    should_prompt: bool
+    recommended_action: str
+    intake_status: str
+    has_api_key: bool
+    models_ready: bool
+    reason: str
+    message: str
+
+
+@router.get("/prompt-status", response_model=IntakePromptStatusResponse)
+def get_intake_prompt_status(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    settings = user.settings
+    if not settings:
+        raise HTTPException(status_code=404, detail="User settings not found")
+
+    has_api_key = bool(settings.api_key_encrypted)
+    models_ready = all(
+        [
+            bool((settings.reasoning_model or "").strip()),
+            bool((settings.utility_model or "").strip()),
+            bool((settings.deep_thinking_model or settings.reasoning_model or "").strip()),
+        ]
+    )
+    active_session = get_active_session(db, user.id)
+
+    intake_status = "not_started"
+    if settings.intake_completed_at:
+        intake_status = "completed"
+    elif active_session:
+        intake_status = "in_progress"
+    elif settings.intake_skipped_at:
+        intake_status = "skipped"
+
+    should_prompt = has_api_key and models_ready and intake_status in {"not_started", "in_progress"}
+    recommended_action = "continue" if intake_status == "in_progress" else ("start" if should_prompt else "none")
+
+    if not has_api_key:
+        reason = "missing_api_key"
+        message = "Set your API key first."
+    elif not models_ready:
+        reason = "missing_models"
+        message = "Set your models first."
+    elif intake_status == "completed":
+        reason = "intake_completed"
+        message = "Intake is already completed."
+    elif intake_status == "skipped":
+        reason = "intake_skipped"
+        message = "Intake was skipped."
+    elif intake_status == "in_progress":
+        reason = "intake_in_progress"
+        message = "Resume your intake to finish profile setup."
+    else:
+        reason = "intake_not_started"
+        message = "Start intake to complete your profile setup."
+
+    return IntakePromptStatusResponse(
+        should_prompt=should_prompt,
+        recommended_action=recommended_action,
+        intake_status=intake_status,
+        has_api_key=has_api_key,
+        models_ready=models_ready,
+        reason=reason,
+        message=message,
+    )
+
+
 @router.post("/start")
 def start_intake(
     req: IntakeStartRequest = IntakeStartRequest(),

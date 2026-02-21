@@ -29,6 +29,8 @@ from db.models import (
     FastingLog,
     SleepLog,
     Summary,
+    AnalysisRun,
+    AnalysisProposal,
     MealTemplate,
     Notification,
     IntakeSession,
@@ -50,6 +52,7 @@ class APIKeyRequest(BaseModel):
     api_key: str
     reasoning_model: Optional[str] = None
     utility_model: Optional[str] = None
+    deep_thinking_model: Optional[str] = None
 
 
 class APIKeyStatusResponse(BaseModel):
@@ -57,6 +60,7 @@ class APIKeyStatusResponse(BaseModel):
     has_api_key: bool
     reasoning_model: str
     utility_model: str
+    deep_thinking_model: str
 
 
 class ProfileUpdate(BaseModel):
@@ -83,6 +87,7 @@ class ProfileResponse(BaseModel):
     has_api_key: bool
     reasoning_model: str
     utility_model: str
+    deep_thinking_model: str
     age: Optional[int] = None
     sex: Optional[str] = None
     height_cm: Optional[float] = None
@@ -105,82 +110,281 @@ class ProfileResponse(BaseModel):
 _MODELS_FILE = Path(__file__).parent.parent / "data" / "models.json"
 
 _FALLBACK_DEFAULTS = {
-    "anthropic": {"reasoning": "claude-sonnet-4-20250514", "utility": "claude-haiku-4-5-20251001"},
-    "openai": {"reasoning": "gpt-4o", "utility": "gpt-4o-mini"},
-    "google": {"reasoning": "gemini-2.5-pro", "utility": "gemini-2.0-flash"},
+    "anthropic": {
+        "reasoning": "claude-sonnet-4-5-20250929",
+        "utility": "claude-haiku-4-5-20251001",
+        "deep_thinking": "claude-sonnet-4-5-20250929",
+    },
+    "openai": {
+        "reasoning": "gpt-4o",
+        "utility": "gpt-4o-mini",
+        "deep_thinking": "gpt-4.1",
+    },
+    "google": {
+        "reasoning": "gemini-2.5-pro",
+        "utility": "gemini-2.0-flash",
+        "deep_thinking": "gemini-2.5-pro",
+    },
 }
 
 _FALLBACK_AVAILABLE = {
     "anthropic": {
-        "reasoning": [{"id": "claude-sonnet-4-20250514", "name": "Claude Sonnet 4"}],
+        "reasoning": [
+            {"id": "claude-sonnet-4-20250514", "name": "Claude Sonnet 4"},
+            {"id": "claude-sonnet-4-5-20250929", "name": "Claude Sonnet 4.5"},
+            {"id": "claude-opus-4-6", "name": "Claude Opus 4.6"},
+        ],
         "utility": [{"id": "claude-haiku-4-5-20251001", "name": "Claude Haiku 4.5"}],
+        "deep_thinking": [
+            {"id": "claude-sonnet-4-20250514", "name": "Claude Sonnet 4"},
+            {"id": "claude-sonnet-4-5-20250929", "name": "Claude Sonnet 4.5"},
+            {"id": "claude-opus-4-6", "name": "Claude Opus 4.6"},
+        ],
     },
     "openai": {
-        "reasoning": [{"id": "gpt-4o", "name": "GPT-4o"}],
-        "utility": [{"id": "gpt-4o-mini", "name": "GPT-4o Mini"}],
+        "reasoning": [
+            {"id": "gpt-4o", "name": "GPT-4o"},
+            {"id": "o4-mini", "name": "o4-mini"},
+            {"id": "o3", "name": "o3"},
+            {"id": "o3-mini", "name": "o3-mini"},
+            {"id": "gpt-4.1", "name": "GPT-4.1"},
+        ],
+        "utility": [
+            {"id": "gpt-4o-mini", "name": "GPT-4o Mini"},
+            {"id": "gpt-4.1-mini", "name": "GPT-4.1 Mini"},
+        ],
+        "deep_thinking": [
+            {"id": "gpt-4.1", "name": "GPT-4.1"},
+            {"id": "o3", "name": "o3"},
+            {"id": "o3-mini", "name": "o3-mini"},
+        ],
     },
     "google": {
-        "reasoning": [{"id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro"}],
-        "utility": [{"id": "gemini-2.0-flash", "name": "Gemini 2.0 Flash"}],
+        "reasoning": [
+            {"id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro"},
+            {"id": "gemini-2.5-flash", "name": "Gemini 2.5 Flash"},
+        ],
+        "utility": [
+            {"id": "gemini-2.0-flash", "name": "Gemini 2.0 Flash"},
+            {"id": "gemini-2.0-flash-lite", "name": "Gemini 2.0 Flash Lite"},
+        ],
+        "deep_thinking": [
+            {"id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro"},
+            {"id": "gemini-2.5-pro-preview-05-06", "name": "Gemini 2.5 Pro Preview"},
+        ],
+    },
+}
+
+_FALLBACK_ROLE_HINTS = {
+    "utility": {
+        "title": "Utility (Fast Structured Work)",
+        "description": "Use for extraction, parsing, classification, and other high-volume transforms.",
+        "selection_tips": [
+            "Prioritize speed and deterministic outputs.",
+            "Move up one tier if extraction quality is weak.",
+            "Keep utility models cost efficient.",
+        ],
+    },
+    "reasoning": {
+        "title": "Reasoning (Primary Coaching)",
+        "description": "Use for day-to-day coaching dialogue and actionable recommendations.",
+        "selection_tips": [
+            "Balance quality and cost for chat frequency.",
+            "Prefer strong instruction-following models.",
+            "Move up when recommendations feel shallow.",
+        ],
+    },
+    "deep_thinking": {
+        "title": "Deep Thinking (Longitudinal Analytics)",
+        "description": "Use for monthly synthesis, root-cause hypotheses, and adaptation proposals.",
+        "selection_tips": [
+            "Favor quality over speed for this role.",
+            "Run with approval gates for adaptive changes.",
+            "Use premium models for complex trend interpretation.",
+        ],
+    },
+}
+
+_FALLBACK_PRESETS = {
+    "anthropic": {
+        "budget": {
+            "label": "Budget",
+            "description": "Low-cost/faster setup.",
+            "reasoning": "claude-sonnet-4-20250514",
+            "utility": "claude-haiku-4-5-20251001",
+            "deep_thinking": "claude-sonnet-4-20250514",
+        },
+        "balanced": {
+            "label": "Balanced",
+            "description": "Recommended quality/cost balance.",
+            "reasoning": "claude-sonnet-4-5-20250929",
+            "utility": "claude-haiku-4-5-20251001",
+            "deep_thinking": "claude-sonnet-4-5-20250929",
+        },
+        "premium": {
+            "label": "Premium",
+            "description": "Highest quality and cost.",
+            "reasoning": "claude-opus-4-6",
+            "utility": "claude-haiku-4-5-20251001",
+            "deep_thinking": "claude-opus-4-6",
+        },
+    },
+    "openai": {
+        "budget": {
+            "label": "Budget",
+            "description": "Low-cost/faster setup.",
+            "reasoning": "o4-mini",
+            "utility": "gpt-4o-mini",
+            "deep_thinking": "o3-mini",
+        },
+        "balanced": {
+            "label": "Balanced",
+            "description": "Recommended quality/cost balance.",
+            "reasoning": "gpt-4o",
+            "utility": "gpt-4o-mini",
+            "deep_thinking": "gpt-4.1",
+        },
+        "premium": {
+            "label": "Premium",
+            "description": "Highest quality and cost.",
+            "reasoning": "o3",
+            "utility": "gpt-4o-mini",
+            "deep_thinking": "o3",
+        },
+    },
+    "google": {
+        "budget": {
+            "label": "Budget",
+            "description": "Low-cost/faster setup.",
+            "reasoning": "gemini-2.5-flash",
+            "utility": "gemini-2.0-flash-lite",
+            "deep_thinking": "gemini-2.5-flash",
+        },
+        "balanced": {
+            "label": "Balanced",
+            "description": "Recommended quality/cost balance.",
+            "reasoning": "gemini-2.5-pro",
+            "utility": "gemini-2.0-flash",
+            "deep_thinking": "gemini-2.5-pro",
+        },
+        "premium": {
+            "label": "Premium",
+            "description": "Highest quality and cost.",
+            "reasoning": "gemini-2.5-pro-preview-05-06",
+            "utility": "gemini-2.0-flash",
+            "deep_thinking": "gemini-2.5-pro-preview-05-06",
+        },
     },
 }
 
 
-def _load_models() -> tuple[dict, dict]:
+def _load_models_config() -> dict:
     """Load model config from data/models.json, falling back to built-in defaults."""
     try:
         data = json.loads(_MODELS_FILE.read_text(encoding="utf-8"))
-        return data.get("defaults", _FALLBACK_DEFAULTS), data.get("available", _FALLBACK_AVAILABLE)
+        if not isinstance(data, dict):
+            data = {}
     except Exception:
-        return _FALLBACK_DEFAULTS, _FALLBACK_AVAILABLE
+        data = {}
+    return {
+        "defaults": data.get("defaults", _FALLBACK_DEFAULTS),
+        "available": data.get("available", _FALLBACK_AVAILABLE),
+        "role_hints": data.get("role_hints", _FALLBACK_ROLE_HINTS),
+        "presets": data.get("presets", _FALLBACK_PRESETS),
+        "pricing": data.get("pricing", {}),
+    }
 
 
 def _get_default_models() -> dict:
-    return _load_models()[0]
+    return _load_models_config()["defaults"]
 
 
 def _get_available_models() -> dict:
-    return _load_models()[1]
+    return _load_models_config()["available"]
+
+
+def _get_role_hints() -> dict:
+    return _load_models_config()["role_hints"]
+
+
+def _get_presets() -> dict:
+    return _load_models_config()["presets"]
 
 
 def _get_pricing() -> dict:
-    """Load per-model pricing from data/models.json."""
-    try:
-        data = json.loads(_MODELS_FILE.read_text(encoding="utf-8"))
-        return data.get("pricing", {})
-    except Exception:
-        return {}
+    return _load_models_config()["pricing"]
 
 
-def _available_model_ids(provider: str) -> tuple[set[str], set[str]]:
+def _available_model_ids(provider: str) -> tuple[set[str], set[str], set[str]]:
     available = _get_available_models()
     provider_models = available.get(provider, available.get("anthropic", {}))
     reasoning_ids = {str(m.get("id", "")).strip() for m in provider_models.get("reasoning", []) if str(m.get("id", "")).strip()}
     utility_ids = {str(m.get("id", "")).strip() for m in provider_models.get("utility", []) if str(m.get("id", "")).strip()}
-    return reasoning_ids, utility_ids
+    deep_ids = {
+        str(m.get("id", "")).strip()
+        for m in provider_models.get("deep_thinking", provider_models.get("reasoning", []))
+        if str(m.get("id", "")).strip()
+    }
+    return reasoning_ids, utility_ids, deep_ids
+
+
+def _normalized_presets_for_provider(provider: str) -> dict:
+    defaults = _get_default_models().get(provider, _get_default_models().get("anthropic", _FALLBACK_DEFAULTS["anthropic"]))
+    raw_presets = _get_presets().get(provider, {})
+    reasoning_ids, utility_ids, deep_ids = _available_model_ids(provider)
+
+    out: dict[str, dict] = {}
+    for preset_name, preset in raw_presets.items():
+        if not isinstance(preset, dict):
+            continue
+        reasoning = str(preset.get("reasoning", "")).strip()
+        utility = str(preset.get("utility", "")).strip()
+        deep = str(preset.get("deep_thinking", "")).strip()
+        out[preset_name] = {
+            "label": str(preset.get("label", preset_name)).strip() or preset_name,
+            "description": str(preset.get("description", "")).strip(),
+            "reasoning": reasoning if reasoning and (not reasoning_ids or reasoning in reasoning_ids) else defaults["reasoning"],
+            "utility": utility if utility and (not utility_ids or utility in utility_ids) else defaults["utility"],
+            "deep_thinking": deep if deep and (not deep_ids or deep in deep_ids) else defaults.get("deep_thinking", defaults["reasoning"]),
+        }
+
+    if not out:
+        out["balanced"] = {
+            "label": "Balanced",
+            "description": "Recommended quality/cost balance.",
+            "reasoning": defaults["reasoning"],
+            "utility": defaults["utility"],
+            "deep_thinking": defaults.get("deep_thinking", defaults["reasoning"]),
+        }
+    return out
 
 
 def _normalize_models_for_provider(
     provider: str,
     reasoning_model: str | None,
     utility_model: str | None,
-) -> tuple[str, str]:
+    deep_thinking_model: str | None,
+) -> tuple[str, str, str]:
     defaults = _get_default_models().get(provider, _get_default_models().get("anthropic", _FALLBACK_DEFAULTS["anthropic"]))
-    reasoning_ids, utility_ids = _available_model_ids(provider)
+    reasoning_ids, utility_ids, deep_ids = _available_model_ids(provider)
 
     reasoning = (reasoning_model or "").strip()
     utility = (utility_model or "").strip()
+    deep = (deep_thinking_model or "").strip()
 
     normalized_reasoning = reasoning if reasoning and (not reasoning_ids or reasoning in reasoning_ids) else defaults["reasoning"]
     normalized_utility = utility if utility and (not utility_ids or utility in utility_ids) else defaults["utility"]
-    return normalized_reasoning, normalized_utility
+    default_deep = defaults.get("deep_thinking", defaults["reasoning"])
+    normalized_deep = deep if deep and (not deep_ids or deep in deep_ids) else default_deep
+    return normalized_reasoning, normalized_utility, normalized_deep
 
 
 def _sync_user_models_for_provider(user_settings: UserSettings) -> bool:
-    normalized_reasoning, normalized_utility = _normalize_models_for_provider(
+    normalized_reasoning, normalized_utility, normalized_deep = _normalize_models_for_provider(
         user_settings.ai_provider,
         user_settings.reasoning_model,
         user_settings.utility_model,
+        user_settings.deep_thinking_model,
     )
     changed = False
     if user_settings.reasoning_model != normalized_reasoning:
@@ -189,6 +393,9 @@ def _sync_user_models_for_provider(user_settings: UserSettings) -> bool:
     if user_settings.utility_model != normalized_utility:
         user_settings.utility_model = normalized_utility
         changed = True
+    if user_settings.deep_thinking_model != normalized_deep:
+        user_settings.deep_thinking_model = normalized_deep
+        changed = True
     return changed
 
 
@@ -196,7 +403,7 @@ def _get_model_name(model_id: str) -> str:
     """Look up a friendly model name from the available models config."""
     available = _get_available_models()
     for provider_models in available.values():
-        for role in ("reasoning", "utility"):
+        for role in ("reasoning", "utility", "deep_thinking"):
             for m in provider_models.get(role, []):
                 if m["id"] == model_id:
                     return m["name"]
@@ -210,12 +417,22 @@ def get_available_models(provider: str = "anthropic"):
     default_models = _get_default_models()
     models = available.get(provider, available.get("anthropic", {}))
     defaults = default_models.get(provider, default_models.get("anthropic", {}))
+    role_hints = _get_role_hints()
+    presets = _normalized_presets_for_provider(provider)
     return {
         "provider": provider,
         "reasoning_models": models["reasoning"],
         "utility_models": models["utility"],
+        "deep_thinking_models": models.get("deep_thinking", models["reasoning"]),
         "default_reasoning": defaults["reasoning"],
         "default_utility": defaults["utility"],
+        "default_deep_thinking": defaults.get("deep_thinking", defaults["reasoning"]),
+        "role_hints": {
+            "utility": role_hints.get("utility", _FALLBACK_ROLE_HINTS["utility"]),
+            "reasoning": role_hints.get("reasoning", _FALLBACK_ROLE_HINTS["reasoning"]),
+            "deep_thinking": role_hints.get("deep_thinking", _FALLBACK_ROLE_HINTS["deep_thinking"]),
+        },
+        "presets": presets,
     }
 
 
@@ -231,6 +448,7 @@ def get_profile(user: User = Depends(get_current_user), db: Session = Depends(ge
         has_api_key=bool(s.api_key_encrypted),
         reasoning_model=s.reasoning_model,
         utility_model=s.utility_model,
+        deep_thinking_model=s.deep_thinking_model or s.reasoning_model,
         age=s.age,
         sex=s.sex,
         height_cm=s.height_cm,
@@ -253,6 +471,7 @@ def get_profile(user: User = Depends(get_current_user), db: Session = Depends(ge
 class ModelsUpdate(BaseModel):
     reasoning_model: str
     utility_model: str
+    deep_thinking_model: str
 
 
 class ChangePasswordRequest(BaseModel):
@@ -272,15 +491,22 @@ def update_models(
     db: Session = Depends(get_db),
 ):
     s = user.settings
-    normalized_reasoning, normalized_utility = _normalize_models_for_provider(
+    normalized_reasoning, normalized_utility, normalized_deep = _normalize_models_for_provider(
         s.ai_provider,
         update.reasoning_model,
         update.utility_model,
+        update.deep_thinking_model,
     )
     s.reasoning_model = normalized_reasoning
     s.utility_model = normalized_utility
+    s.deep_thinking_model = normalized_deep
     db.commit()
-    return {"status": "ok", "reasoning_model": normalized_reasoning, "utility_model": normalized_utility}
+    return {
+        "status": "ok",
+        "reasoning_model": normalized_reasoning,
+        "utility_model": normalized_utility,
+        "deep_thinking_model": normalized_deep,
+    }
 
 
 @router.put("/profile")
@@ -346,13 +572,15 @@ def set_api_key(
     s.ai_provider = req.ai_provider
     s.api_key_encrypted = encrypt_api_key(req.api_key)
 
-    normalized_reasoning, normalized_utility = _normalize_models_for_provider(
+    normalized_reasoning, normalized_utility, normalized_deep = _normalize_models_for_provider(
         req.ai_provider,
         req.reasoning_model,
         req.utility_model,
+        req.deep_thinking_model,
     )
     s.reasoning_model = normalized_reasoning
     s.utility_model = normalized_utility
+    s.deep_thinking_model = normalized_deep
 
     db.commit()
     return {
@@ -360,6 +588,7 @@ def set_api_key(
         "ai_provider": s.ai_provider,
         "reasoning_model": s.reasoning_model,
         "utility_model": s.utility_model,
+        "deep_thinking_model": s.deep_thinking_model,
     }
 
 
@@ -373,6 +602,7 @@ def get_api_key_status(user: User = Depends(get_current_user), db: Session = Dep
         has_api_key=bool(s.api_key_encrypted),
         reasoning_model=s.reasoning_model,
         utility_model=s.utility_model,
+        deep_thinking_model=s.deep_thinking_model or s.reasoning_model,
     )
 
 
@@ -398,6 +628,7 @@ async def validate_api_key(
             api_key,
             reasoning_model=s.reasoning_model,
             utility_model=s.utility_model,
+            deep_thinking_model=s.deep_thinking_model,
         )
         await provider.validate_key()
         return {"status": "valid", "ai_provider": s.ai_provider}
@@ -560,6 +791,8 @@ def reset_user_data(
     db.query(IntakeSession).filter(IntakeSession.user_id == user.id).delete(synchronize_session=False)
     db.query(FeedbackEntry).filter(FeedbackEntry.created_by_user_id == user.id).delete(synchronize_session=False)
     db.query(ModelUsageEvent).filter(ModelUsageEvent.user_id == user.id).delete(synchronize_session=False)
+    db.query(AnalysisProposal).filter(AnalysisProposal.user_id == user.id).delete(synchronize_session=False)
+    db.query(AnalysisRun).filter(AnalysisRun.user_id == user.id).delete(synchronize_session=False)
 
     defaults = _get_default_models().get("anthropic", _FALLBACK_DEFAULTS["anthropic"])
     s = user.settings
@@ -570,6 +803,7 @@ def reset_user_data(
     s.api_key_encrypted = None
     s.reasoning_model = defaults["reasoning"]
     s.utility_model = defaults["utility"]
+    s.deep_thinking_model = defaults.get("deep_thinking", defaults["reasoning"])
     s.age = None
     s.sex = None
     s.height_cm = None

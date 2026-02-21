@@ -20,8 +20,9 @@ class AnthropicProvider(AIProvider):
         api_key: str,
         reasoning_model: str | None = None,
         utility_model: str | None = None,
+        deep_thinking_model: str | None = None,
     ):
-        super().__init__(api_key, reasoning_model, utility_model)
+        super().__init__(api_key, reasoning_model, utility_model, deep_thinking_model)
         self._headers = {
             "x-api-key": self.api_key,
             "anthropic-version": "2023-06-01",

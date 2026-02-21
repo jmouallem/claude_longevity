@@ -422,6 +422,7 @@ async def generate_exercise_plan(
         api_key,
         reasoning_model=settings.reasoning_model,
         utility_model=settings.utility_model,
+        deep_thinking_model=getattr(settings, "deep_thinking_model", None),
     )
     system = build_context(db, user, "movement_coach")
     user_prompt = (

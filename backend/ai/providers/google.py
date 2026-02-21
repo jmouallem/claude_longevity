@@ -20,8 +20,9 @@ class GoogleProvider(AIProvider):
         api_key: str,
         reasoning_model: str | None = None,
         utility_model: str | None = None,
+        deep_thinking_model: str | None = None,
     ):
-        super().__init__(api_key, reasoning_model, utility_model)
+        super().__init__(api_key, reasoning_model, utility_model, deep_thinking_model)
 
     def supports_web_search(self) -> bool:
         return True

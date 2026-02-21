@@ -24,6 +24,7 @@ def get_provider(
     api_key: str,
     reasoning_model: str | None = None,
     utility_model: str | None = None,
+    deep_thinking_model: str | None = None,
 ) -> AIProvider:
     providers = {
         "anthropic": AnthropicProvider,
@@ -36,4 +37,10 @@ def get_provider(
 
     safe_reasoning = reasoning_model if _looks_like_provider_model(provider_name, reasoning_model) else None
     safe_utility = utility_model if _looks_like_provider_model(provider_name, utility_model) else None
-    return cls(api_key=api_key, reasoning_model=safe_reasoning, utility_model=safe_utility)
+    safe_deep = deep_thinking_model if _looks_like_provider_model(provider_name, deep_thinking_model) else None
+    return cls(
+        api_key=api_key,
+        reasoning_model=safe_reasoning,
+        utility_model=safe_utility,
+        deep_thinking_model=safe_deep,
+    )

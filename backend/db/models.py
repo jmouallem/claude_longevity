@@ -25,6 +25,13 @@ class User(Base):
     meal_template_versions = relationship("MealTemplateVersion", back_populates="user", cascade="all, delete-orphan")
     meal_response_signals = relationship("MealResponseSignal", back_populates="user", cascade="all, delete-orphan")
     notifications = relationship("Notification", back_populates="user", cascade="all, delete-orphan")
+    analysis_runs = relationship("AnalysisRun", back_populates="user", cascade="all, delete-orphan")
+    analysis_proposals = relationship(
+        "AnalysisProposal",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        foreign_keys="AnalysisProposal.user_id",
+    )
 
 
 class UserSettings(Base):
@@ -36,6 +43,7 @@ class UserSettings(Base):
     api_key_encrypted = Column(Text)
     reasoning_model = Column(Text, default="claude-sonnet-4-20250514")
     utility_model = Column(Text, default="claude-haiku-4-5-20251001")
+    deep_thinking_model = Column(Text, default="claude-sonnet-4-20250514")
     age = Column(Integer)
     sex = Column(Text)
     height_cm = Column(Float)
@@ -348,6 +356,56 @@ class Summary(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class AnalysisRun(Base):
+    __tablename__ = "analysis_runs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    run_type = Column(Text, nullable=False)  # daily | weekly | monthly
+    period_start = Column(Text, nullable=False)  # DATE as text for SQLite
+    period_end = Column(Text, nullable=False)  # DATE as text for SQLite
+    status = Column(Text, nullable=False, default="completed")  # running | completed | failed
+    confidence = Column(Float)
+    used_utility_model = Column(Text)
+    used_reasoning_model = Column(Text)
+    used_deep_model = Column(Text)
+    metrics_json = Column(Text)  # JSON object
+    missing_data_json = Column(Text)  # JSON array
+    risk_flags_json = Column(Text)  # JSON array
+    synthesis_json = Column(Text)  # JSON object
+    summary_markdown = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    completed_at = Column(DateTime)
+    error_message = Column(Text)
+
+    user = relationship("User", back_populates="analysis_runs")
+    proposals = relationship("AnalysisProposal", back_populates="analysis_run", cascade="all, delete-orphan")
+
+
+class AnalysisProposal(Base):
+    __tablename__ = "analysis_proposals"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    analysis_run_id = Column(Integer, ForeignKey("analysis_runs.id"), nullable=False)
+    proposal_kind = Column(Text, nullable=False)  # guidance_update | prompt_adjustment | experiment
+    status = Column(Text, nullable=False, default="pending")  # pending | approved | rejected | applied | expired
+    title = Column(Text, nullable=False)
+    rationale = Column(Text, nullable=False)
+    confidence = Column(Float)
+    requires_approval = Column(Boolean, default=True)
+    proposal_json = Column(Text, nullable=False)  # JSON object payload
+    diff_markdown = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    reviewed_at = Column(DateTime)
+    reviewer_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    review_note = Column(Text)
+    applied_at = Column(DateTime)
+
+    user = relationship("User", back_populates="analysis_proposals", foreign_keys=[user_id])
+    analysis_run = relationship("AnalysisRun", back_populates="proposals")
+
+
 class FeedbackEntry(Base):
     __tablename__ = "feedback_entries"
 
@@ -407,3 +465,7 @@ Index("idx_fasting_log_user_date", FastingLog.user_id, FastingLog.fast_start)
 Index("idx_feedback_created_at", FeedbackEntry.created_at)
 Index("idx_feedback_type", FeedbackEntry.feedback_type)
 Index("idx_intake_session_user_status", IntakeSession.user_id, IntakeSession.status, IntakeSession.updated_at)
+Index("idx_analysis_runs_user_type_period", AnalysisRun.user_id, AnalysisRun.run_type, AnalysisRun.period_end)
+Index("idx_analysis_runs_user_status", AnalysisRun.user_id, AnalysisRun.status, AnalysisRun.created_at)
+Index("idx_analysis_proposals_user_status", AnalysisProposal.user_id, AnalysisProposal.status, AnalysisProposal.created_at)
+Index("idx_analysis_proposals_run", AnalysisProposal.analysis_run_id, AnalysisProposal.status)

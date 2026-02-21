@@ -292,4 +292,10 @@ def build_context(db: Session, user: User, specialist: str = "orchestrator") -> 
     if weekly:
         sections.append(f"## Last Week's Summary\n{weekly}")
 
+    # 7. Approved adaptive guidance (user-approved proposals only)
+    from services.analysis_service import get_approved_guidance_for_context
+    approved_guidance = get_approved_guidance_for_context(db, user)
+    if approved_guidance:
+        sections.append(approved_guidance)
+
     return "\n\n".join(sections)

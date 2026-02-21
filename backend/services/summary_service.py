@@ -146,6 +146,7 @@ async def generate_summary(db: Session, user: User, summary_type: str, target_da
         api_key,
         reasoning_model=settings.reasoning_model,
         utility_model=settings.utility_model,
+        deep_thinking_model=getattr(settings, "deep_thinking_model", None),
     )
     profile = format_user_profile(settings)
 

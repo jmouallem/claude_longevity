@@ -11,14 +11,52 @@ import {
   type HydrationUnit,
 } from '../utils/units';
 
-type Tab = 'apikey' | 'profile' | 'models' | 'usage' | 'security';
+type Tab = 'apikey' | 'profile' | 'models' | 'usage' | 'adaptation' | 'security';
 type Provider = 'anthropic' | 'openai' | 'google';
+type ModelRole = 'utility' | 'reasoning' | 'deep_thinking';
+
+interface ModelOption {
+  id: string;
+  name: string;
+  hint?: string;
+  quality_tier?: string;
+  speed_tier?: string;
+  cost_tier?: string;
+  best_for?: string[];
+}
+
+interface RoleHint {
+  title: string;
+  description: string;
+  selection_tips: string[];
+}
+
+interface ModelPreset {
+  label: string;
+  description: string;
+  reasoning: string;
+  utility: string;
+  deep_thinking: string;
+}
+
+interface ModelsResponse {
+  provider: string;
+  reasoning_models: ModelOption[];
+  utility_models: ModelOption[];
+  deep_thinking_models: ModelOption[];
+  default_reasoning: string;
+  default_utility: string;
+  default_deep_thinking: string;
+  role_hints: Record<ModelRole, RoleHint>;
+  presets: Record<string, ModelPreset>;
+}
 
 interface ProfileData {
   ai_provider: string;
   has_api_key: boolean;
   reasoning_model: string;
   utility_model: string;
+  deep_thinking_model: string;
   age: number | null;
   sex: string | null;
   height_cm: number | null;
@@ -282,14 +320,10 @@ export default function Settings() {
   // Models state
   const [reasoningModel, setReasoningModel] = useState('');
   const [utilityModel, setUtilityModel] = useState('');
+  const [deepThinkingModel, setDeepThinkingModel] = useState('');
   const [modelsSaving, setModelsSaving] = useState(false);
   const [modelsMessage, setModelsMessage] = useState('');
-  const [availableModels, setAvailableModels] = useState<{
-    reasoning_models: { id: string; name: string }[];
-    utility_models: { id: string; name: string }[];
-    default_reasoning: string;
-    default_utility: string;
-  } | null>(null);
+  const [availableModels, setAvailableModels] = useState<ModelsResponse | null>(null);
 
   // Usage state
   interface UsageModel {
@@ -308,6 +342,34 @@ export default function Settings() {
   const [usageLoading, setUsageLoading] = useState(false);
   const [resetConfirm, setResetConfirm] = useState(false);
 
+  interface AnalysisRunRow {
+    id: number;
+    run_type: 'daily' | 'weekly' | 'monthly' | string;
+    period_start: string;
+    period_end: string;
+    status: string;
+    confidence: number | null;
+    summary_markdown: string | null;
+    created_at: string | null;
+  }
+
+  interface AnalysisProposalRow {
+    id: number;
+    analysis_run_id: number;
+    proposal_kind: string;
+    status: string;
+    title: string;
+    rationale: string;
+    confidence: number | null;
+    created_at: string | null;
+  }
+
+  const [analysisRuns, setAnalysisRuns] = useState<AnalysisRunRow[]>([]);
+  const [analysisProposals, setAnalysisProposals] = useState<AnalysisProposalRow[]>([]);
+  const [analysisLoading, setAnalysisLoading] = useState(false);
+  const [analysisMessage, setAnalysisMessage] = useState('');
+  const [analysisRunType, setAnalysisRunType] = useState<'daily' | 'weekly' | 'monthly'>('daily');
+
   // Security state
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
@@ -318,6 +380,17 @@ export default function Settings() {
   const [resetConfirmation, setResetConfirmation] = useState('');
   const [resetDataSaving, setResetDataSaving] = useState(false);
   const [resetDataMessage, setResetDataMessage] = useState('');
+  const [toast, setToast] = useState<{ message: string; tone: 'info' | 'warn' | 'success' } | null>(null);
+
+  const showToast = useCallback((message: string, tone: 'info' | 'warn' | 'success' = 'info') => {
+    setToast({ message, tone });
+  }, []);
+
+  useEffect(() => {
+    if (!toast) return;
+    const timer = window.setTimeout(() => setToast(null), 4200);
+    return () => window.clearTimeout(timer);
+  }, [toast]);
 
   const fetchUsage = useCallback(async () => {
     setUsageLoading(true);
@@ -345,8 +418,83 @@ export default function Settings() {
     }
   };
 
+  const fetchAnalysis = useCallback(async () => {
+    setAnalysisLoading(true);
+    try {
+      const [runs, proposals] = await Promise.all([
+        apiClient.get<AnalysisRunRow[]>('/api/analysis/runs?limit=20'),
+        apiClient.get<AnalysisProposalRow[]>('/api/analysis/proposals?limit=40'),
+      ]);
+      setAnalysisRuns(runs);
+      setAnalysisProposals(proposals);
+    } catch (e: unknown) {
+      setAnalysisMessage(e instanceof Error ? e.message : 'Failed to load adaptation data.');
+    } finally {
+      setAnalysisLoading(false);
+    }
+  }, []);
+
+  const triggerAnalysisRun = async () => {
+    setAnalysisMessage('');
+    setAnalysisLoading(true);
+    try {
+      await apiClient.post('/api/analysis/runs', { run_type: analysisRunType, force: true });
+      setAnalysisMessage(`${analysisRunType} analysis completed.`);
+      await fetchAnalysis();
+    } catch (e: unknown) {
+      setAnalysisMessage(e instanceof Error ? e.message : 'Failed to run analysis.');
+    } finally {
+      setAnalysisLoading(false);
+    }
+  };
+
+  const triggerDueAnalyses = async () => {
+    setAnalysisMessage('');
+    setAnalysisLoading(true);
+    try {
+      const response = await apiClient.post<{ count: number }>('/api/analysis/runs/due', {});
+      setAnalysisMessage(`Triggered due analysis runs: ${response.count}`);
+      await fetchAnalysis();
+    } catch (e: unknown) {
+      setAnalysisMessage(e instanceof Error ? e.message : 'Failed to trigger due runs.');
+    } finally {
+      setAnalysisLoading(false);
+    }
+  };
+
+  const reviewAnalysisProposal = async (proposalId: number, action: 'approve' | 'reject') => {
+    setAnalysisMessage('');
+    try {
+      await apiClient.post(`/api/analysis/proposals/${proposalId}/review`, { action });
+      setAnalysisMessage(`Proposal ${action}d.`);
+      await fetchAnalysis();
+    } catch (e: unknown) {
+      setAnalysisMessage(e instanceof Error ? e.message : `Failed to ${action} proposal.`);
+    }
+  };
+
   const fmtNum = (n: number) => n.toLocaleString();
   const fmtCost = (n: number) => `$${n.toFixed(4)}`;
+  const tierLabel = (tier?: string) => {
+    const normalized = (tier || '').toLowerCase();
+    if (!normalized) return 'N/A';
+    if (normalized === 'very_high') return 'Very High';
+    if (normalized === 'high') return 'High';
+    if (normalized === 'medium') return 'Medium';
+    if (normalized === 'low') return 'Low';
+    if (normalized === 'fast') return 'Fast';
+    if (normalized === 'slow') return 'Slow';
+    return normalized.replace(/_/g, ' ');
+  };
+  const costBadge = (tier?: string) => {
+    const normalized = (tier || '').toLowerCase();
+    if (normalized === 'low') return '$';
+    if (normalized === 'medium') return '$$';
+    if (normalized === 'high') return '$$$';
+    if (normalized === 'very_high') return '$$$$';
+    return '?';
+  };
+  const findModelById = (options: ModelOption[], modelId: string) => options.find((m) => m.id === modelId);
 
   // Parse stored string into tags (handles both JSON arrays and comma-separated)
   const parseToTags = (val: string | null): string[] => {
@@ -518,6 +666,7 @@ export default function Settings() {
       setHealthGoalsTags(parseToTags(p.health_goals));
       setReasoningModel(p.reasoning_model ?? '');
       setUtilityModel(p.utility_model ?? '');
+      setDeepThinkingModel(p.deep_thinking_model ?? p.reasoning_model ?? '');
     } catch {
       // ignore
     } finally {
@@ -527,12 +676,7 @@ export default function Settings() {
 
   const fetchModels = useCallback(async (prov: string) => {
     try {
-      const m = await apiClient.get<{
-        reasoning_models: { id: string; name: string }[];
-        utility_models: { id: string; name: string }[];
-        default_reasoning: string;
-        default_utility: string;
-      }>(`/api/settings/models?provider=${prov}`);
+      const m = await apiClient.get<ModelsResponse>(`/api/settings/models?provider=${prov}`);
       setAvailableModels(m);
     } catch {
       // ignore
@@ -551,34 +695,70 @@ export default function Settings() {
     if (!availableModels) return;
     const reasoningIds = new Set(availableModels.reasoning_models.map((m) => m.id));
     const utilityIds = new Set(availableModels.utility_models.map((m) => m.id));
+    const deepIds = new Set(availableModels.deep_thinking_models.map((m) => m.id));
 
     if (!reasoningIds.has(reasoningModel)) {
+      if (reasoningModel) {
+        showToast(`Reasoning model is not available for ${provider}. Reset to provider default.`, 'warn');
+      }
       setReasoningModel(availableModels.default_reasoning);
     }
     if (!utilityIds.has(utilityModel)) {
+      if (utilityModel) {
+        showToast(`Utility model is not available for ${provider}. Reset to provider default.`, 'warn');
+      }
       setUtilityModel(availableModels.default_utility);
     }
-  }, [availableModels, reasoningModel, utilityModel]);
+    if (!deepIds.has(deepThinkingModel)) {
+      if (deepThinkingModel) {
+        showToast(`Deep-thinking model is not available for ${provider}. Reset to provider default.`, 'warn');
+      }
+      setDeepThinkingModel(availableModels.default_deep_thinking);
+    }
+  }, [availableModels, reasoningModel, utilityModel, deepThinkingModel, provider, showToast]);
 
   useEffect(() => {
     if (tab === 'usage') fetchUsage();
   }, [tab, fetchUsage]);
+
+  useEffect(() => {
+    if (tab === 'adaptation') fetchAnalysis();
+  }, [tab, fetchAnalysis]);
 
   const saveApiKey = async () => {
     if (!apiKey.trim()) return;
     setKeySaving(true);
     setKeyMessage('');
     try {
-      await apiClient.put('/api/settings/api-key', {
+      const res = await apiClient.put<{
+        status: string;
+        ai_provider: string;
+        reasoning_model: string;
+        utility_model: string;
+        deep_thinking_model: string;
+      }>('/api/settings/api-key', {
         ai_provider: provider,
         api_key: apiKey,
         reasoning_model: reasoningModel || undefined,
         utility_model: utilityModel || undefined,
+        deep_thinking_model: deepThinkingModel || reasoningModel || undefined,
       });
+      if (
+        res.reasoning_model !== reasoningModel ||
+        res.utility_model !== utilityModel ||
+        res.deep_thinking_model !== deepThinkingModel
+      ) {
+        showToast('Some selected models were adjusted to supported defaults for this provider.', 'warn');
+      }
+      setReasoningModel(res.reasoning_model);
+      setUtilityModel(res.utility_model);
+      setDeepThinkingModel(res.deep_thinking_model);
       setHasKey(true);
       setKeyMessage('API key saved successfully.');
+      showToast('API key and model routing saved.', 'success');
       setKeyValid(null);
       setApiKey('');
+      window.dispatchEvent(new Event('intake:check'));
     } catch (e: unknown) {
       setKeyMessage(e instanceof Error ? e.message : 'Failed to save API key.');
     } finally {
@@ -661,16 +841,44 @@ export default function Settings() {
     setModelsSaving(true);
     setModelsMessage('');
     try {
-      await apiClient.put('/api/settings/models', {
+      const res = await apiClient.put<{
+        status: string;
+        reasoning_model: string;
+        utility_model: string;
+        deep_thinking_model: string;
+      }>('/api/settings/models', {
         reasoning_model: reasoningModel,
         utility_model: utilityModel,
+        deep_thinking_model: deepThinkingModel,
       });
+      if (
+        res.reasoning_model !== reasoningModel ||
+        res.utility_model !== utilityModel ||
+        res.deep_thinking_model !== deepThinkingModel
+      ) {
+        showToast('One or more selected models were not valid and were reset to supported defaults.', 'warn');
+      }
+      setReasoningModel(res.reasoning_model);
+      setUtilityModel(res.utility_model);
+      setDeepThinkingModel(res.deep_thinking_model);
       setModelsMessage('Models saved successfully.');
+      showToast('Model routing saved.', 'success');
+      window.dispatchEvent(new Event('intake:check'));
     } catch (e: unknown) {
       setModelsMessage(e instanceof Error ? e.message : 'Failed to save models.');
     } finally {
       setModelsSaving(false);
     }
+  };
+
+  const applyPreset = (presetKey: string) => {
+    if (!availableModels) return;
+    const preset = availableModels.presets?.[presetKey];
+    if (!preset) return;
+    setReasoningModel(preset.reasoning);
+    setUtilityModel(preset.utility);
+    setDeepThinkingModel(preset.deep_thinking);
+    showToast(`Applied "${preset.label}" preset. You can still override each role manually.`, 'info');
   };
 
   const changePassword = async () => {
@@ -727,12 +935,23 @@ export default function Settings() {
       setResetConfirmation('');
       await fetchProfile();
       setUsageData(null);
+      window.dispatchEvent(new Event('intake:check'));
     } catch (e: unknown) {
       setResetDataMessage(e instanceof Error ? e.message : 'Failed to reset data.');
     } finally {
       setResetDataSaving(false);
     }
   };
+
+  const selectedReasoningOption = availableModels
+    ? findModelById(availableModels.reasoning_models, reasoningModel)
+    : undefined;
+  const selectedUtilityOption = availableModels
+    ? findModelById(availableModels.utility_models, utilityModel)
+    : undefined;
+  const selectedDeepOption = availableModels
+    ? findModelById(availableModels.deep_thinking_models, deepThinkingModel)
+    : undefined;
 
   if (loading) {
     return (
@@ -744,6 +963,22 @@ export default function Settings() {
 
   return (
     <div className="max-w-3xl mx-auto px-4 py-6">
+      {toast && (
+        <div className="fixed right-4 top-20 z-50 max-w-sm">
+          <div
+            className={`rounded-lg border px-3 py-2 text-sm shadow-lg ${
+              toast.tone === 'warn'
+                ? 'bg-amber-950/90 border-amber-700 text-amber-200'
+                : toast.tone === 'success'
+                  ? 'bg-emerald-950/90 border-emerald-700 text-emerald-200'
+                  : 'bg-slate-900/95 border-slate-700 text-slate-100'
+            }`}
+          >
+            {toast.message}
+          </div>
+        </div>
+      )}
+
       <h1 className="text-2xl font-bold text-slate-100 mb-6">Settings</h1>
 
       {/* No API Key Warning */}
@@ -764,6 +999,7 @@ export default function Settings() {
         <TabButton active={tab === 'models'} label="Models" onClick={() => setTab('models')} />
         <TabButton active={tab === 'apikey'} label="API Key" onClick={() => setTab('apikey')} />
         <TabButton active={tab === 'usage'} label="Usage" onClick={() => setTab('usage')} />
+        <TabButton active={tab === 'adaptation'} label="Adaptation" onClick={() => setTab('adaptation')} />
         <TabButton active={tab === 'security'} label="Security" onClick={() => setTab('security')} />
       </div>
 
@@ -1074,6 +1310,27 @@ export default function Settings() {
             Select which models to use for the <span className="text-emerald-400 font-medium">{provider}</span> provider.
           </p>
 
+          {availableModels?.presets && (
+            <div className="rounded-lg border border-slate-700 bg-slate-900/40 p-3 space-y-2">
+              <p className="text-sm text-slate-200 font-medium">Quick Presets</p>
+              <p className="text-xs text-slate-400">
+                Apply a starting profile, then override any role below.
+              </p>
+              <div className="flex flex-wrap gap-2">
+                {Object.entries(availableModels.presets).map(([key, preset]) => (
+                  <button
+                    key={key}
+                    onClick={() => applyPreset(key)}
+                    className="px-3 py-1.5 text-xs rounded-md border border-slate-600 text-slate-200 hover:bg-slate-700"
+                    title={preset.description}
+                  >
+                    {preset.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
           <div className="space-y-4">
             <div>
               <label className="block text-sm text-slate-400 mb-1">Reasoning Model</label>
@@ -1088,7 +1345,20 @@ export default function Settings() {
                   </option>
                 ))}
               </select>
-              <p className="text-xs text-slate-500 mt-1">Used for health coaching, advice, and complex analysis.</p>
+              <p className="text-xs text-slate-500 mt-1">{availableModels?.role_hints?.reasoning?.description || 'Used for health coaching, advice, and complex analysis.'}</p>
+              {selectedReasoningOption && (
+                <div className="mt-2 rounded-md border border-slate-700 bg-slate-900/40 p-2 space-y-2">
+                  <div className="flex flex-wrap gap-2 text-xs">
+                    <span className="px-2 py-0.5 rounded bg-slate-700 text-slate-200">Cost {costBadge(selectedReasoningOption.cost_tier)} ({tierLabel(selectedReasoningOption.cost_tier)})</span>
+                    <span className="px-2 py-0.5 rounded bg-slate-700 text-slate-200">Quality {tierLabel(selectedReasoningOption.quality_tier)}</span>
+                    <span className="px-2 py-0.5 rounded bg-slate-700 text-slate-200">Speed {tierLabel(selectedReasoningOption.speed_tier)}</span>
+                  </div>
+                  {selectedReasoningOption.hint && <p className="text-xs text-slate-400">{selectedReasoningOption.hint}</p>}
+                  {selectedReasoningOption.best_for && selectedReasoningOption.best_for.length > 0 && (
+                    <p className="text-xs text-slate-500">Best for: {selectedReasoningOption.best_for.join(', ')}</p>
+                  )}
+                </div>
+              )}
             </div>
             <div>
               <label className="block text-sm text-slate-400 mb-1">Utility Model</label>
@@ -1103,8 +1373,63 @@ export default function Settings() {
                   </option>
                 ))}
               </select>
-              <p className="text-xs text-slate-500 mt-1">Used for quick tasks: intent classification, data parsing, summaries.</p>
+              <p className="text-xs text-slate-500 mt-1">{availableModels?.role_hints?.utility?.description || 'Used for quick tasks: intent classification, data parsing, summaries.'}</p>
+              {selectedUtilityOption && (
+                <div className="mt-2 rounded-md border border-slate-700 bg-slate-900/40 p-2 space-y-2">
+                  <div className="flex flex-wrap gap-2 text-xs">
+                    <span className="px-2 py-0.5 rounded bg-slate-700 text-slate-200">Cost {costBadge(selectedUtilityOption.cost_tier)} ({tierLabel(selectedUtilityOption.cost_tier)})</span>
+                    <span className="px-2 py-0.5 rounded bg-slate-700 text-slate-200">Quality {tierLabel(selectedUtilityOption.quality_tier)}</span>
+                    <span className="px-2 py-0.5 rounded bg-slate-700 text-slate-200">Speed {tierLabel(selectedUtilityOption.speed_tier)}</span>
+                  </div>
+                  {selectedUtilityOption.hint && <p className="text-xs text-slate-400">{selectedUtilityOption.hint}</p>}
+                  {selectedUtilityOption.best_for && selectedUtilityOption.best_for.length > 0 && (
+                    <p className="text-xs text-slate-500">Best for: {selectedUtilityOption.best_for.join(', ')}</p>
+                  )}
+                </div>
+              )}
             </div>
+            <div>
+              <label className="block text-sm text-slate-400 mb-1">Deep-Thinking Model</label>
+              <select
+                value={deepThinkingModel}
+                onChange={(e) => setDeepThinkingModel(e.target.value)}
+                className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2.5 text-slate-100 text-sm focus:outline-none focus:border-emerald-500"
+              >
+                {availableModels?.deep_thinking_models.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.name}{m.id === availableModels.default_deep_thinking ? ' (default)' : ''}
+                  </option>
+                ))}
+              </select>
+              <p className="text-xs text-slate-500 mt-1">{availableModels?.role_hints?.deep_thinking?.description || 'Used for monthly synthesis, root-cause hypotheses, and prompt/guidance tuning proposals.'}</p>
+              {selectedDeepOption && (
+                <div className="mt-2 rounded-md border border-slate-700 bg-slate-900/40 p-2 space-y-2">
+                  <div className="flex flex-wrap gap-2 text-xs">
+                    <span className="px-2 py-0.5 rounded bg-slate-700 text-slate-200">Cost {costBadge(selectedDeepOption.cost_tier)} ({tierLabel(selectedDeepOption.cost_tier)})</span>
+                    <span className="px-2 py-0.5 rounded bg-slate-700 text-slate-200">Quality {tierLabel(selectedDeepOption.quality_tier)}</span>
+                    <span className="px-2 py-0.5 rounded bg-slate-700 text-slate-200">Speed {tierLabel(selectedDeepOption.speed_tier)}</span>
+                  </div>
+                  {selectedDeepOption.hint && <p className="text-xs text-slate-400">{selectedDeepOption.hint}</p>}
+                  {selectedDeepOption.best_for && selectedDeepOption.best_for.length > 0 && (
+                    <p className="text-xs text-slate-500">Best for: {selectedDeepOption.best_for.join(', ')}</p>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            {(['utility', 'reasoning', 'deep_thinking'] as ModelRole[]).map((role) => (
+              <div key={role} className="rounded-lg border border-slate-700 bg-slate-900/35 p-3">
+                <p className="text-sm text-slate-100 font-medium">{availableModels?.role_hints?.[role]?.title || role}</p>
+                <p className="text-xs text-slate-400 mt-1">{availableModels?.role_hints?.[role]?.description}</p>
+                <ul className="mt-2 space-y-1 text-xs text-slate-500 list-disc pl-4">
+                  {(availableModels?.role_hints?.[role]?.selection_tips || []).slice(0, 3).map((tip, idx) => (
+                    <li key={`${role}-tip-${idx}`}>{tip}</li>
+                  ))}
+                </ul>
+              </div>
+            ))}
           </div>
 
           {modelsMessage && (
@@ -1206,6 +1531,142 @@ export default function Settings() {
           <p className="text-xs text-slate-500">
             Costs are estimates based on pricing in <code className="text-slate-400">data/models.json</code>. Edit that file to update rates.
           </p>
+        </div>
+      )}
+
+      {tab === 'adaptation' && (
+        <div className="space-y-5">
+          <div className="bg-slate-800 rounded-xl p-6 border border-slate-700 space-y-4">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-semibold text-slate-100">Adaptation Engine</h2>
+                <p className="text-sm text-slate-400">Daily/weekly/monthly longitudinal runs with approval-gated adjustments.</p>
+              </div>
+              <button
+                onClick={fetchAnalysis}
+                className="px-3 py-1.5 text-sm text-slate-200 border border-slate-600 rounded-lg hover:bg-slate-700"
+              >
+                Refresh
+              </button>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <select
+                value={analysisRunType}
+                onChange={(e) => setAnalysisRunType(e.target.value as 'daily' | 'weekly' | 'monthly')}
+                className="bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-slate-100 text-sm focus:outline-none focus:border-emerald-500"
+              >
+                <option value="daily">Daily</option>
+                <option value="weekly">Weekly</option>
+                <option value="monthly">Monthly</option>
+              </select>
+              <button
+                onClick={triggerAnalysisRun}
+                disabled={analysisLoading}
+                className="px-3 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 text-white text-sm rounded-lg"
+              >
+                Run Selected
+              </button>
+              <button
+                onClick={triggerDueAnalyses}
+                disabled={analysisLoading}
+                className="px-3 py-2 bg-slate-700 hover:bg-slate-600 disabled:opacity-60 text-slate-100 text-sm rounded-lg border border-slate-600"
+              >
+                Run Due Windows
+              </button>
+            </div>
+
+            {analysisMessage && (
+              <p className={`text-sm ${analysisMessage.toLowerCase().includes('failed') || analysisMessage.toLowerCase().includes('error') ? 'text-rose-400' : 'text-emerald-400'}`}>
+                {analysisMessage}
+              </p>
+            )}
+          </div>
+
+          <div className="bg-slate-800 rounded-xl p-6 border border-slate-700 space-y-3">
+            <h3 className="text-base font-semibold text-slate-100">Recent Runs</h3>
+            {analysisRuns.length === 0 ? (
+              <p className="text-sm text-slate-400">No analysis runs yet.</p>
+            ) : (
+              <div className="space-y-2">
+                {analysisRuns.slice(0, 12).map((run) => (
+                  <div key={run.id} className="rounded-lg border border-slate-700 bg-slate-900/35 p-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-sm text-slate-200">
+                        <span className="font-medium">{run.run_type}</span>
+                        <span className="text-slate-500 ml-2">{run.period_start}{run.period_start !== run.period_end ? ` -> ${run.period_end}` : ''}</span>
+                      </div>
+                      <span className={`text-xs px-2 py-0.5 rounded-full ${
+                        run.status === 'completed'
+                          ? 'bg-emerald-900/50 text-emerald-300'
+                          : run.status === 'failed'
+                            ? 'bg-rose-900/50 text-rose-300'
+                            : 'bg-slate-700 text-slate-300'
+                      }`}>
+                        {run.status}
+                      </span>
+                    </div>
+                    <div className="text-xs text-slate-400 mt-1">
+                      Confidence: {run.confidence != null ? `${Math.round(run.confidence * 100)}%` : 'n/a'}
+                      {run.created_at ? ` · ${new Date(run.created_at).toLocaleString()}` : ''}
+                    </div>
+                    {run.summary_markdown && (
+                      <p className="text-sm text-slate-300 mt-2 line-clamp-3">{run.summary_markdown}</p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="bg-slate-800 rounded-xl p-6 border border-slate-700 space-y-3">
+            <h3 className="text-base font-semibold text-slate-100">Adjustment Proposals</h3>
+            {analysisProposals.length === 0 ? (
+              <p className="text-sm text-slate-400">No proposals yet.</p>
+            ) : (
+              <div className="space-y-2">
+                {analysisProposals.slice(0, 20).map((proposal) => (
+                  <div key={proposal.id} className="rounded-lg border border-slate-700 bg-slate-900/35 p-3">
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <p className="text-sm text-slate-100 font-medium">{proposal.title}</p>
+                        <p className="text-xs text-slate-400 mt-1">
+                          {proposal.proposal_kind} · run #{proposal.analysis_run_id}
+                          {proposal.confidence != null ? ` · ${Math.round(proposal.confidence * 100)}%` : ''}
+                        </p>
+                      </div>
+                      <span className={`text-xs px-2 py-0.5 rounded-full ${
+                        proposal.status === 'approved' || proposal.status === 'applied'
+                          ? 'bg-emerald-900/50 text-emerald-300'
+                          : proposal.status === 'rejected'
+                            ? 'bg-rose-900/50 text-rose-300'
+                            : 'bg-amber-900/50 text-amber-300'
+                      }`}>
+                        {proposal.status}
+                      </span>
+                    </div>
+                    <p className="text-sm text-slate-300 mt-2">{proposal.rationale}</p>
+                    {proposal.status === 'pending' && (
+                      <div className="flex gap-2 mt-3">
+                        <button
+                          onClick={() => reviewAnalysisProposal(proposal.id, 'approve')}
+                          className="px-3 py-1.5 text-xs bg-emerald-600 hover:bg-emerald-500 text-white rounded-md"
+                        >
+                          Approve
+                        </button>
+                        <button
+                          onClick={() => reviewAnalysisProposal(proposal.id, 'reject')}
+                          className="px-3 py-1.5 text-xs bg-rose-600 hover:bg-rose-500 text-white rounded-md"
+                        >
+                          Reject
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       )}
 

@@ -1,69 +1,585 @@
 {
   "defaults": {
-    "anthropic": { "reasoning": "claude-sonnet-4-20250514", "utility": "claude-haiku-4-5-20251001" },
-    "openai": { "reasoning": "gpt-4o", "utility": "gpt-4o-mini" },
-    "google": { "reasoning": "gemini-2.5-pro", "utility": "gemini-2.0-flash" }
+    "anthropic": {
+      "reasoning": "claude-sonnet-4-5-20250929",
+      "utility": "claude-haiku-4-5-20251001",
+      "deep_thinking": "claude-sonnet-4-5-20250929"
+    },
+    "openai": {
+      "reasoning": "gpt-4o",
+      "utility": "gpt-4o-mini",
+      "deep_thinking": "gpt-4.1"
+    },
+    "google": {
+      "reasoning": "gemini-2.5-pro",
+      "utility": "gemini-2.0-flash",
+      "deep_thinking": "gemini-2.5-pro"
+    }
+  },
+  "role_hints": {
+    "utility": {
+      "title": "Utility (Fast Structured Work)",
+      "description": "Use for extraction, tagging, parsing, intent classification, and short deterministic transforms.",
+      "selection_tips": [
+        "Prioritize reliability and speed over deep reasoning.",
+        "Choose low/medium cost for high-call operations.",
+        "If JSON extraction quality drops, move one tier up."
+      ]
+    },
+    "reasoning": {
+      "title": "Reasoning (Primary Coaching Responses)",
+      "description": "Use for normal coaching conversation, recommendations, and multi-factor decisions with clear rationale.",
+      "selection_tips": [
+        "Balance quality and cost for everyday chat.",
+        "Prefer models with stronger instruction following.",
+        "Move up if recommendations are shallow or inconsistent."
+      ]
+    },
+    "deep_thinking": {
+      "title": "Deep Thinking (Longitudinal Analysis + Synthesis)",
+      "description": "Use for monthly synthesis, trend interpretation, hypothesis generation, and policy/prompt adjustment proposals.",
+      "selection_tips": [
+        "Prioritize highest reasoning quality for low-frequency heavy jobs.",
+        "Use medium/high latency models when rigor matters.",
+        "Keep approval gates enabled for any auto-generated adaptation proposals."
+      ]
+    }
+  },
+  "presets": {
+    "anthropic": {
+      "budget": {
+        "label": "Budget",
+        "description": "Low cost and fast, good for daily operations.",
+        "reasoning": "claude-sonnet-4-20250514",
+        "utility": "claude-haiku-4-5-20251001",
+        "deep_thinking": "claude-sonnet-4-20250514"
+      },
+      "balanced": {
+        "label": "Balanced",
+        "description": "Recommended balance for quality and cost.",
+        "reasoning": "claude-sonnet-4-5-20250929",
+        "utility": "claude-haiku-4-5-20251001",
+        "deep_thinking": "claude-sonnet-4-5-20250929"
+      },
+      "premium": {
+        "label": "Premium",
+        "description": "Highest quality for complex coaching and synthesis.",
+        "reasoning": "claude-opus-4-6",
+        "utility": "claude-haiku-4-5-20251001",
+        "deep_thinking": "claude-opus-4-6"
+      }
+    },
+    "openai": {
+      "budget": {
+        "label": "Budget",
+        "description": "Lowest cost mix for high-volume usage.",
+        "reasoning": "o4-mini",
+        "utility": "gpt-4o-mini",
+        "deep_thinking": "o3-mini"
+      },
+      "balanced": {
+        "label": "Balanced",
+        "description": "Recommended balance for most users.",
+        "reasoning": "gpt-4o",
+        "utility": "gpt-4o-mini",
+        "deep_thinking": "gpt-4.1"
+      },
+      "premium": {
+        "label": "Premium",
+        "description": "Best available reasoning for difficult planning and analysis.",
+        "reasoning": "o3",
+        "utility": "gpt-4o-mini",
+        "deep_thinking": "o3"
+      }
+    },
+    "google": {
+      "budget": {
+        "label": "Budget",
+        "description": "Fast and low cost with acceptable quality.",
+        "reasoning": "gemini-2.5-flash",
+        "utility": "gemini-2.0-flash-lite",
+        "deep_thinking": "gemini-2.5-flash"
+      },
+      "balanced": {
+        "label": "Balanced",
+        "description": "Recommended default with stronger reasoning.",
+        "reasoning": "gemini-2.5-pro",
+        "utility": "gemini-2.0-flash",
+        "deep_thinking": "gemini-2.5-pro"
+      },
+      "premium": {
+        "label": "Premium",
+        "description": "Maximum quality where available.",
+        "reasoning": "gemini-2.5-pro-preview-05-06",
+        "utility": "gemini-2.0-flash",
+        "deep_thinking": "gemini-2.5-pro-preview-05-06"
+      }
+    }
   },
   "available": {
     "anthropic": {
       "reasoning": [
-        { "id": "claude-sonnet-4-20250514", "name": "Claude Sonnet 4" },
-        { "id": "claude-opus-4-6", "name": "Claude Opus 4.6" },
-        { "id": "claude-sonnet-4-5-20250929", "name": "Claude Sonnet 4.5" }
+        {
+          "id": "claude-sonnet-4-20250514",
+          "name": "Claude Sonnet 4",
+          "quality_tier": "high",
+          "speed_tier": "medium",
+          "cost_tier": "high",
+          "best_for": [
+            "daily coaching",
+            "general reasoning"
+          ],
+          "hint": "Strong default for coaching conversations."
+        },
+        {
+          "id": "claude-sonnet-4-5-20250929",
+          "name": "Claude Sonnet 4.5",
+          "quality_tier": "very_high",
+          "speed_tier": "medium",
+          "cost_tier": "high",
+          "best_for": [
+            "nuanced recommendations",
+            "complex user context"
+          ],
+          "hint": "Improved quality for multi-factor decisions."
+        },
+        {
+          "id": "claude-opus-4-6",
+          "name": "Claude Opus 4.6",
+          "quality_tier": "very_high",
+          "speed_tier": "slow",
+          "cost_tier": "very_high",
+          "best_for": [
+            "hard reasoning",
+            "deep synthesis"
+          ],
+          "hint": "Highest quality option, highest cost."
+        }
       ],
       "utility": [
-        { "id": "claude-haiku-4-5-20251001", "name": "Claude Haiku 4.5" },
-        { "id": "claude-sonnet-4-20250514", "name": "Claude Sonnet 4" },
-        { "id": "claude-sonnet-4-5-20250929", "name": "Claude Sonnet 4.5" }
+        {
+          "id": "claude-haiku-4-5-20251001",
+          "name": "Claude Haiku 4.5",
+          "quality_tier": "medium",
+          "speed_tier": "fast",
+          "cost_tier": "medium",
+          "best_for": [
+            "parsing",
+            "classification",
+            "extraction"
+          ],
+          "hint": "Best default for utility workloads."
+        },
+        {
+          "id": "claude-sonnet-4-20250514",
+          "name": "Claude Sonnet 4",
+          "quality_tier": "high",
+          "speed_tier": "medium",
+          "cost_tier": "high",
+          "best_for": [
+            "higher-fidelity utility transforms"
+          ],
+          "hint": "Use when utility accuracy matters more than speed."
+        },
+        {
+          "id": "claude-sonnet-4-5-20250929",
+          "name": "Claude Sonnet 4.5",
+          "quality_tier": "very_high",
+          "speed_tier": "medium",
+          "cost_tier": "high",
+          "best_for": [
+            "complex extraction edge cases"
+          ],
+          "hint": "Use selectively for difficult extraction."
+        }
+      ],
+      "deep_thinking": [
+        {
+          "id": "claude-sonnet-4-5-20250929",
+          "name": "Claude Sonnet 4.5",
+          "quality_tier": "very_high",
+          "speed_tier": "medium",
+          "cost_tier": "high",
+          "best_for": [
+            "weekly/monthly synthesis",
+            "proposal generation"
+          ],
+          "hint": "Balanced deep-thinking default."
+        },
+        {
+          "id": "claude-opus-4-6",
+          "name": "Claude Opus 4.6",
+          "quality_tier": "very_high",
+          "speed_tier": "slow",
+          "cost_tier": "very_high",
+          "best_for": [
+            "root-cause hypotheses",
+            "complex adaptation planning"
+          ],
+          "hint": "Best for high-stakes deep analysis."
+        },
+        {
+          "id": "claude-sonnet-4-20250514",
+          "name": "Claude Sonnet 4",
+          "quality_tier": "high",
+          "speed_tier": "medium",
+          "cost_tier": "high",
+          "best_for": [
+            "routine longitudinal summaries"
+          ],
+          "hint": "Cost-aware deep-thinking fallback."
+        }
       ]
     },
     "openai": {
       "reasoning": [
-        { "id": "gpt-4o", "name": "GPT-4o" },
-        { "id": "gpt-4o-2024-11-20", "name": "GPT-4o (Nov 2024)" },
-        { "id": "o3-mini", "name": "o3-mini" },
-        { "id": "o3", "name": "o3" },
-        { "id": "o4-mini", "name": "o4-mini" },
-        { "id": "gpt-4.1", "name": "GPT-4.1" }
+        {
+          "id": "gpt-4o",
+          "name": "GPT-4o",
+          "quality_tier": "high",
+          "speed_tier": "fast",
+          "cost_tier": "high",
+          "best_for": [
+            "day-to-day coaching",
+            "balanced responses"
+          ],
+          "hint": "Great default for general reasoning."
+        },
+        {
+          "id": "gpt-4o-2024-11-20",
+          "name": "GPT-4o (Nov 2024)",
+          "quality_tier": "high",
+          "speed_tier": "fast",
+          "cost_tier": "high",
+          "best_for": [
+            "stable GPT-4o variant"
+          ],
+          "hint": "Pin a dated build for reproducibility."
+        },
+        {
+          "id": "gpt-4.1",
+          "name": "GPT-4.1",
+          "quality_tier": "very_high",
+          "speed_tier": "medium",
+          "cost_tier": "high",
+          "best_for": [
+            "deeper analysis",
+            "structured planning"
+          ],
+          "hint": "Good bridge between daily and deep tasks."
+        },
+        {
+          "id": "o3",
+          "name": "o3",
+          "quality_tier": "very_high",
+          "speed_tier": "slow",
+          "cost_tier": "high",
+          "best_for": [
+            "challenging reasoning",
+            "tradeoff analysis"
+          ],
+          "hint": "Best quality reasoning at higher latency."
+        },
+        {
+          "id": "o3-mini",
+          "name": "o3-mini",
+          "quality_tier": "high",
+          "speed_tier": "medium",
+          "cost_tier": "medium",
+          "best_for": [
+            "cost-aware advanced reasoning"
+          ],
+          "hint": "Lower-cost alternative for deeper reasoning."
+        },
+        {
+          "id": "o4-mini",
+          "name": "o4-mini",
+          "quality_tier": "high",
+          "speed_tier": "fast",
+          "cost_tier": "medium",
+          "best_for": [
+            "quick reasoning loops"
+          ],
+          "hint": "Fast reasoning for budget-sensitive setups."
+        }
       ],
       "utility": [
-        { "id": "gpt-4o-mini", "name": "GPT-4o Mini" },
-        { "id": "gpt-4o", "name": "GPT-4o" },
-        { "id": "o4-mini", "name": "o4-mini" },
-        { "id": "gpt-4.1-mini", "name": "GPT-4.1 Mini" }
+        {
+          "id": "gpt-4o-mini",
+          "name": "GPT-4o Mini",
+          "quality_tier": "medium",
+          "speed_tier": "fast",
+          "cost_tier": "low",
+          "best_for": [
+            "classification",
+            "JSON extraction",
+            "light transforms"
+          ],
+          "hint": "Best default utility model for cost + speed."
+        },
+        {
+          "id": "gpt-4.1-mini",
+          "name": "GPT-4.1 Mini",
+          "quality_tier": "high",
+          "speed_tier": "fast",
+          "cost_tier": "medium",
+          "best_for": [
+            "higher quality extraction"
+          ],
+          "hint": "Use if 4o-mini misses edge cases."
+        },
+        {
+          "id": "gpt-4o",
+          "name": "GPT-4o",
+          "quality_tier": "high",
+          "speed_tier": "fast",
+          "cost_tier": "high",
+          "best_for": [
+            "multimodal utility tasks"
+          ],
+          "hint": "Useful when utility tasks include image-heavy parsing."
+        },
+        {
+          "id": "o4-mini",
+          "name": "o4-mini",
+          "quality_tier": "high",
+          "speed_tier": "fast",
+          "cost_tier": "medium",
+          "best_for": [
+            "utility with stronger reasoning"
+          ],
+          "hint": "Use when utility tasks need extra reasoning depth."
+        }
+      ],
+      "deep_thinking": [
+        {
+          "id": "gpt-4.1",
+          "name": "GPT-4.1",
+          "quality_tier": "very_high",
+          "speed_tier": "medium",
+          "cost_tier": "high",
+          "best_for": [
+            "weekly/monthly synthesis",
+            "adaptation proposals"
+          ],
+          "hint": "Balanced deep-thinking default."
+        },
+        {
+          "id": "o3",
+          "name": "o3",
+          "quality_tier": "very_high",
+          "speed_tier": "slow",
+          "cost_tier": "high",
+          "best_for": [
+            "root-cause analysis",
+            "hard planning decisions"
+          ],
+          "hint": "Best quality deep reasoning option."
+        },
+        {
+          "id": "o3-mini",
+          "name": "o3-mini",
+          "quality_tier": "high",
+          "speed_tier": "medium",
+          "cost_tier": "medium",
+          "best_for": [
+            "cost-aware deep analysis"
+          ],
+          "hint": "Budget-friendly deep-thinking model."
+        },
+        {
+          "id": "gpt-4o",
+          "name": "GPT-4o",
+          "quality_tier": "high",
+          "speed_tier": "fast",
+          "cost_tier": "high",
+          "best_for": [
+            "faster deep summaries"
+          ],
+          "hint": "Use when deep runs must be quick."
+        }
       ]
     },
     "google": {
       "reasoning": [
-        { "id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro" },
-        { "id": "gemini-2.5-flash", "name": "Gemini 2.5 Flash" },
-        { "id": "gemini-2.5-pro-preview-05-06", "name": "Gemini 2.5 Pro Preview" }
+        {
+          "id": "gemini-2.5-pro",
+          "name": "Gemini 2.5 Pro",
+          "quality_tier": "very_high",
+          "speed_tier": "medium",
+          "cost_tier": "high",
+          "best_for": [
+            "high-quality reasoning",
+            "long-context decisions"
+          ],
+          "hint": "Strong default for reasoning quality."
+        },
+        {
+          "id": "gemini-2.5-pro-preview-05-06",
+          "name": "Gemini 2.5 Pro Preview",
+          "quality_tier": "very_high",
+          "speed_tier": "medium",
+          "cost_tier": "high",
+          "best_for": [
+            "latest preview capability"
+          ],
+          "hint": "Preview variant for early access quality."
+        },
+        {
+          "id": "gemini-2.5-flash",
+          "name": "Gemini 2.5 Flash",
+          "quality_tier": "high",
+          "speed_tier": "fast",
+          "cost_tier": "low",
+          "best_for": [
+            "fast reasoning",
+            "cost-controlled chat"
+          ],
+          "hint": "Fast lower-cost reasoning option."
+        }
       ],
       "utility": [
-        { "id": "gemini-2.0-flash", "name": "Gemini 2.0 Flash" },
-        { "id": "gemini-2.5-flash", "name": "Gemini 2.5 Flash" },
-        { "id": "gemini-2.0-flash-lite", "name": "Gemini 2.0 Flash Lite" }
+        {
+          "id": "gemini-2.0-flash",
+          "name": "Gemini 2.0 Flash",
+          "quality_tier": "medium",
+          "speed_tier": "fast",
+          "cost_tier": "low",
+          "best_for": [
+            "high-volume utility calls"
+          ],
+          "hint": "Best default utility model."
+        },
+        {
+          "id": "gemini-2.0-flash-lite",
+          "name": "Gemini 2.0 Flash Lite",
+          "quality_tier": "medium",
+          "speed_tier": "fast",
+          "cost_tier": "low",
+          "best_for": [
+            "ultra-low-cost parsing"
+          ],
+          "hint": "Use for very budget-sensitive utility operations."
+        },
+        {
+          "id": "gemini-2.5-flash",
+          "name": "Gemini 2.5 Flash",
+          "quality_tier": "high",
+          "speed_tier": "fast",
+          "cost_tier": "low",
+          "best_for": [
+            "higher-fidelity extraction"
+          ],
+          "hint": "Good step-up utility option."
+        }
+      ],
+      "deep_thinking": [
+        {
+          "id": "gemini-2.5-pro",
+          "name": "Gemini 2.5 Pro",
+          "quality_tier": "very_high",
+          "speed_tier": "medium",
+          "cost_tier": "high",
+          "best_for": [
+            "weekly/monthly synthesis",
+            "adaptation planning"
+          ],
+          "hint": "Balanced deep-thinking default."
+        },
+        {
+          "id": "gemini-2.5-pro-preview-05-06",
+          "name": "Gemini 2.5 Pro Preview",
+          "quality_tier": "very_high",
+          "speed_tier": "medium",
+          "cost_tier": "high",
+          "best_for": [
+            "highest-available deep quality"
+          ],
+          "hint": "Premium deep-thinking option."
+        },
+        {
+          "id": "gemini-2.5-flash",
+          "name": "Gemini 2.5 Flash",
+          "quality_tier": "high",
+          "speed_tier": "fast",
+          "cost_tier": "low",
+          "best_for": [
+            "faster deep runs"
+          ],
+          "hint": "Budget deep-thinking alternative."
+        }
       ]
     }
   },
   "pricing": {
     "_comment": "Prices in USD per million tokens. Edit these values to match your current API rates.",
-    "claude-sonnet-4-20250514": { "input_per_mtok": 3.00, "output_per_mtok": 15.00 },
-    "claude-opus-4-6": { "input_per_mtok": 5.00, "output_per_mtok": 25.00 },
-    "claude-sonnet-4-5-20250929": { "input_per_mtok": 3.00, "output_per_mtok": 15.00 },
-    "claude-haiku-4-5-20251001": { "input_per_mtok": 1.00, "output_per_mtok": 5.00 },
-    "gpt-4o": { "input_per_mtok": 2.50, "output_per_mtok": 10.00 },
-    "gpt-4o-2024-11-20": { "input_per_mtok": 2.50, "output_per_mtok": 10.00 },
-    "gpt-4o-mini": { "input_per_mtok": 0.15, "output_per_mtok": 0.60 },
-    "o3-mini": { "input_per_mtok": 1.10, "output_per_mtok": 4.40 },
-    "o3": { "input_per_mtok": 2.00, "output_per_mtok": 8.00 },
-    "o4-mini": { "input_per_mtok": 1.10, "output_per_mtok": 4.40 },
-    "gpt-4.1": { "input_per_mtok": 2.00, "output_per_mtok": 8.00 },
-    "gpt-4.1-mini": { "input_per_mtok": 0.40, "output_per_mtok": 1.60 },
-    "gemini-2.5-pro": { "input_per_mtok": 1.25, "output_per_mtok": 10.00 },
-    "gemini-2.5-flash": { "input_per_mtok": 0.15, "output_per_mtok": 0.60 },
-    "gemini-2.5-pro-preview-05-06": { "input_per_mtok": 1.25, "output_per_mtok": 10.00 },
-    "gemini-2.0-flash": { "input_per_mtok": 0.10, "output_per_mtok": 0.40 },
-    "gemini-2.0-flash-lite": { "input_per_mtok": 0.075, "output_per_mtok": 0.30 }
+    "claude-sonnet-4-20250514": {
+      "input_per_mtok": 3.0,
+      "output_per_mtok": 15.0
+    },
+    "claude-opus-4-6": {
+      "input_per_mtok": 5.0,
+      "output_per_mtok": 25.0
+    },
+    "claude-sonnet-4-5-20250929": {
+      "input_per_mtok": 3.0,
+      "output_per_mtok": 15.0
+    },
+    "claude-haiku-4-5-20251001": {
+      "input_per_mtok": 1.0,
+      "output_per_mtok": 5.0
+    },
+    "gpt-4o": {
+      "input_per_mtok": 2.5,
+      "output_per_mtok": 10.0
+    },
+    "gpt-4o-2024-11-20": {
+      "input_per_mtok": 2.5,
+      "output_per_mtok": 10.0
+    },
+    "gpt-4o-mini": {
+      "input_per_mtok": 0.15,
+      "output_per_mtok": 0.6
+    },
+    "o3-mini": {
+      "input_per_mtok": 1.1,
+      "output_per_mtok": 4.4
+    },
+    "o3": {
+      "input_per_mtok": 2.0,
+      "output_per_mtok": 8.0
+    },
+    "o4-mini": {
+      "input_per_mtok": 1.1,
+      "output_per_mtok": 4.4
+    },
+    "gpt-4.1": {
+      "input_per_mtok": 2.0,
+      "output_per_mtok": 8.0
+    },
+    "gpt-4.1-mini": {
+      "input_per_mtok": 0.4,
+      "output_per_mtok": 1.6
+    },
+    "gemini-2.5-pro": {
+      "input_per_mtok": 1.25,
+      "output_per_mtok": 10.0
+    },
+    "gemini-2.5-flash": {
+      "input_per_mtok": 0.15,
+      "output_per_mtok": 0.6
+    },
+    "gemini-2.5-pro-preview-05-06": {
+      "input_per_mtok": 1.25,
+      "output_per_mtok": 10.0
+    },
+    "gemini-2.0-flash": {
+      "input_per_mtok": 0.1,
+      "output_per_mtok": 0.4
+    },
+    "gemini-2.0-flash-lite": {
+      "input_per_mtok": 0.075,
+      "output_per_mtok": 0.3
+    }
   }
 }
