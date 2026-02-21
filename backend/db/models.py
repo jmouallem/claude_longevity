@@ -20,6 +20,9 @@ class User(Base):
     settings = relationship("UserSettings", back_populates="user", uselist=False, cascade="all, delete-orphan")
     specialist_config = relationship("SpecialistConfig", back_populates="user", uselist=False, cascade="all, delete-orphan")
     messages = relationship("Message", back_populates="user", cascade="all, delete-orphan")
+    intake_sessions = relationship("IntakeSession", back_populates="user", cascade="all, delete-orphan")
+    meal_templates = relationship("MealTemplate", back_populates="user", cascade="all, delete-orphan")
+    notifications = relationship("Notification", back_populates="user", cascade="all, delete-orphan")
 
 
 class UserSettings(Base):
@@ -48,6 +51,8 @@ class UserSettings(Base):
     health_goals = Column(Text)  # JSON array
     timezone = Column(Text, default="America/Edmonton")
     usage_reset_at = Column(DateTime, nullable=True)
+    intake_completed_at = Column(DateTime, nullable=True)
+    intake_skipped_at = Column(DateTime, nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     user = relationship("User", back_populates="settings")
@@ -98,6 +103,57 @@ class FoodLog(Base):
     fiber_g = Column(Float)
     sodium_mg = Column(Float)
     notes = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class MealTemplate(Base):
+    __tablename__ = "meal_templates"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    name = Column(Text, nullable=False)
+    normalized_name = Column(Text, nullable=False)
+    aliases = Column(Text)  # JSON array of alternate names
+    ingredients = Column(Text)  # JSON array of ingredient lines
+    servings = Column(Float, default=1.0)
+    calories = Column(Float)
+    protein_g = Column(Float)
+    carbs_g = Column(Float)
+    fat_g = Column(Float)
+    fiber_g = Column(Float)
+    sodium_mg = Column(Float)
+    notes = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    user = relationship("User", back_populates="meal_templates")
+
+
+class Notification(Base):
+    __tablename__ = "notifications"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    category = Column(Text, nullable=False, default="info")  # info | reminder | warning | system
+    title = Column(Text, nullable=False)
+    message = Column(Text, nullable=False)
+    payload = Column(Text)  # JSON object
+    is_read = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    read_at = Column(DateTime)
+
+    user = relationship("User", back_populates="notifications")
+
+
+class WebSearchCache(Base):
+    __tablename__ = "web_search_cache"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    query_key = Column(Text, nullable=False, unique=True)
+    query = Column(Text, nullable=False)
+    provider = Column(Text, nullable=False, default="duckduckgo")
+    results_json = Column(Text, nullable=False)
+    fetched_at = Column(DateTime, default=datetime.utcnow)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -234,8 +290,46 @@ class Summary(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class FeedbackEntry(Base):
+    __tablename__ = "feedback_entries"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    feedback_type = Column(Text, nullable=False)  # bug | enhancement | missing | other
+    title = Column(Text, nullable=False)
+    details = Column(Text)
+    source = Column(Text, nullable=False, default="user")  # user | agent
+    specialist_id = Column(Text)
+    specialist_name = Column(Text)
+    created_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class IntakeSession(Base):
+    __tablename__ = "intake_sessions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    status = Column(Text, nullable=False, default="active")  # active | completed | skipped
+    current_index = Column(Integer, nullable=False, default=0)
+    field_order = Column(Text, nullable=False)  # JSON array
+    answers = Column(Text)  # JSON object keyed by field
+    draft_patch = Column(Text)  # JSON object suitable for settings update
+    skipped_fields = Column(Text)  # JSON array
+    started_at = Column(DateTime, default=datetime.utcnow)
+    finished_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    user = relationship("User", back_populates="intake_sessions")
+
+
 # Indexes
 Index("idx_messages_user_date", Message.user_id, Message.created_at)
+Index("idx_meal_templates_user", MealTemplate.user_id)
+Index("idx_meal_templates_user_name", MealTemplate.user_id, MealTemplate.normalized_name, unique=True)
+Index("idx_notifications_user_date", Notification.user_id, Notification.created_at)
+Index("idx_notifications_user_read", Notification.user_id, Notification.is_read)
+Index("idx_web_search_query_key", WebSearchCache.query_key, unique=True)
+Index("idx_web_search_fetched_at", WebSearchCache.fetched_at)
 Index("idx_food_log_user_date", FoodLog.user_id, FoodLog.logged_at)
 Index("idx_vitals_log_user_date", VitalsLog.user_id, VitalsLog.logged_at)
 Index("idx_exercise_log_user_date", ExerciseLog.user_id, ExerciseLog.logged_at)
@@ -243,3 +337,6 @@ Index("idx_exercise_plan_user_date", ExercisePlan.user_id, ExercisePlan.target_d
 Index("idx_daily_checklist_user_date", DailyChecklistItem.user_id, DailyChecklistItem.target_date, DailyChecklistItem.item_type)
 Index("idx_summaries_user_type", Summary.user_id, Summary.summary_type, Summary.period_start)
 Index("idx_fasting_log_user_date", FastingLog.user_id, FastingLog.fast_start)
+Index("idx_feedback_created_at", FeedbackEntry.created_at)
+Index("idx_feedback_type", FeedbackEntry.feedback_type)
+Index("idx_intake_session_user_status", IntakeSession.user_id, IntakeSession.status, IntakeSession.updated_at)

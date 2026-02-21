@@ -14,6 +14,8 @@ from db.models import (
 )
 from ai.context_builder import build_context
 from ai.providers import get_provider
+from tools import tool_registry
+from tools.base import ToolContext, ToolExecutionError
 from utils.encryption import decrypt_api_key
 from utils.datetime_utils import start_of_day, end_of_day, today_utc
 from utils.med_utils import parse_structured_list, structured_to_display
@@ -258,10 +260,16 @@ def get_food_logs(
 
 @router.post("/food")
 def create_food_log(data: FoodLogCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    log = FoodLog(user_id=user.id, logged_at=datetime.now(timezone.utc), **data.model_dump())
-    db.add(log)
-    db.commit()
-    return {"id": log.id, "status": "created"}
+    try:
+        out = tool_registry.execute(
+            "food_log_write",
+            data.model_dump(),
+            ToolContext(db=db, user=user, specialist_id="orchestrator"),
+        )
+        db.commit()
+        return {"id": out.get("food_log_id"), "status": "created"}
+    except ToolExecutionError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 # --- Vitals Logs ---
@@ -297,16 +305,16 @@ def get_vitals_logs(
 
 @router.post("/vitals")
 def create_vitals_log(data: VitalsLogCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    log = VitalsLog(user_id=user.id, logged_at=datetime.now(timezone.utc), **data.model_dump())
-    db.add(log)
-    db.commit()
-
-    # Update current weight in user settings if weight was logged
-    if data.weight_kg and user.settings:
-        user.settings.current_weight_kg = data.weight_kg
+    try:
+        out = tool_registry.execute(
+            "vitals_log_write",
+            data.model_dump(),
+            ToolContext(db=db, user=user, specialist_id="orchestrator"),
+        )
         db.commit()
-
-    return {"id": log.id, "status": "created"}
+        return {"id": out.get("vitals_log_id"), "status": "created"}
+    except ToolExecutionError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 # --- Exercise Logs ---
@@ -324,10 +332,16 @@ def get_exercise_logs(
 
 @router.post("/exercise")
 def create_exercise_log(data: ExerciseLogCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    log = ExerciseLog(user_id=user.id, logged_at=datetime.now(timezone.utc), **data.model_dump())
-    db.add(log)
-    db.commit()
-    return {"id": log.id, "status": "created"}
+    try:
+        out = tool_registry.execute(
+            "exercise_log_write",
+            data.model_dump(),
+            ToolContext(db=db, user=user, specialist_id="orchestrator"),
+        )
+        db.commit()
+        return {"id": out.get("exercise_log_id"), "status": "created"}
+    except ToolExecutionError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.get("/exercise-plan", response_model=ExercisePlanResponse)
@@ -411,20 +425,29 @@ async def generate_exercise_plan(
     )
     parsed = parse_plan_json(result["content"])
 
+    try:
+        tool_registry.execute(
+            "exercise_plan_upsert",
+            {
+                "target_date": d_iso,
+                "plan_type": parsed["plan_type"],
+                "title": parsed["title"],
+                "description": parsed["description"],
+                "target_minutes": parsed["target_minutes"],
+                "source": "ai",
+            },
+            ToolContext(db=db, user=user, specialist_id="movement_coach"),
+        )
+    except ToolExecutionError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    db.commit()
     plan = (
         db.query(ExercisePlan)
         .filter(ExercisePlan.user_id == user.id, ExercisePlan.target_date == d_iso)
         .first()
     )
     if not plan:
-        plan = ExercisePlan(user_id=user.id, target_date=d_iso, source="ai")
-        db.add(plan)
-
-    plan.plan_type = parsed["plan_type"]
-    plan.title = parsed["title"]
-    plan.description = parsed["description"]
-    plan.target_minutes = parsed["target_minutes"]
-    db.commit()
+        raise HTTPException(status_code=500, detail="Failed to persist exercise plan")
 
     exercise_logs = get_logs_for_date(db, ExerciseLog, user.id, d)
     completed, status, completed_minutes, matching_sessions = compute_plan_status(
@@ -499,29 +522,21 @@ def toggle_daily_checklist(
         raise HTTPException(status_code=400, detail="item_name is required")
     d_iso = req.target_date or today_utc().isoformat()
 
-    row = (
-        db.query(DailyChecklistItem)
-        .filter(
-            DailyChecklistItem.user_id == user.id,
-            DailyChecklistItem.target_date == d_iso,
-            DailyChecklistItem.item_type == item_type,
-            DailyChecklistItem.item_name == name,
+    try:
+        tool_registry.execute(
+            "checklist_mark_taken",
+            {
+                "item_type": item_type,
+                "target_date": d_iso,
+                "names": [name],
+                "completed": req.completed,
+            },
+            ToolContext(db=db, user=user, specialist_id="orchestrator"),
         )
-        .first()
-    )
-    if not row:
-        row = DailyChecklistItem(
-            user_id=user.id,
-            target_date=d_iso,
-            item_type=item_type,
-            item_name=name,
-            completed=req.completed,
-        )
-        db.add(row)
-    else:
-        row.completed = req.completed
-    db.commit()
-    return {"status": "ok"}
+        db.commit()
+        return {"status": "ok"}
+    except ToolExecutionError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 # --- Hydration Logs ---
@@ -539,10 +554,16 @@ def get_hydration_logs(
 
 @router.post("/hydration")
 def create_hydration_log(data: HydrationLogCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    log = HydrationLog(user_id=user.id, logged_at=datetime.now(timezone.utc), **data.model_dump())
-    db.add(log)
-    db.commit()
-    return {"id": log.id, "status": "created"}
+    try:
+        out = tool_registry.execute(
+            "hydration_log_write",
+            data.model_dump(),
+            ToolContext(db=db, user=user, specialist_id="orchestrator"),
+        )
+        db.commit()
+        return {"id": out.get("hydration_log_id"), "status": "created"}
+    except ToolExecutionError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 # --- Supplement Logs ---
@@ -560,10 +581,16 @@ def get_supplement_logs(
 
 @router.post("/supplements")
 def create_supplement_log(data: SupplementLogCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    log = SupplementLog(user_id=user.id, logged_at=datetime.now(timezone.utc), **data.model_dump())
-    db.add(log)
-    db.commit()
-    return {"id": log.id, "status": "created"}
+    try:
+        out = tool_registry.execute(
+            "supplement_log_write",
+            data.model_dump(),
+            ToolContext(db=db, user=user, specialist_id="orchestrator"),
+        )
+        db.commit()
+        return {"id": out.get("supplement_log_id"), "status": "created"}
+    except ToolExecutionError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 # --- Fasting Logs ---
@@ -608,27 +635,28 @@ def get_active_fast(user: User = Depends(get_current_user), db: Session = Depend
 
 @router.post("/fasting")
 def manage_fasting(data: FastingLogCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    now = datetime.now(timezone.utc)
-    if data.action == "start":
-        log = FastingLog(user_id=user.id, fast_start=now, fast_type=data.fast_type, notes=data.notes)
-        db.add(log)
-        db.commit()
-        return {"id": log.id, "status": "started", "fast_start": now.isoformat()}
-    elif data.action == "end":
-        active = (
-            db.query(FastingLog)
-            .filter(FastingLog.user_id == user.id, FastingLog.fast_end.is_(None))
-            .order_by(FastingLog.fast_start.desc())
-            .first()
+    try:
+        out = tool_registry.execute(
+            "fasting_manage",
+            data.model_dump(),
+            ToolContext(db=db, user=user, specialist_id="orchestrator"),
         )
-        if not active:
-            return {"status": "no_active_fast"}
-        active.fast_end = now
-        fast_start = active.fast_start if active.fast_start.tzinfo else active.fast_start.replace(tzinfo=timezone.utc)
-        active.duration_minutes = int((now - fast_start).total_seconds() / 60)
         db.commit()
-        return {"id": active.id, "status": "ended", "duration_minutes": active.duration_minutes}
-    return {"status": "invalid_action"}
+        if out.get("status") == "started":
+            return {
+                "id": out.get("fasting_log_id"),
+                "status": "started",
+                "fast_start": out.get("fast_start"),
+            }
+        if out.get("status") == "ended":
+            return {
+                "id": out.get("fasting_log_id"),
+                "status": "ended",
+                "duration_minutes": out.get("duration_minutes"),
+            }
+        return out
+    except ToolExecutionError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 # --- Sleep Logs ---
@@ -661,10 +689,16 @@ def get_sleep_logs(
 
 @router.post("/sleep")
 def create_sleep_log(data: SleepLogCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    log = SleepLog(user_id=user.id, duration_minutes=data.duration_minutes, quality=data.quality, notes=data.notes)
-    db.add(log)
-    db.commit()
-    return {"id": log.id, "status": "created"}
+    try:
+        out = tool_registry.execute(
+            "sleep_log_write",
+            data.model_dump(),
+            ToolContext(db=db, user=user, specialist_id="orchestrator"),
+        )
+        db.commit()
+        return {"id": out.get("sleep_log_id"), "status": "created"}
+    except ToolExecutionError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 # --- Daily Totals ---

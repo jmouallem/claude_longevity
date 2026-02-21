@@ -11,6 +11,18 @@ class Settings(BaseSettings):
     CORS_ORIGINS: list[str] = ["http://localhost:8050", "http://localhost:8001"]
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRY_HOURS: int = 72
+    ENABLE_WEB_SEARCH: bool = True
+    WEB_SEARCH_ALLOWED_SPECIALISTS: list[str] = [
+        "orchestrator",
+        "nutritionist",
+        "supplement_auditor",
+        "safety_clinician",
+        "movement_coach",
+        "sleep_expert",
+    ]
+    WEB_SEARCH_MAX_RESULTS: int = 5
+    WEB_SEARCH_TIMEOUT_SECONDS: int = 8
+    WEB_SEARCH_CACHE_TTL_HOURS: int = 12
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

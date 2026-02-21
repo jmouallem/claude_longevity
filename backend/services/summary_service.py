@@ -8,7 +8,7 @@ from ai.context_builder import format_user_profile
 from ai.providers import get_provider
 from db.models import (
     User, Summary, FoodLog, VitalsLog, ExerciseLog,
-    HydrationLog, SupplementLog, FastingLog, SleepLog,
+    HydrationLog, SupplementLog, FastingLog, SleepLog, DailyChecklistItem,
 )
 from utils.datetime_utils import start_of_day, end_of_day, today_for_tz
 from utils.encryption import decrypt_api_key
@@ -77,6 +77,13 @@ def gather_daily_data(db: Session, user: User, d: date, tz_name: str | None = No
         SupplementLog.user_id == user.id, SupplementLog.logged_at >= day_start, SupplementLog.logged_at <= day_end
     ).all()
 
+    checklist_supp_count = db.query(DailyChecklistItem).filter(
+        DailyChecklistItem.user_id == user.id,
+        DailyChecklistItem.target_date == d.isoformat(),
+        DailyChecklistItem.item_type == "supplement",
+        DailyChecklistItem.completed.is_(True),
+    ).count()
+
     fasting = db.query(FastingLog).filter(
         FastingLog.user_id == user.id, FastingLog.fast_start >= day_start, FastingLog.fast_start <= day_end
     ).all()
@@ -108,7 +115,9 @@ def gather_daily_data(db: Session, user: User, d: date, tz_name: str | None = No
             for e in exercises
         ],
         "hydration_ml": sum(h.amount_ml for h in hydrations),
-        "supplements_taken": len(supplements),
+        # Include checklist-completed supplements so "I took X" messages are reflected
+        # even when no explicit supplement log row was created.
+        "supplements_taken": max(len(supplements), checklist_supp_count),
         "fasting": [
             {"duration_min": f.duration_minutes, "type": f.fast_type}
             for f in fasting if f.duration_minutes

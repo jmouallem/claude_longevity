@@ -13,6 +13,7 @@ Categories:
 - log_fasting: User is starting/ending a fast
 - log_sleep: User is reporting sleep data
 - log_hydration: User is reporting water/fluid intake
+- intake_profile: User is setting up or updating baseline profile details (age, height, goals, meds, preferences)
 - ask_nutrition: Question about diet, food choices, meal planning
 - ask_exercise: Question about workouts, training
 - ask_sleep: Question about sleep improvement
@@ -32,6 +33,7 @@ CATEGORY_TO_SPECIALIST = {
     "log_fasting": "nutritionist",
     "log_sleep": "sleep_expert",
     "log_hydration": "nutritionist",
+    "intake_profile": "intake_coach",
     "ask_nutrition": "nutritionist",
     "ask_exercise": "movement_coach",
     "ask_sleep": "sleep_expert",
@@ -54,6 +56,7 @@ async def classify_intent(
         "movement_coach",
         "supplement_auditor",
         "safety_clinician",
+        "intake_coach",
         "orchestrator",
     ]
 

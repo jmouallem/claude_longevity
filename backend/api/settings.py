@@ -11,6 +11,8 @@ from sqlalchemy.orm import Session
 from auth.utils import get_current_user
 from db.database import get_db
 from db.models import User, UserSettings, Message
+from tools import tool_registry
+from tools.base import ToolContext, ToolExecutionError
 from utils.encryption import encrypt_api_key, decrypt_api_key
 
 router = APIRouter(prefix="/settings", tags=["settings"])
@@ -208,6 +210,7 @@ def update_profile(
 ):
     s = user.settings
     payload = update.model_dump(exclude_unset=True)
+
     if "height_unit" in payload and payload["height_unit"] not in ALLOWED_HEIGHT_UNITS:
         raise HTTPException(status_code=400, detail="Invalid height_unit")
     if "weight_unit" in payload and payload["weight_unit"] not in ALLOWED_WEIGHT_UNITS:
@@ -215,8 +218,39 @@ def update_profile(
     if "hydration_unit" in payload and payload["hydration_unit"] not in ALLOWED_HYDRATION_UNITS:
         raise HTTPException(status_code=400, detail="Invalid hydration_unit")
 
-    for field, value in payload.items():
-        setattr(s, field, value)
+    tool_ctx = ToolContext(db=db, user=user, specialist_id="orchestrator")
+    patch_fields = {
+        "age",
+        "sex",
+        "height_cm",
+        "current_weight_kg",
+        "goal_weight_kg",
+        "height_unit",
+        "weight_unit",
+        "hydration_unit",
+        "medical_conditions",
+        "family_history",
+        "fitness_level",
+        "dietary_preferences",
+        "health_goals",
+        "timezone",
+    }
+
+    patch_payload = {k: v for k, v in payload.items() if k in patch_fields}
+    try:
+        if patch_payload:
+            tool_registry.execute("profile_patch", {"patch": patch_payload}, tool_ctx)
+
+        if "medications" in payload:
+            tool_registry.execute("medication_set", {"items": payload.get("medications")}, tool_ctx)
+
+        if "supplements" in payload:
+            tool_registry.execute("supplement_set", {"items": payload.get("supplements")}, tool_ctx)
+    except ToolExecutionError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Profile update failed: {str(e)}")
+
     db.commit()
     return {"status": "ok"}
 

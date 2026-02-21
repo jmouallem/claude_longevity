@@ -2,12 +2,16 @@ import { useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { useAuthStore } from '../stores/authStore';
 
-const navLinks = [
+const primaryNavLinks = [
   { to: '/chat', label: 'Chat' },
   { to: '/dashboard', label: 'Dashboard' },
   { to: '/history', label: 'History' },
   { to: '/specialists', label: 'Specialists' },
   { to: '/settings', label: 'Settings' },
+];
+
+const secondaryNavLinks = [
+  { to: '/feedback', label: 'Feedback' },
 ];
 
 export default function Navbar() {
@@ -28,7 +32,7 @@ export default function Navbar() {
 
           {/* Desktop nav links */}
           <div className="hidden md:flex items-center gap-1">
-            {navLinks.map((link) => (
+            {primaryNavLinks.map((link) => (
               <Link
                 key={link.to}
                 to={link.to}
@@ -45,6 +49,19 @@ export default function Navbar() {
 
           {/* User section (desktop) */}
           <div className="hidden md:flex items-center gap-3">
+            {secondaryNavLinks.map((link) => (
+              <Link
+                key={link.to}
+                to={link.to}
+                className={`px-3 py-2 rounded-md text-sm font-medium transition-colors ${
+                  isActive(link.to)
+                    ? 'bg-slate-700 text-emerald-400'
+                    : 'text-slate-300 hover:bg-slate-700 hover:text-white'
+                }`}
+              >
+                {link.label}
+              </Link>
+            ))}
             <span className="text-sm text-slate-300">
               {user?.display_name || user?.username}
             </span>
@@ -77,7 +94,7 @@ export default function Navbar() {
       {mobileOpen && (
         <div className="md:hidden border-t border-slate-700">
           <div className="px-2 pt-2 pb-3 space-y-1">
-            {navLinks.map((link) => (
+            {[...primaryNavLinks, ...secondaryNavLinks].map((link) => (
               <Link
                 key={link.to}
                 to={link.to}

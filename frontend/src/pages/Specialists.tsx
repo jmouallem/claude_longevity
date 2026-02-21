@@ -21,6 +21,7 @@ interface PromptsResponse {
 }
 
 const DEFAULT_SPECIALISTS: Specialist[] = [
+  { id: 'intake_coach', name: 'Intake Coach', description: 'Structured onboarding to complete profile details', color: 'cyan' },
   { id: 'nutritionist', name: 'Nutritionist', description: 'Food, diet, macros, meal planning', color: 'green' },
   { id: 'sleep_expert', name: 'Sleep Expert', description: 'Sleep optimization, circadian rhythm', color: 'indigo' },
   { id: 'movement_coach', name: 'Movement Coach', description: 'Exercise, workouts, training', color: 'orange' },

@@ -53,6 +53,10 @@ def run_startup_migrations() -> None:
         alter_statements.append("ALTER TABLE user_settings ADD COLUMN hydration_unit TEXT DEFAULT 'ml'")
     if "usage_reset_at" not in columns:
         alter_statements.append("ALTER TABLE user_settings ADD COLUMN usage_reset_at DATETIME")
+    if "intake_completed_at" not in columns:
+        alter_statements.append("ALTER TABLE user_settings ADD COLUMN intake_completed_at DATETIME")
+    if "intake_skipped_at" not in columns:
+        alter_statements.append("ALTER TABLE user_settings ADD COLUMN intake_skipped_at DATETIME")
 
     if not alter_statements:
         return
