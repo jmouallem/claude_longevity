@@ -1,4 +1,4 @@
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, timedelta
 from typing import Optional
 import re
 import json
@@ -268,6 +268,146 @@ def parse_tag_list(raw: Optional[str]) -> list[str]:
     return normalize([x.strip() for x in txt.split(",") if x.strip()])
 
 
+def _daily_totals_payload(db: Session, user: User, d: date, tz_name: str | None) -> dict:
+    day_start = start_of_day(d, tz_name)
+    day_end = end_of_day(d, tz_name)
+    foods = db.query(FoodLog).filter(
+        FoodLog.user_id == user.id, FoodLog.logged_at >= day_start, FoodLog.logged_at <= day_end
+    ).all()
+    food_totals = {
+        "calories": sum(f.calories or 0 for f in foods),
+        "protein_g": sum(f.protein_g or 0 for f in foods),
+        "carbs_g": sum(f.carbs_g or 0 for f in foods),
+        "fat_g": sum(f.fat_g or 0 for f in foods),
+        "fiber_g": sum(f.fiber_g or 0 for f in foods),
+        "sodium_mg": sum(f.sodium_mg or 0 for f in foods),
+        "meal_count": len(foods),
+    }
+    hydrations = db.query(HydrationLog).filter(
+        HydrationLog.user_id == user.id, HydrationLog.logged_at >= day_start, HydrationLog.logged_at <= day_end
+    ).all()
+    hydration_total = sum(h.amount_ml for h in hydrations)
+    exercises = db.query(ExerciseLog).filter(
+        ExerciseLog.user_id == user.id, ExerciseLog.logged_at >= day_start, ExerciseLog.logged_at <= day_end
+    ).all()
+    exercise_minutes = sum(e.duration_minutes or 0 for e in exercises)
+    exercise_calories = sum(e.calories_burned or 0 for e in exercises)
+    return {
+        "date": d.isoformat(),
+        "food": food_totals,
+        "hydration_ml": hydration_total,
+        "exercise_minutes": exercise_minutes,
+        "exercise_calories_burned": exercise_calories,
+    }
+
+
+def _exercise_plan_payload(db: Session, user: User, d: date, tz_name: str | None) -> ExercisePlanResponse:
+    d_iso = d.isoformat()
+    today_local = today_for_tz(tz_name)
+    plan = (
+        db.query(ExercisePlan)
+        .filter(ExercisePlan.user_id == user.id, ExercisePlan.target_date == d_iso)
+        .order_by(ExercisePlan.updated_at.desc())
+        .first()
+    )
+    if not plan:
+        return ExercisePlanResponse(
+            target_date=d_iso,
+            plan_type="mixed",
+            title="No plan generated yet",
+            description="Generate your AI daily summary to create today's exercise plan.",
+            target_minutes=None,
+            completed=False,
+            status="not_set",
+            completed_minutes=0,
+            matching_sessions=0,
+        )
+    exercise_logs = get_logs_for_date(db, ExerciseLog, user.id, d, tz_name=tz_name)
+    completed, status, completed_minutes, matching_sessions = compute_plan_status(
+        plan.plan_type,
+        plan.target_minutes,
+        exercise_logs,
+        d,
+        today_local,
+    )
+    return ExercisePlanResponse(
+        target_date=plan.target_date,
+        plan_type=plan.plan_type,
+        title=plan.title,
+        description=plan.description,
+        target_minutes=plan.target_minutes,
+        completed=completed,
+        status=status,
+        completed_minutes=completed_minutes,
+        matching_sessions=matching_sessions,
+    )
+
+
+def _daily_checklist_payload(db: Session, user: User, d: date, tz_name: str | None) -> DailyChecklistResponse:
+    _ = tz_name
+    d_iso = d.isoformat()
+    med_structured, supp_structured = _profile_checklist_entries_read_only(user)
+
+    valid_med_names = {item.get("name", "").strip().lower() for item in med_structured if item.get("name")}
+    valid_supp_names = {item.get("name", "").strip().lower() for item in supp_structured if item.get("name")}
+
+    states = (
+        db.query(DailyChecklistItem)
+        .filter(DailyChecklistItem.user_id == user.id, DailyChecklistItem.target_date == d_iso)
+        .all()
+    )
+
+    by_key: dict[tuple[str, str], bool] = {}
+    for s in states:
+        name_key = s.item_name.strip().lower()
+        if s.item_type == "medication":
+            if name_key in valid_med_names and not is_generic_medication_name(s.item_name):
+                by_key[(s.item_type, name_key)] = bool(s.completed)
+        elif s.item_type == "supplement":
+            if name_key in valid_supp_names and not is_generic_supplement_name(s.item_name):
+                by_key[(s.item_type, name_key)] = bool(s.completed)
+
+    med_items = [
+        ChecklistItem(
+            name=item.get("name", ""),
+            dose=item.get("dose", ""),
+            timing=item.get("timing", ""),
+            completed=by_key.get(("medication", item.get("name", "").lower()), False),
+        )
+        for item in med_structured if item.get("name")
+    ]
+    supp_items = [
+        ChecklistItem(
+            name=item.get("name", ""),
+            dose=item.get("dose", ""),
+            timing=item.get("timing", ""),
+            completed=by_key.get(("supplement", item.get("name", "").lower()), False),
+        )
+        for item in supp_structured if item.get("name")
+    ]
+    return DailyChecklistResponse(target_date=d_iso, medications=med_items, supplements=supp_items)
+
+
+def _active_fast_payload(db: Session, user: User) -> dict:
+    active = (
+        db.query(FastingLog)
+        .filter(FastingLog.user_id == user.id, FastingLog.fast_end.is_(None))
+        .order_by(FastingLog.fast_start.desc())
+        .first()
+    )
+    if not active:
+        return {"active": False}
+    fast_start = active.fast_start if active.fast_start.tzinfo else active.fast_start.replace(tzinfo=timezone.utc)
+    elapsed = (datetime.now(timezone.utc) - fast_start).total_seconds() / 60
+    return {
+        "active": True,
+        "id": active.id,
+        "fast_start": active.fast_start.isoformat(),
+        "elapsed_minutes": int(elapsed),
+        "fast_type": active.fast_type,
+    }
+
+
 # --- Food Logs ---
 
 @router.get("/food")
@@ -390,46 +530,7 @@ def get_exercise_plan(
 ):
     tz_name = _user_timezone(user)
     d = target_date or today_for_tz(tz_name)
-    today_local = today_for_tz(tz_name)
-    d_iso = d.isoformat()
-    plan = (
-        db.query(ExercisePlan)
-        .filter(ExercisePlan.user_id == user.id, ExercisePlan.target_date == d_iso)
-        .order_by(ExercisePlan.updated_at.desc())
-        .first()
-    )
-    if not plan:
-        return ExercisePlanResponse(
-            target_date=d_iso,
-            plan_type="mixed",
-            title="No plan generated yet",
-            description="Generate your AI daily summary to create today's exercise plan.",
-            target_minutes=None,
-            completed=False,
-            status="not_set",
-            completed_minutes=0,
-            matching_sessions=0,
-        )
-
-    exercise_logs = get_logs_for_date(db, ExerciseLog, user.id, d, tz_name=tz_name)
-    completed, status, completed_minutes, matching_sessions = compute_plan_status(
-        plan.plan_type,
-        plan.target_minutes,
-        exercise_logs,
-        d,
-        today_local,
-    )
-    return ExercisePlanResponse(
-        target_date=plan.target_date,
-        plan_type=plan.plan_type,
-        title=plan.title,
-        description=plan.description,
-        target_minutes=plan.target_minutes,
-        completed=completed,
-        status=status,
-        completed_minutes=completed_minutes,
-        matching_sessions=matching_sessions,
-    )
+    return _exercise_plan_payload(db, user, d, tz_name)
 
 
 @router.post("/exercise-plan/generate", response_model=ExercisePlanResponse)
@@ -535,47 +636,7 @@ def get_daily_checklist(
 ):
     tz_name = _user_timezone(user)
     d = target_date or today_for_tz(tz_name)
-    d_iso = d.isoformat()
-    med_structured, supp_structured = _profile_checklist_entries_read_only(user)
-
-    valid_med_names = {item.get("name", "").strip().lower() for item in med_structured if item.get("name")}
-    valid_supp_names = {item.get("name", "").strip().lower() for item in supp_structured if item.get("name")}
-
-    states = (
-        db.query(DailyChecklistItem)
-        .filter(DailyChecklistItem.user_id == user.id, DailyChecklistItem.target_date == d_iso)
-        .all()
-    )
-
-    by_key = {}
-    for s in states:
-        name_key = s.item_name.strip().lower()
-        if s.item_type == "medication":
-            if name_key in valid_med_names and not is_generic_medication_name(s.item_name):
-                by_key[(s.item_type, name_key)] = bool(s.completed)
-        elif s.item_type == "supplement":
-            if name_key in valid_supp_names and not is_generic_supplement_name(s.item_name):
-                by_key[(s.item_type, name_key)] = bool(s.completed)
-
-    med_items = [
-        ChecklistItem(
-            name=item.get("name", ""),
-            dose=item.get("dose", ""),
-            timing=item.get("timing", ""),
-            completed=by_key.get(("medication", item.get("name", "").lower()), False),
-        )
-        for item in med_structured if item.get("name")
-    ]
-    supp_items = [
-        ChecklistItem(
-            name=item.get("name", ""),
-            dose=item.get("dose", ""),
-            timing=item.get("timing", ""),
-            completed=by_key.get(("supplement", item.get("name", "").lower()), False),
-        )
-        for item in supp_structured if item.get("name")
-    ]
-    return DailyChecklistResponse(target_date=d_iso, medications=med_items, supplements=supp_items)
+    return _daily_checklist_payload(db, user, d, tz_name)
 
 
 @router.put("/checklist")
@@ -683,24 +744,7 @@ def get_fasting_logs(
 
 @router.get("/fasting/active")
 def get_active_fast(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    active = (
-        db.query(FastingLog)
-        .filter(FastingLog.user_id == user.id, FastingLog.fast_end.is_(None))
-        .order_by(FastingLog.fast_start.desc())
-        .first()
-    )
-    if not active:
-        return {"active": False}
-
-    fast_start = active.fast_start if active.fast_start.tzinfo else active.fast_start.replace(tzinfo=timezone.utc)
-    elapsed = (datetime.now(timezone.utc) - fast_start).total_seconds() / 60
-    return {
-        "active": True,
-        "id": active.id,
-        "fast_start": active.fast_start.isoformat(),
-        "elapsed_minutes": int(elapsed),
-        "fast_type": active.fast_type,
-    }
+    return _active_fast_payload(db, user)
 
 
 @router.post("/fasting")
@@ -787,40 +831,45 @@ def get_daily_totals(
     """Get aggregated daily totals for food, hydration, exercise."""
     tz_name = _user_timezone(user)
     d = target_date or today_for_tz(tz_name)
-    day_start = start_of_day(d, tz_name)
-    day_end = end_of_day(d, tz_name)
+    return _daily_totals_payload(db, user, d, tz_name)
 
-    # Food totals
-    foods = db.query(FoodLog).filter(
-        FoodLog.user_id == user.id, FoodLog.logged_at >= day_start, FoodLog.logged_at <= day_end
-    ).all()
-    food_totals = {
-        "calories": sum(f.calories or 0 for f in foods),
-        "protein_g": sum(f.protein_g or 0 for f in foods),
-        "carbs_g": sum(f.carbs_g or 0 for f in foods),
-        "fat_g": sum(f.fat_g or 0 for f in foods),
-        "fiber_g": sum(f.fiber_g or 0 for f in foods),
-        "sodium_mg": sum(f.sodium_mg or 0 for f in foods),
-        "meal_count": len(foods),
-    }
 
-    # Hydration total
-    hydrations = db.query(HydrationLog).filter(
-        HydrationLog.user_id == user.id, HydrationLog.logged_at >= day_start, HydrationLog.logged_at <= day_end
-    ).all()
-    hydration_total = sum(h.amount_ml for h in hydrations)
+@router.get("/dashboard")
+def get_dashboard_snapshot(
+    target_date: Optional[date] = None,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    tz_name = _user_timezone(user)
+    d = target_date or today_for_tz(tz_name)
+    to_iso = d.isoformat()
+    from_iso = (d - timedelta(days=13)).isoformat()
 
-    # Exercise total
-    exercises = db.query(ExerciseLog).filter(
-        ExerciseLog.user_id == user.id, ExerciseLog.logged_at >= day_start, ExerciseLog.logged_at <= day_end
-    ).all()
-    exercise_minutes = sum(e.duration_minutes or 0 for e in exercises)
-    exercise_calories = sum(e.calories_burned or 0 for e in exercises)
+    vitals_today = get_vitals_logs(target_date=d, date_from=None, date_to=None, user=user, db=db)
+    vitals_window = get_vitals_logs(target_date=None, date_from=date.fromisoformat(from_iso), date_to=d, user=user, db=db)
+    daily_totals = _daily_totals_payload(db, user, d, tz_name)
+    exercise_plan = _exercise_plan_payload(db, user, d, tz_name)
+    checklist = _daily_checklist_payload(db, user, d, tz_name)
+    active_fast = _active_fast_payload(db, user)
 
+    profile = getattr(user, "settings", None)
     return {
-        "date": d.isoformat(),
-        "food": food_totals,
-        "hydration_ml": hydration_total,
-        "exercise_minutes": exercise_minutes,
-        "exercise_calories_burned": exercise_calories,
+        "target_date": to_iso,
+        "date_from": from_iso,
+        "date_to": to_iso,
+        "timezone": tz_name,
+        "profile": {
+            "current_weight_kg": getattr(profile, "current_weight_kg", None),
+            "goal_weight_kg": getattr(profile, "goal_weight_kg", None),
+            "weight_unit": getattr(profile, "weight_unit", "kg"),
+            "hydration_unit": getattr(profile, "hydration_unit", "ml"),
+            "medical_conditions": getattr(profile, "medical_conditions", None),
+            "timezone": tz_name,
+        },
+        "daily_totals": daily_totals,
+        "vitals_today": vitals_today,
+        "vitals_window": vitals_window,
+        "exercise_plan": exercise_plan.model_dump(),
+        "checklist": checklist.model_dump(),
+        "active_fast": active_fast,
     }

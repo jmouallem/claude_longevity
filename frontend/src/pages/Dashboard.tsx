@@ -66,6 +66,26 @@ interface DailyChecklist {
   supplements: ChecklistItem[];
 }
 
+interface DashboardSnapshot {
+  target_date: string;
+  date_from: string;
+  date_to: string;
+  timezone?: string | null;
+  profile: ProfileData;
+  daily_totals: DailyTotals;
+  vitals_today: Vital[];
+  vitals_window: Vital[];
+  exercise_plan: ExercisePlan;
+  checklist: DailyChecklist;
+  active_fast: {
+    active: boolean;
+    id?: number;
+    fast_start?: string;
+    elapsed_minutes?: number;
+    fast_type?: string | null;
+  };
+}
+
 function dayKeyForTimezone(timezone?: string | null, when: Date = new Date()): string {
   if (!timezone) return toIsoDate(when);
   try {
@@ -423,22 +443,18 @@ export default function Dashboard() {
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
-      const p = await apiClient.get<ProfileData>('/api/settings/profile');
-      const todayKey = today(p.timezone);
-      const fromIso = shiftIsoDate(todayKey, -13);
-      const toIso = todayKey;
-      const [t, v, vitalsRange, plan, c] = await Promise.all([
-        apiClient.get<DailyTotals>(`/api/logs/daily-totals?target_date=${todayKey}`),
-        apiClient.get<Vital[]>(`/api/logs/vitals?target_date=${todayKey}`),
-        apiClient.get<Vital[]>(`/api/logs/vitals?date_from=${fromIso}&date_to=${toIso}`),
-        apiClient.get<ExercisePlan>(`/api/logs/exercise-plan?target_date=${todayKey}`),
-        apiClient.get<DailyChecklist>(`/api/logs/checklist?target_date=${todayKey}`),
-      ]);
-      setTotals(t);
-      setVitals(v);
+      const snapshot = await apiClient.get<DashboardSnapshot>('/api/logs/dashboard');
+      const p = snapshot.profile || null;
+      const todayKey = snapshot.target_date || today(p?.timezone);
+      const fromIso = snapshot.date_from || shiftIsoDate(todayKey, -13);
+      const toIso = snapshot.date_to || todayKey;
+      const vitalsRange = snapshot.vitals_window || [];
+
+      setTotals(snapshot.daily_totals || null);
+      setVitals(snapshot.vitals_today || []);
       setProfile(p);
-      setExercisePlan(plan);
-      setChecklist(c);
+      setExercisePlan(snapshot.exercise_plan || null);
+      setChecklist(snapshot.checklist || null);
       setTargetDate(todayKey);
       setVitalsWindow(vitalsRange);
       setWeightSeries(buildWeightSeries(vitalsRange, fromIso, toIso));

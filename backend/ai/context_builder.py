@@ -1,12 +1,14 @@
 import json
+import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from db.models import (
     User, FoodLog, HydrationLog, VitalsLog, ExerciseLog,
-    SupplementLog, FastingLog, SleepLog, Summary, Message,
+    SupplementLog, FastingLog, SleepLog, Summary, Message, HealthOptimizationFramework,
 )
 from services.health_framework_service import FRAMEWORK_TYPES, active_frameworks_for_context, ensure_default_frameworks
 from services.specialists_config import get_specialist_prompt, get_system_prompt, parse_overrides
@@ -15,6 +17,9 @@ from utils.units import cm_to_ft_in, kg_to_lb, ml_to_oz
 
 CONTEXT_DIR = Path(__file__).parent.parent / "context"
 _DEFAULT_CONTEXT_MAX_CHARS = 18000
+_STABLE_CONTEXT_CACHE_TTL_S = 300
+_STABLE_CONTEXT_CACHE_MAX = 256
+_stable_context_cache: dict[tuple, tuple[float, str]] = {}
 
 
 def _context_budget(intent_category: str | None) -> dict[str, int]:
@@ -163,6 +168,89 @@ def format_active_frameworks(db: Session, user: User) -> str:
         if row.rationale:
             lines.append(f"  - Rationale: {row.rationale}")
     return "\n".join(lines)
+
+
+def _cache_prune() -> None:
+    if len(_stable_context_cache) <= _STABLE_CONTEXT_CACHE_MAX:
+        return
+    oldest = sorted(_stable_context_cache.items(), key=lambda kv: kv[1][0])[: max(len(_stable_context_cache) - _STABLE_CONTEXT_CACHE_MAX, 1)]
+    for key, _ in oldest:
+        _stable_context_cache.pop(key, None)
+
+
+def _stable_cache_key(db: Session, user: User, specialist: str) -> tuple:
+    settings_stamp = (
+        getattr(getattr(user, "settings", None), "updated_at", None).isoformat()
+        if getattr(getattr(user, "settings", None), "updated_at", None)
+        else "none"
+    )
+    specialist_stamp = (
+        getattr(getattr(user, "specialist_config", None), "updated_at", None).isoformat()
+        if getattr(getattr(user, "specialist_config", None), "updated_at", None)
+        else "none"
+    )
+    framework_stamp_row = (
+        db.query(func.max(HealthOptimizationFramework.updated_at))
+        .filter(HealthOptimizationFramework.user_id == user.id)
+        .scalar()
+    )
+    framework_stamp = framework_stamp_row.isoformat() if framework_stamp_row else "none"
+    return (user.id, specialist, settings_stamp, specialist_stamp, framework_stamp)
+
+
+def _build_stable_context_block(db: Session, user: User, specialist: str, overrides: dict, budget: dict[str, int]) -> str:
+    blocks: list[str] = []
+    blocks.append(get_system_prompt(overrides).strip())
+    if specialist and specialist != "orchestrator":
+        specialist_prompt = get_specialist_prompt(specialist, overrides)
+        if specialist_prompt:
+            blocks.append(specialist_prompt.strip())
+
+    display_name = (user.display_name or "").strip()
+    username = (user.username or "").strip()
+    if display_name or username:
+        identity_lines = []
+        if display_name:
+            identity_lines.append(f"- Name: {display_name}")
+        if username and username != display_name:
+            identity_lines.append(f"- Username: {username}")
+        blocks.append("## User Identity\n" + "\n".join(identity_lines))
+
+    profile = format_user_profile(user.settings)
+    blocks.append(_clip_block(f"## Current User Profile\n{profile}", budget["max_profile"]))
+
+    framework_text = format_active_frameworks(db, user)
+    blocks.append(
+        _clip_block(
+            f"## Prioritized Health Optimization Framework\n{framework_text}",
+            budget["max_framework"],
+        )
+    )
+
+    if user.settings:
+        meds = format_medications(user.settings.medications)
+        supps = format_supplements(user.settings.supplements)
+        blocks.append(
+            _clip_block(
+                f"## Medications\n{meds}\n\n## Supplements\n{supps}",
+                budget["max_meds_supps"],
+            )
+        )
+
+    return "\n\n".join([b for b in blocks if b.strip()]).strip()
+
+
+def _get_stable_context_block_cached(db: Session, user: User, specialist: str, overrides: dict, budget: dict[str, int]) -> str:
+    key = _stable_cache_key(db, user, specialist)
+    now_ts = time.monotonic()
+    cached = _stable_context_cache.get(key)
+    if cached and (now_ts - cached[0]) <= _STABLE_CONTEXT_CACHE_TTL_S:
+        return cached[1]
+
+    block = _build_stable_context_block(db, user, specialist, overrides, budget)
+    _stable_context_cache[key] = (now_ts, block)
+    _cache_prune()
+    return block
 
 
 def compute_today_snapshot(db: Session, user: User, target_date: date | None = None) -> str:
@@ -343,47 +431,9 @@ def build_context(
             payload = _clip_block(payload, max_chars)
         sections.append({"text": payload, "required": required})
 
-    # 1. Base system prompt
-    _add_section(get_system_prompt(overrides), required=True)
-
-    # 2. Specialist instructions
-    if specialist and specialist != "orchestrator":
-        specialist_prompt = get_specialist_prompt(specialist, overrides)
-        if specialist_prompt:
-            _add_section(specialist_prompt, required=True)
-
-    # 3. User identity
-    display_name = (user.display_name or "").strip()
-    username = (user.username or "").strip()
-    if display_name or username:
-        identity_lines = []
-        if display_name:
-            identity_lines.append(f"- Name: {display_name}")
-        if username and username != display_name:
-            identity_lines.append(f"- Username: {username}")
-        _add_section(f"## User Identity\n" + "\n".join(identity_lines), required=True)
-
-    # 4. Current user profile
-    profile = format_user_profile(user.settings)
-    _add_section(f"## Current User Profile\n{profile}", max_chars=budget["max_profile"], required=True)
-
-    # 5. Active framework priorities
-    framework_text = format_active_frameworks(db, user)
-    _add_section(
-        f"## Prioritized Health Optimization Framework\n{framework_text}",
-        max_chars=budget["max_framework"],
-        required=True,
-    )
-
-    # 6. Medications & supplements
-    if user.settings:
-        meds = format_medications(user.settings.medications)
-        supps = format_supplements(user.settings.supplements)
-        _add_section(
-            f"## Medications\n{meds}\n\n## Supplements\n{supps}",
-            max_chars=budget["max_meds_supps"],
-            required=True,
-        )
+    # 1. Stable context block (cached): prompts, identity, profile, frameworks, meds/supps.
+    stable_block = _get_stable_context_block_cached(db, user, specialist, overrides, budget)
+    _add_section(stable_block, required=True)
 
     # 7. Today snapshot
     snapshot = compute_today_snapshot(db, user)

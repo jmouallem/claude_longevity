@@ -15,6 +15,7 @@ from services.telemetry_context import consume_request_scope
 REQUEST_HISTOGRAM_BUCKETS_MS = [100, 250, 500, 1000, 2000, 5000, 10000]
 
 _DASHBOARD_PATHS = {
+    "/api/logs/dashboard",
     "/api/settings/profile",
     "/api/logs/daily-totals",
     "/api/logs/vitals",

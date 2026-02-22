@@ -169,6 +169,7 @@ async def classify_intent(
     allowed_specialists: list[str] | None = None,
     db: Session | None = None,
     user_id: int | None = None,
+    allow_model_call: bool = True,
 ) -> dict:
     """Classify user message intent and route to appropriate specialist."""
     allowed = allowed_specialists or [
@@ -184,6 +185,9 @@ async def classify_intent(
     forced_specialist = None
     if user_override and user_override != "auto":
         forced_specialist = user_override if user_override in allowed else "orchestrator"
+
+    if not allow_model_call:
+        return _heuristic_intent(message, forced_specialist, allowed)
 
     try:
         routing_prompt = ROUTING_PROMPT_TEMPLATE.format(specialists=", ".join(allowed))

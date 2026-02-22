@@ -34,6 +34,7 @@ def _new_db():
 
 def test_classify_request_group_routes():
     assert classify_request_group("/api/chat") == "chat"
+    assert classify_request_group("/api/logs/dashboard") == "dashboard"
     assert classify_request_group("/api/logs/daily-totals") == "dashboard"
     assert classify_request_group("/api/logs/hydration") == "logs"
     assert classify_request_group("/api/analysis/runs") == "analysis"

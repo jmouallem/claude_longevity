@@ -402,3 +402,22 @@
 - `SLO_DASHBOARD_P95_LOAD_MS`
 - `SLO_ANALYSIS_RUN_COMPLETION_SLA_SECONDS`
 7. Added Phase D tests in `backend/tests/test_phase_d_telemetry.py`.
+
+### Phase E Performance Work (Implemented)
+1. Added utility-call budget controls per turn category:
+- `UTILITY_CALL_BUDGET_LOG_TURN`
+- `UTILITY_CALL_BUDGET_NONLOG_TURN`
+2. Added intent-call fallback to heuristic routing when utility budget is exhausted for classification.
+3. Added parse fallback to deterministic parser when utility budget blocks model extraction.
+4. Merged profile extraction + med/supp intake matching into one utility extraction contract (`matched_medications`, `matched_supplements`) and reused that output for checklist marking.
+5. Removed extra med/supp AI matcher calls from checklist marking path to reduce per-turn utility fan-out.
+6. Added debounced + in-flight-locked due-analysis dispatch on chat (`ANALYSIS_AUTORUN_DEBOUNCE_SECONDS`).
+7. Added stable context caching in context builder for prompt/profile/framework/med-supp sections (TTL + bounded cache).
+8. Added web-search circuit breaker controls:
+- `WEB_SEARCH_CIRCUIT_FAIL_THRESHOLD`
+- `WEB_SEARCH_CIRCUIT_OPEN_SECONDS`
+9. Added aggregate dashboard API endpoint `GET /api/logs/dashboard` and switched frontend dashboard load to a single initial request.
+10. Validation completed for Phase E changes:
+- `python -m compileall backend` (pass)
+- `python -m pytest -q backend/tests` (pass, 6 tests)
+- `npm run build` in `frontend/` (pass)

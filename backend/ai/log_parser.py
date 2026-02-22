@@ -390,11 +390,14 @@ async def parse_log_data(
     user_profile: str = "",
     db: Session | None = None,
     user_id: int | None = None,
+    allow_model_call: bool = True,
 ) -> dict | None:
     """Use utility model to parse structured data from free-form text."""
     prompt = CATEGORY_TO_PROMPT.get(category)
     if not prompt:
         return None
+    if not allow_model_call:
+        return _deterministic_parse_by_category(message, category)
 
     context = ""
     if user_profile:

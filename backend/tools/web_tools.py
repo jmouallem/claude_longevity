@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import quote_plus
@@ -21,6 +23,52 @@ def _utc_now() -> datetime:
 def _query_key(query: str, max_results: int) -> str:
     raw = f"{query.strip().lower()}::{max_results}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+_CB_LOCK = threading.Lock()
+_CB_STATE: dict[str, dict[str, float | int]] = {
+    "duckduckgo": {"failures": 0, "open_until": 0.0},
+    "wikipedia": {"failures": 0, "open_until": 0.0},
+    "pubmed": {"failures": 0, "open_until": 0.0},
+}
+
+
+def _cb_should_allow(name: str) -> bool:
+    now = time.monotonic()
+    with _CB_LOCK:
+        state = _CB_STATE.setdefault(name, {"failures": 0, "open_until": 0.0})
+        return float(state.get("open_until", 0.0)) <= now
+
+
+def _cb_record_success(name: str) -> None:
+    with _CB_LOCK:
+        state = _CB_STATE.setdefault(name, {"failures": 0, "open_until": 0.0})
+        state["failures"] = 0
+        state["open_until"] = 0.0
+
+
+def _cb_record_failure(name: str) -> None:
+    threshold = max(int(settings.WEB_SEARCH_CIRCUIT_FAIL_THRESHOLD), 1)
+    open_seconds = max(int(settings.WEB_SEARCH_CIRCUIT_OPEN_SECONDS), 5)
+    now = time.monotonic()
+    with _CB_LOCK:
+        state = _CB_STATE.setdefault(name, {"failures": 0, "open_until": 0.0})
+        failures = int(state.get("failures", 0)) + 1
+        state["failures"] = failures
+        if failures >= threshold:
+            state["open_until"] = now + open_seconds
+
+
+def _run_with_circuit(name: str, fn, *args, **kwargs):
+    if not _cb_should_allow(name):
+        raise RuntimeError(f"{name} circuit_open")
+    try:
+        out = fn(*args, **kwargs)
+        _cb_record_success(name)
+        return out
+    except Exception:
+        _cb_record_failure(name)
+        raise
 
 
 def _read_cache(ctx: ToolContext, key: str) -> list[dict[str, Any]] | None:
@@ -262,15 +310,33 @@ def _tool_web_search(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
     pubmed_results: list[dict[str, str]] = []
     errors: list[str] = []
     try:
-        ddg_results = _ddg_instant_search(query, max_results=max_results, timeout_s=timeout_s)
+        ddg_results = _run_with_circuit(
+            "duckduckgo",
+            _ddg_instant_search,
+            query,
+            max_results=max_results,
+            timeout_s=timeout_s,
+        )
     except Exception as exc:
         errors.append(f"duckduckgo:{exc.__class__.__name__}")
     try:
-        wiki_results = _wikipedia_open_search(query, max_results=max_results, timeout_s=timeout_s)
+        wiki_results = _run_with_circuit(
+            "wikipedia",
+            _wikipedia_open_search,
+            query,
+            max_results=max_results,
+            timeout_s=timeout_s,
+        )
     except Exception as exc:
         errors.append(f"wikipedia:{exc.__class__.__name__}")
     try:
-        pubmed_results = _pubmed_search(query, max_results=max_results, timeout_s=timeout_s)
+        pubmed_results = _run_with_circuit(
+            "pubmed",
+            _pubmed_search,
+            query,
+            max_results=max_results,
+            timeout_s=timeout_s,
+        )
     except Exception as exc:
         errors.append(f"pubmed:{exc.__class__.__name__}")
 

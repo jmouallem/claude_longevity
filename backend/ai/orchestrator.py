@@ -36,6 +36,7 @@ from services.specialists_config import get_enabled_specialist_ids, get_effectiv
 from services.telemetry_context import (
     clear_ai_turn_scope,
     consume_ai_turn_scope,
+    get_ai_turn_scope,
     mark_ai_first_token,
     record_ai_failure,
     start_ai_turn_scope,
@@ -140,6 +141,32 @@ MENU_CONFIRM_WORDS = {
     "save it",
     "add it",
 }
+_ANALYSIS_DISPATCH_LOCK: asyncio.Lock = asyncio.Lock()
+_ANALYSIS_LAST_DISPATCH_TS: dict[int, float] = {}
+_ANALYSIS_INFLIGHT_USERS: set[int] = set()
+
+
+class UtilityCallBudget:
+    def __init__(self, category: str):
+        is_log = str(category or "").startswith("log_")
+        self.limit = (
+            max(int(settings.UTILITY_CALL_BUDGET_LOG_TURN), 1)
+            if is_log
+            else max(int(settings.UTILITY_CALL_BUDGET_NONLOG_TURN), 1)
+        )
+
+    def can_call(self, operation: str) -> bool:
+        scope = get_ai_turn_scope()
+        used = int(getattr(scope, "utility_calls", 0) if scope else 0)
+        if used < self.limit:
+            return True
+        logger.info(
+            "Utility call budget exceeded; skipping operation=%s used=%s limit=%s",
+            operation,
+            used,
+            self.limit,
+        )
+        return False
 SLEEP_START_CUES = (
     "heading to bed",
     "going to bed",
@@ -284,6 +311,8 @@ Return ONLY valid JSON:
 {
   "medications": [{"name": "medication name", "dose": "dose if known", "timing": "when taken if mentioned"}],
   "supplements": [{"name": "brand + product name", "dose": "dose/form if known", "timing": "when taken if mentioned"}],
+  "matched_medications": ["exact names from provided medication list that user says they took"],
+  "matched_supplements": ["exact names from provided supplement list that user says they took"],
   "medical_conditions": ["condition names"],
   "dietary_preferences": ["preferences/restrictions"],
   "health_goals": ["goals"],
@@ -296,6 +325,7 @@ Rules:
 - For medications/supplements: "name" is the product name without dose (e.g., "Jamieson Vitamin D3 drops"), "dose" is the amount (e.g., "1000 IU/drop, 4 drops daily"), "timing" is when taken (e.g., "morning", "with breakfast", "bedtime"). Leave dose/timing as empty string if not mentioned.
 - Valid timing values: morning, evening, with breakfast, with lunch, with dinner, bedtime, twice daily, as needed, or empty string.
 - If user provides a correction, return the corrected full entry.
+- matched_medications and matched_supplements must only include names that exactly match provided current lists.
 """
 
 from utils.med_utils import (
@@ -500,6 +530,62 @@ def _format_time_context(result: dict) -> str:
     if iso_local:
         lines.append(f"- ISO local: {iso_local}")
     return "\n".join(lines)
+
+
+def _extract_json_payload(content: str) -> dict[str, Any]:
+    text = str(content or "").strip()
+    if "```" in text:
+        text = text.split("```")[1]
+        if text.startswith("json"):
+            text = text[4:]
+        text = text.strip()
+    parsed = json.loads(text)
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _known_name_matches(candidates: list[str] | None, allowed_names: list[str]) -> list[str]:
+    if not candidates:
+        return []
+    allow_map = {str(name).strip().lower(): str(name).strip() for name in allowed_names if str(name).strip()}
+    out: list[str] = []
+    for raw in candidates:
+        key = str(raw).strip().lower()
+        resolved = allow_map.get(key)
+        if resolved and resolved not in out:
+            out.append(resolved)
+    return out
+
+
+async def _dispatch_due_analysis_if_allowed(user_id: int) -> None:
+    if not settings.ENABLE_LONGITUDINAL_ANALYSIS or not settings.ANALYSIS_AUTORUN_ON_CHAT:
+        return
+    now_mono = time.monotonic()
+    debounce_s = max(int(settings.ANALYSIS_AUTORUN_DEBOUNCE_SECONDS), 5)
+    should_dispatch = False
+
+    async with _ANALYSIS_DISPATCH_LOCK:
+        last = _ANALYSIS_LAST_DISPATCH_TS.get(user_id, 0.0)
+        if user_id in _ANALYSIS_INFLIGHT_USERS:
+            return
+        if (now_mono - last) < debounce_s:
+            return
+        _ANALYSIS_LAST_DISPATCH_TS[user_id] = now_mono
+        _ANALYSIS_INFLIGHT_USERS.add(user_id)
+        should_dispatch = True
+
+    if not should_dispatch:
+        return
+
+    async def _runner() -> None:
+        try:
+            await run_due_analyses_for_user_id(user_id, trigger="chat")
+        except Exception as e:
+            logger.warning(f"Due longitudinal analysis dispatch failed: {e}")
+        finally:
+            async with _ANALYSIS_DISPATCH_LOCK:
+                _ANALYSIS_INFLIGHT_USERS.discard(user_id)
+
+    asyncio.create_task(_runner())
 
 
 def _normalize_chat_verbosity(value: str | None) -> str:
@@ -1479,8 +1565,11 @@ async def _log_agent_feedback_if_needed(
     message_text: str,
     specialist_id: str,
     specialist_name: str,
+    utility_budget: UtilityCallBudget | None = None,
 ):
     if not _has_feedback_signal(message_text):
+        return
+    if utility_budget and not utility_budget.can_call("feedback_extract"):
         return
 
     try:
@@ -1555,10 +1644,11 @@ async def _log_agent_feedback_if_needed(
 
 async def _mark_checklist_completed_for_meds(
     db: Session,
-    provider,
+    _provider,
     user: User,
     combined_input: str,
     reference_utc: datetime | None = None,
+    extracted_matches: list[str] | None = None,
 ):
     """Mark today's medication checklist items completed based on message intent."""
     settings = user.settings
@@ -1591,7 +1681,11 @@ async def _mark_checklist_completed_for_meds(
     mentioned_specific = [m for m in med_names if m.lower() in text]
     targets: list[str] = []
 
-    if mentioned_specific:
+    extracted_targets = _known_name_matches(extracted_matches, med_names)
+
+    if extracted_targets:
+        targets = extracted_targets
+    elif mentioned_specific:
         targets = mentioned_specific
     else:
         # First pass: standardized resolver tool (handles "morning meds", "blood pressure meds", etc.)
@@ -1609,45 +1703,6 @@ async def _mark_checklist_completed_for_meds(
             logger.warning(f"Medication resolver tool failed: {e}")
         except Exception as e:
             logger.warning(f"Medication resolver tool unexpected failure: {e}")
-
-    if not targets:
-        try:
-            med_list = "\n".join([f"- {m}" for m in med_names])
-            user_payload = (
-                f"Message:\n{combined_input}\n\n"
-                f"Medication list:\n{med_list}\n"
-            )
-            result = await provider.chat(
-                messages=[{"role": "user", "content": user_payload}],
-                model=provider.get_utility_model(),
-                system=MED_MATCH_PROMPT,
-                stream=False,
-            )
-            track_usage_from_result(
-                db=db,
-                user_id=user.id,
-                result=result,
-                model_used=provider.get_utility_model(),
-                operation="medication_match",
-                usage_type="utility",
-            )
-            text_out = (result.get("content") or "").strip()
-            if "```" in text_out:
-                text_out = text_out.split("```")[1]
-                if text_out.startswith("json"):
-                    text_out = text_out[4:]
-                text_out = text_out.strip()
-            parsed = json.loads(text_out)
-            matched = parsed.get("matched_medications", []) if isinstance(parsed, dict) else []
-            if isinstance(matched, list):
-                allowed = {m.lower(): m for m in med_names}
-                for raw_name in matched:
-                    key = str(raw_name).strip().lower()
-                    if key in allowed and allowed[key] not in targets:
-                        targets.append(allowed[key])
-        except Exception as e:
-            record_ai_failure("utility", "medication_match", str(e))
-            logger.warning(f"AI med matching failed, falling back to heuristic: {e}")
 
     if not targets:
         if "blood pressure" in text or "bp " in f"{text} ":
@@ -1681,10 +1736,11 @@ async def _mark_checklist_completed_for_meds(
 
 async def _mark_checklist_completed_for_supplements(
     db: Session,
-    provider,
+    _provider,
     user: User,
     combined_input: str,
     reference_utc: datetime | None = None,
+    extracted_matches: list[str] | None = None,
 ):
     """Mark today's supplement checklist items completed based on intake intent."""
     settings = user.settings
@@ -1711,14 +1767,18 @@ async def _mark_checklist_completed_for_supplements(
         return
 
     targets: list[str] = []
+    extracted_targets = _known_name_matches(extracted_matches, supp_names)
 
     # 1) Direct / normalized match (handles entries like "IM8")
-    norm_text = _normalize_alnum(combined_input)
-    for name in supp_names:
-        n = name.lower()
-        norm_name = _normalize_alnum(name)
-        if n in text or (norm_name and norm_name in norm_text):
-            targets.append(name)
+    if extracted_targets:
+        targets.extend(extracted_targets)
+    else:
+        norm_text = _normalize_alnum(combined_input)
+        for name in supp_names:
+            n = name.lower()
+            norm_name = _normalize_alnum(name)
+            if n in text or (norm_name and norm_name in norm_text):
+                targets.append(name)
 
     # 2) Standardized resolver tool (handles phrases like "my vitamins", "morning supplements")
     if not targets:
@@ -1736,46 +1796,6 @@ async def _mark_checklist_completed_for_supplements(
             logger.warning(f"Supplement resolver tool failed: {e}")
         except Exception as e:
             logger.warning(f"Supplement resolver tool unexpected failure: {e}")
-
-    # 3) AI semantic mapping fallback
-    if not targets:
-        try:
-            supp_list = "\n".join([f"- {s}" for s in supp_names])
-            user_payload = (
-                f"Message:\n{combined_input}\n\n"
-                f"Supplement list:\n{supp_list}\n"
-            )
-            result = await provider.chat(
-                messages=[{"role": "user", "content": user_payload}],
-                model=provider.get_utility_model(),
-                system=SUPP_MATCH_PROMPT,
-                stream=False,
-            )
-            track_usage_from_result(
-                db=db,
-                user_id=user.id,
-                result=result,
-                model_used=provider.get_utility_model(),
-                operation="supplement_match",
-                usage_type="utility",
-            )
-            text_out = (result.get("content") or "").strip()
-            if "```" in text_out:
-                text_out = text_out.split("```")[1]
-                if text_out.startswith("json"):
-                    text_out = text_out[4:]
-                text_out = text_out.strip()
-            parsed = json.loads(text_out)
-            matched = parsed.get("matched_supplements", []) if isinstance(parsed, dict) else []
-            if isinstance(matched, list):
-                allowed = {s.lower(): s for s in supp_names}
-                for raw_name in matched:
-                    key = str(raw_name).strip().lower()
-                    if key in allowed and allowed[key] not in targets:
-                        targets.append(allowed[key])
-        except Exception as e:
-            record_ai_failure("utility", "supplement_match", str(e))
-            logger.warning(f"AI supplement matching failed, falling back to heuristics: {e}")
 
     # 4) Last-resort fallback for explicit group phrases
     if not targets and ("my supplements" in text or "my vitamin" in text or "my vitamins" in text):
@@ -1856,11 +1876,12 @@ async def _apply_profile_updates(
     combined_input: str,
     category: str,
     reference_utc: datetime | None = None,
-):
+    utility_budget: UtilityCallBudget | None = None,
+) -> dict[str, list[str]]:
     """Auto-sync profile meds/supplements/conditions from message context."""
     settings = user.settings
     if not settings:
-        return
+        return {"matched_medications": [], "matched_supplements": []}
 
     # Opportunistic cleanup of legacy generic placeholders ("morning meds", "my vitamins").
     existing_meds = parse_structured_list(settings.medications)
@@ -1875,9 +1896,23 @@ async def _apply_profile_updates(
     if supps_json != settings.supplements:
         settings.supplements = supps_json
 
+    current_med_names = [str(item.get("name", "")).strip() for item in cleaned_meds if str(item.get("name", "")).strip()]
+    current_supp_names = [str(item.get("name", "")).strip() for item in cleaned_supps if str(item.get("name", "")).strip()]
+
+    if utility_budget and not utility_budget.can_call("profile_extract"):
+        return {"matched_medications": [], "matched_supplements": []}
+
     try:
+        med_list = "\n".join(f"- {name}" for name in current_med_names) if current_med_names else "- (none)"
+        supp_list = "\n".join(f"- {name}" for name in current_supp_names) if current_supp_names else "- (none)"
+        user_payload = (
+            f"{PROFILE_EXTRACT_PROMPT}\n\n"
+            f"Current medication list:\n{med_list}\n\n"
+            f"Current supplement list:\n{supp_list}\n\n"
+            f"Message: {combined_input}"
+        )
         result = await provider.chat(
-            messages=[{"role": "user", "content": f"{PROFILE_EXTRACT_PROMPT}\n\nMessage: {combined_input}"}],
+            messages=[{"role": "user", "content": user_payload}],
             model=provider.get_utility_model(),
             system="You are a strict data extraction assistant. Return only JSON.",
             stream=False,
@@ -1890,15 +1925,10 @@ async def _apply_profile_updates(
             operation="profile_extract",
             usage_type="utility",
         )
-        text = (result.get("content") or "").strip()
-        if "```" in text:
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
-            text = text.strip()
-        extracted = json.loads(text)
-        if not isinstance(extracted, dict):
-            extracted = {}
+        extracted = _extract_json_payload(result.get("content"))
+
+        matched_meds = _known_name_matches(extracted.get("matched_medications"), current_med_names)
+        matched_supps = _known_name_matches(extracted.get("matched_supplements"), current_supp_names)
 
         # Convert AI output to structured items (handles both dicts and strings)
         raw_meds = extracted.get("medications", [])
@@ -1946,7 +1976,10 @@ async def _apply_profile_updates(
             cleaned_med = cleanup_structured_list(settings.medications)
             if cleaned_med != settings.medications:
                 settings.medications = cleaned_med
-            return
+            return {
+                "matched_medications": matched_meds,
+                "matched_supplements": matched_supps,
+            }
 
         tool_ctx = ToolContext(db=db, user=user, specialist_id="orchestrator", reference_utc=reference_utc)
 
@@ -1985,9 +2018,14 @@ async def _apply_profile_updates(
                 tool_registry.execute("framework_sync_from_profile", {}, tool_ctx)
             except Exception as e:
                 logger.warning(f"Framework sync tool failed: {e}")
+        return {
+            "matched_medications": matched_meds,
+            "matched_supplements": matched_supps,
+        }
     except Exception as e:
         record_ai_failure("utility", "profile_extract", str(e))
         logger.warning(f"Profile auto-sync extraction failed: {e}")
+        return {"matched_medications": [], "matched_supplements": []}
 
 
 async def save_structured_log(
@@ -2156,6 +2194,11 @@ async def process_chat(
     if user.specialist_config and user.specialist_config.active_specialist != "auto":
         specialist_override = user.specialist_config.active_specialist
 
+    classify_allow_model = True
+    scope = get_ai_turn_scope()
+    if scope is not None:
+        classify_allow_model = int(scope.utility_calls or 0) < max(int(settings.UTILITY_CALL_BUDGET_NONLOG_TURN), 1)
+
     intent = await classify_intent(
         provider,
         combined_input,
@@ -2163,11 +2206,17 @@ async def process_chat(
         allowed_specialists=enabled_specialists,
         db=db,
         user_id=user.id,
+        allow_model_call=classify_allow_model,
     )
     category = intent["category"]
     specialist = intent["specialist"]
+    try:
+        intent_confidence = float(intent.get("confidence") or 0.0)
+    except (TypeError, ValueError):
+        intent_confidence = 0.0
     update_ai_turn_scope(specialist_id=specialist, intent_category=category)
     specialist_name = _resolve_specialist_name(overrides, specialist)
+    utility_budget = UtilityCallBudget(category)
 
     # 2b. Auto-log global feedback from user bug/enhancement messages under specialist.
     await _log_agent_feedback_if_needed(
@@ -2177,30 +2226,9 @@ async def process_chat(
         message_text=message,
         specialist_id=specialist,
         specialist_name=specialist_name,
+        utility_budget=utility_budget,
     )
     db.commit()
-
-    # 2c. Always attempt intake checklist marking from intent text.
-    # This keeps dashboard meds/supplement checkboxes in sync even if
-    # category extraction/profile extraction misses on a turn.
-    try:
-        await _mark_checklist_completed_for_meds(
-            db,
-            provider,
-            user,
-            combined_input,
-            reference_utc=message_received_utc,
-        )
-        await _mark_checklist_completed_for_supplements(
-            db,
-            provider,
-            user,
-            combined_input,
-            reference_utc=message_received_utc,
-        )
-        db.commit()
-    except Exception as e:
-        logger.warning(f"Checklist sync from chat failed: {e}")
 
     has_menu_save_intent = _has_menu_save_intent(db, user, message)
     has_menu_update_intent = _has_menu_update_intent(db, user, message)
@@ -2232,6 +2260,7 @@ async def process_chat(
             user_profile=user_profile,
             db=db,
             user_id=user.id,
+            allow_model_call=utility_budget.can_call(f"log_parse:{category}"),
         )
         if category == "log_sleep":
             parsed_log_data = _normalize_sleep_payload(message, parsed_log_data)
@@ -2289,15 +2318,20 @@ async def process_chat(
 
     # 3b. Auto-sync profile fields from user message/image context
     # Run for supplement/medical/general chats and any image-assisted message.
-    if image_bytes or category in {
+    extracted_profile_refs = {"matched_medications": [], "matched_supplements": []}
+    should_profile_sync = bool(image_bytes) or category in {
         "log_supplement",
         "ask_supplement",
         "ask_medical",
         "ask_nutrition",
         "general_chat",
         "manual_override",
-    }:
-        await _apply_profile_updates(
+    }
+    if should_profile_sync and not image_bytes and not category.startswith("log_") and intent_confidence < 0.6:
+        should_profile_sync = False
+
+    if should_profile_sync:
+        extracted_profile_refs = await _apply_profile_updates(
             db=db,
             provider=provider,
             user=user,
@@ -2305,10 +2339,34 @@ async def process_chat(
             combined_input=combined_input,
             category=category,
             reference_utc=message_received_utc,
+            utility_budget=utility_budget,
         )
         db.commit()
 
-    # 3c. Optional live web search for supported specialists/questions.
+    # 3c. Attempt checklist marking once per turn, using merged extraction
+    # output when available to avoid extra utility model calls.
+    try:
+        await _mark_checklist_completed_for_meds(
+            db,
+            provider,
+            user,
+            combined_input,
+            reference_utc=message_received_utc,
+            extracted_matches=extracted_profile_refs.get("matched_medications"),
+        )
+        await _mark_checklist_completed_for_supplements(
+            db,
+            provider,
+            user,
+            combined_input,
+            reference_utc=message_received_utc,
+            extracted_matches=extracted_profile_refs.get("matched_supplements"),
+        )
+        db.commit()
+    except Exception as e:
+        logger.warning(f"Checklist sync from chat failed: {e}")
+
+    # 3d. Optional live web search for supported specialists/questions.
     web_results: list[dict] = []
     if _should_use_web_search(message, category, specialist):
         try:
@@ -2323,7 +2381,7 @@ async def process_chat(
         except Exception as e:
             logger.warning(f"web_search tool failed: {e}")
 
-    # 3d. Provide authoritative current time/date context when asked.
+    # 3e. Provide authoritative current time/date context when asked.
     time_context = ""
     if _should_include_time_context(message):
         try:
@@ -2347,12 +2405,8 @@ async def process_chat(
     time_inference_context = _build_time_inference_context(parsed_log_data)
     pending_time_confirmation_context = str(time_confirmation_gate.get("context", "") or "")
 
-    # 3e. Trigger due longitudinal analysis windows in background to keep chat latency low.
-    if settings.ENABLE_LONGITUDINAL_ANALYSIS and settings.ANALYSIS_AUTORUN_ON_CHAT:
-        try:
-            asyncio.create_task(run_due_analyses_for_user_id(user.id, trigger="chat"))
-        except Exception as e:
-            logger.warning(f"Due longitudinal analysis dispatch failed: {e}")
+    # 3f. Trigger due longitudinal analysis windows in background with debounce/lock.
+    await _dispatch_due_analysis_if_allowed(user.id)
 
     # 4. Build context
     system_context = build_context(db, user, specialist, intent_category=category)
