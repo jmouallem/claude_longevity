@@ -159,12 +159,19 @@ def format_active_frameworks(db: Session, user: User) -> str:
     if not rows:
         return "No active frameworks yet. Use Settings > Framework to activate prioritized strategies."
 
+    by_type_totals: dict[str, int] = {}
+    for row in rows:
+        key = str(row.framework_type)
+        by_type_totals[key] = by_type_totals.get(key, 0) + max(int(row.priority_score or 0), 0)
+
     lines: list[str] = []
     for row in rows:
         label = FRAMEWORK_TYPES.get(row.framework_type, {}).get("classifier_label", row.framework_type)
         source = f" [{row.source}]" if row.source else ""
         score = int(row.priority_score or 0)
-        lines.append(f"- ({score}) {row.name} — {label}{source}")
+        total = by_type_totals.get(str(row.framework_type), 0)
+        weight_pct = int(round((score / total) * 100)) if total > 0 else 0
+        lines.append(f"- ({score}, {weight_pct}% allocation) {row.name} - {label}{source}")
         if row.rationale:
             lines.append(f"  - Rationale: {row.rationale}")
     return "\n".join(lines)

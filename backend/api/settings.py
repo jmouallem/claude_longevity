@@ -24,7 +24,6 @@ from services.health_framework_service import (
     delete_framework,
     ensure_default_frameworks,
     grouped_frameworks_for_user,
-    serialize_framework,
     sync_frameworks_from_settings,
     update_framework,
     upsert_framework,
@@ -440,6 +439,15 @@ def _get_model_name(model_id: str) -> str:
     return model_id
 
 
+def _serialize_framework_for_user(db: Session, user_id: int, framework_id: int) -> dict:
+    grouped = grouped_frameworks_for_user(db, user_id)
+    for items in grouped.values():
+        for item in items:
+            if int(item.get("id", 0) or 0) == int(framework_id):
+                return item
+    raise ValueError("Framework item not found")
+
+
 @router.get("/models")
 def get_available_models(provider: str = "anthropic"):
     """Get available models for a given provider."""
@@ -630,7 +638,7 @@ def create_or_upsert_framework(
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    return {"status": "ok", "item": serialize_framework(row), "demoted_ids": demoted_ids}
+    return {"status": "ok", "item": _serialize_framework_for_user(db, user.id, row.id), "demoted_ids": demoted_ids}
 
 
 @router.put("/frameworks/{framework_id}")
@@ -658,7 +666,7 @@ def patch_framework(
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    return {"status": "ok", "item": serialize_framework(row), "demoted_ids": demoted_ids}
+    return {"status": "ok", "item": _serialize_framework_for_user(db, user.id, row.id), "demoted_ids": demoted_ids}
 
 
 @router.delete("/frameworks/{framework_id}")
@@ -688,10 +696,12 @@ def sync_frameworks_from_profile(
     db: Session = Depends(get_db),
 ):
     rows = sync_frameworks_from_settings(db, user, source="user", commit=True)
+    grouped = grouped_frameworks_for_user(db, user.id)
+    items = [item for bucket in grouped.values() for item in bucket]
     return {
         "status": "ok",
         "count": len(rows),
-        "items": [serialize_framework(row) for row in rows],
+        "items": items,
     }
 
 

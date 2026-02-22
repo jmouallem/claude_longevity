@@ -232,12 +232,13 @@ def serialize_framework(row: HealthOptimizationFramework) -> dict[str, Any]:
         "normalized_name": row.normalized_name,
         "priority_score": row.priority_score,
         "is_active": bool(row.is_active),
+        "active_weight_pct": None,
         "source": row.source,
         "rationale": row.rationale,
         "metadata": metadata_obj if isinstance(metadata_obj, (dict, list)) else {},
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
-    }
+}
 
 
 def list_frameworks_for_user(db: Session, user_id: int) -> list[HealthOptimizationFramework]:
@@ -291,29 +292,35 @@ def ensure_default_frameworks(db: Session, user_id: int) -> list[HealthOptimizat
     return list_frameworks_for_user(db, user_id)
 
 
-def _resolve_conflicts_on_activate(
-    db: Session,
-    item: HealthOptimizationFramework,
-) -> list[int]:
-    # Enforce one active framework per category to avoid contradictory decision directives.
-    active_same_type = (
-        db.query(HealthOptimizationFramework)
-        .filter(
-            HealthOptimizationFramework.user_id == item.user_id,
-            HealthOptimizationFramework.framework_type == item.framework_type,
-            HealthOptimizationFramework.is_active.is_(True),
-            HealthOptimizationFramework.id != item.id,
-        )
-        .order_by(HealthOptimizationFramework.created_at.asc(), HealthOptimizationFramework.id.asc())
-        .all()
-    )
-    demoted_ids: list[int] = []
-    for row in active_same_type:
-        demoted_ids.append(int(row.id))
-        row.is_active = False
-        lowered = min(int(row.priority_score or 0), max(item.priority_score - 10, 0))
-        row.priority_score = max(0, lowered)
-    return demoted_ids
+def _active_weight_pct_by_id(rows: list[HealthOptimizationFramework]) -> dict[int, int]:
+    by_type: dict[str, list[HealthOptimizationFramework]] = {}
+    for row in rows:
+        if not bool(row.is_active):
+            continue
+        by_type.setdefault(str(row.framework_type), []).append(row)
+
+    out: dict[int, int] = {}
+    for active_rows in by_type.values():
+        total = sum(max(int(r.priority_score or 0), 0) for r in active_rows)
+        if total <= 0:
+            base = 100 // len(active_rows)
+            remainder = 100 - (base * len(active_rows))
+            for idx, row in enumerate(active_rows):
+                out[int(row.id)] = base + (1 if idx < remainder else 0)
+            continue
+
+        raw_pcts: list[tuple[HealthOptimizationFramework, float]] = [
+            (row, (max(int(row.priority_score or 0), 0) / total) * 100.0) for row in active_rows
+        ]
+        floors: dict[int, int] = {int(row.id): int(pct) for row, pct in raw_pcts}
+        assigned = sum(floors.values())
+        remainder = max(100 - assigned, 0)
+        ranked = sorted(raw_pcts, key=lambda x: (x[1] - int(x[1])), reverse=True)
+        for idx in range(remainder):
+            row = ranked[idx % len(ranked)][0]
+            floors[int(row.id)] += 1
+        out.update(floors)
+    return out
 
 
 def upsert_framework(
@@ -379,8 +386,6 @@ def upsert_framework(
         row.metadata_json = json.dumps(meta, ensure_ascii=True)
 
     demoted_ids: list[int] = []
-    if row.is_active:
-        demoted_ids = _resolve_conflicts_on_activate(db, row)
 
     if commit:
         db.commit()
@@ -442,8 +447,6 @@ def update_framework(
         row.metadata_json = json.dumps(metadata if isinstance(metadata, dict) else {}, ensure_ascii=True)
 
     demoted_ids: list[int] = []
-    if row.is_active:
-        demoted_ids = _resolve_conflicts_on_activate(db, row)
 
     if commit:
         db.commit()
@@ -549,9 +552,13 @@ def sync_frameworks_from_settings(
 
 def grouped_frameworks_for_user(db: Session, user_id: int) -> dict[str, list[dict[str, Any]]]:
     rows = list_frameworks_for_user(db, user_id)
+    weight_map = _active_weight_pct_by_id(rows)
     grouped: dict[str, list[dict[str, Any]]] = {k: [] for k in FRAMEWORK_TYPES.keys()}
     for row in rows:
-        grouped.setdefault(row.framework_type, []).append(serialize_framework(row))
+        payload = serialize_framework(row)
+        if bool(row.is_active):
+            payload["active_weight_pct"] = weight_map.get(int(row.id), 0)
+        grouped.setdefault(row.framework_type, []).append(payload)
     return grouped
 
 

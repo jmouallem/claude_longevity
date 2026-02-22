@@ -106,6 +106,7 @@ interface FrameworkItem {
   normalized_name: string;
   priority_score: number;
   is_active: boolean;
+  active_weight_pct?: number | null;
   source: string;
   rationale: string | null;
   metadata: Record<string, unknown>;
@@ -1629,7 +1630,7 @@ export default function Settings() {
             <div>
               <h2 className="text-lg font-semibold text-slate-100">Health Optimization Framework</h2>
               <p className="text-sm text-slate-400 mt-1">
-                Strategy priorities that guide agent recommendations. Keep one active strategy per category to avoid conflicts.
+                Strategy priorities that guide agent recommendations. You can keep multiple strategies active in each category.
               </p>
             </div>
             <button
@@ -1679,6 +1680,17 @@ export default function Settings() {
                       <p className="text-xs text-slate-500">No items in this category yet.</p>
                     ) : (
                       <div className="space-y-2">
+                        {(() => {
+                          const activeCount = items.filter((item) => item.is_active).length;
+                          if (activeCount === 0) {
+                            return null;
+                          }
+                          return (
+                            <p className="text-xs text-slate-500">
+                              Active allocation is weighted by score across {activeCount} active strateg{activeCount === 1 ? 'y' : 'ies'}.
+                            </p>
+                          );
+                        })()}
                         {items.map((item) => (
                           <div key={item.id} className="rounded-lg border border-slate-700 bg-slate-800/80 px-3 py-2">
                             <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1689,6 +1701,11 @@ export default function Settings() {
                                   {item.rationale ? ` - ${item.rationale}` : ''}
                                 </p>
                               </div>
+                              {item.is_active && typeof item.active_weight_pct === 'number' && (
+                                <span className="text-xs px-2 py-1 rounded-md border border-emerald-700/60 text-emerald-300 bg-emerald-900/20">
+                                  {item.active_weight_pct}% allocation
+                                </span>
+                              )}
                               <button
                                 onClick={() => removeFrameworkItem(item.id)}
                                 disabled={frameworkSaving}
