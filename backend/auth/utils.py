@@ -10,7 +10,7 @@ from config import settings
 from db.database import get_db
 from db.models import User
 
-security = HTTPBearer()
+security = HTTPBearer(auto_error=False)
 
 
 def normalize_username(username: str) -> str:
@@ -55,12 +55,28 @@ def decode_token(token: str) -> dict:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
 
+def _token_from_request(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None,
+) -> str | None:
+    if credentials and credentials.credentials:
+        return credentials.credentials
+    cookie_name = (settings.AUTH_COOKIE_NAME or "").strip() or "longevity_session"
+    cookie_token = request.cookies.get(cookie_name)
+    if cookie_token:
+        return cookie_token
+    return None
+
+
 def get_current_user(
     request: Request,
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    credentials: HTTPAuthorizationCredentials | None = Depends(security),
     db: Session = Depends(get_db),
 ) -> User:
-    token_payload = decode_token(credentials.credentials)
+    token = _token_from_request(request, credentials)
+    if not token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+    token_payload = decode_token(token)
     user_id = int(token_payload.get("sub", 0))
     user = db.query(User).filter(User.id == user_id).first()
     if not user:

@@ -121,10 +121,9 @@ export default function AdminFeedback() {
   const exportCsv = async () => {
     setMessage('');
     try {
-      const token = apiClient.getToken();
       const res = await fetch(`/api/admin/feedback/export?${appliedQuery}`, {
         method: 'GET',
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        credentials: 'include',
       });
       if (!res.ok) {
         throw new Error(`Export failed: ${res.status}`);

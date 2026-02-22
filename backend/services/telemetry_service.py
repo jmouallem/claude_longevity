@@ -31,6 +31,8 @@ def classify_request_group(path: str) -> str | None:
         return None
     if route.startswith("/api/chat"):
         return "chat"
+    if route.startswith("/api/auth"):
+        return "auth"
     if route.startswith("/api/analysis"):
         return "analysis"
     if route in _DASHBOARD_PATHS:
@@ -298,6 +300,7 @@ def build_performance_snapshot(db: Session, since_hours: int = 24) -> dict[str, 
         "window_hours": max(int(since_hours), 1),
         "request_groups": {
             "chat": summarize_request_group(db, "chat", since),
+            "auth": summarize_request_group(db, "auth", since),
             "logs": summarize_request_group(db, "logs", since),
             "dashboard": summarize_request_group(db, "dashboard", since),
             "analysis": summarize_request_group(db, "analysis", since),

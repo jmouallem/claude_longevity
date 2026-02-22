@@ -3,6 +3,7 @@ from pathlib import Path
 
 
 class Settings(BaseSettings):
+    ENVIRONMENT: str = "development"  # development | test | staging | production
     APP_NAME: str = "Longevity Coach"
     SECRET_KEY: str = "change-me-in-production"
     ENCRYPTION_KEY: str = "change-me-in-production-32bytes!"
@@ -54,11 +55,60 @@ class Settings(BaseSettings):
     ]
     PASSKEY_CHALLENGE_TTL_SECONDS: int = 300
     PASSKEY_USER_TOKEN_HOURS: int = 168
+    AUTH_COOKIE_NAME: str = "longevity_session"
+    AUTH_COOKIE_SECURE: bool = False
+    AUTH_COOKIE_HTTPONLY: bool = True
+    AUTH_COOKIE_SAMESITE: str = "lax"  # strict | lax | none
+    AUTH_COOKIE_DOMAIN: str | None = None
+    AUTH_COOKIE_PATH: str = "/"
+    SECURITY_HEADERS_ENABLED: bool = True
+    SECURITY_CSP: str = (
+        "default-src 'self'; "
+        "img-src 'self' data: blob:; "
+        "style-src 'self' 'unsafe-inline'; "
+        "script-src 'self'; "
+        "connect-src 'self' https: wss:; "
+        "font-src 'self' data:; "
+        "frame-ancestors 'none'; "
+        "base-uri 'self'; "
+        "form-action 'self';"
+    )
+    RATE_LIMIT_AUTH_LOGIN_ATTEMPTS: int = 10
+    RATE_LIMIT_AUTH_LOGIN_WINDOW_SECONDS: int = 300
+    RATE_LIMIT_AUTH_REGISTER_ATTEMPTS: int = 5
+    RATE_LIMIT_AUTH_REGISTER_WINDOW_SECONDS: int = 600
+    RATE_LIMIT_CHAT_MESSAGES: int = 30
+    RATE_LIMIT_CHAT_WINDOW_SECONDS: int = 60
     SLO_CHAT_P95_FIRST_TOKEN_MS: int = 3500
     SLO_DASHBOARD_P95_LOAD_MS: int = 1200
     SLO_ANALYSIS_RUN_COMPLETION_SLA_SECONDS: int = 120
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+
+    @property
+    def is_production_like(self) -> bool:
+        return (self.ENVIRONMENT or "").strip().lower() in {"production", "prod", "staging"}
+
+    def validate_security_configuration(self) -> None:
+        if not self.is_production_like:
+            return
+
+        errors: list[str] = []
+        if self.SECRET_KEY == "change-me-in-production":
+            errors.append("SECRET_KEY must be changed from the default value")
+        if self.ENCRYPTION_KEY == "change-me-in-production-32bytes!":
+            errors.append("ENCRYPTION_KEY must be changed from the default value")
+        if len((self.ENCRYPTION_KEY or "").strip()) < 16:
+            errors.append("ENCRYPTION_KEY must be at least 16 characters")
+        if self.ADMIN_PASSWORD == "L0ngevity!123":
+            errors.append("ADMIN_PASSWORD must be changed from the default value")
+        if not self.AUTH_COOKIE_SECURE:
+            errors.append("AUTH_COOKIE_SECURE must be true in production-like environments")
+        if (self.AUTH_COOKIE_SAMESITE or "").strip().lower() == "none" and not self.AUTH_COOKIE_SECURE:
+            errors.append("AUTH_COOKIE_SAMESITE=none requires AUTH_COOKIE_SECURE=true")
+        if errors:
+            joined = "; ".join(errors)
+            raise RuntimeError(f"Insecure production configuration: {joined}")
 
 
 settings = Settings()

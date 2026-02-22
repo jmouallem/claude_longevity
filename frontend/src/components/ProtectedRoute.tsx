@@ -3,16 +3,16 @@ import { Navigate, Outlet } from 'react-router-dom';
 import { useAuthStore } from '../stores/authStore';
 
 export default function ProtectedRoute() {
-  const { isAuthenticated, loading, token, loadUser } = useAuthStore();
+  const { isAuthenticated, loading, loadUser } = useAuthStore();
 
   useEffect(() => {
-    if (token && !isAuthenticated && !loading) {
+    if (!isAuthenticated && !loading) {
       loadUser();
     }
-  }, [token, isAuthenticated, loading, loadUser]);
+  }, [isAuthenticated, loading, loadUser]);
 
   // Still resolving auth state
-  if (loading || (token && !isAuthenticated)) {
+  if (loading) {
     return (
       <div className="flex items-center justify-center min-h-screen bg-slate-900">
         <div className="flex flex-col items-center gap-3">

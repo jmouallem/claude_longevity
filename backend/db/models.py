@@ -547,6 +547,20 @@ class AdminAuditLog(Base):
     target_user = relationship("User", back_populates="admin_target_actions", foreign_keys=[target_user_id])
 
 
+class RateLimitAuditEvent(Base):
+    __tablename__ = "rate_limit_audit_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    endpoint = Column(Text, nullable=False)
+    scope_key = Column(Text, nullable=False)
+    blocked = Column(Boolean, nullable=False, default=False)
+    retry_after_seconds = Column(Integer, nullable=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    ip_address = Column(Text, nullable=True)
+    details_json = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class IntakeSession(Base):
     __tablename__ = "intake_sessions"
 
@@ -611,6 +625,9 @@ Index("idx_users_role", User.role)
 Index("idx_admin_audit_created_at", AdminAuditLog.created_at)
 Index("idx_admin_audit_admin", AdminAuditLog.admin_user_id, AdminAuditLog.created_at)
 Index("idx_admin_audit_target", AdminAuditLog.target_user_id, AdminAuditLog.created_at)
+Index("idx_rate_limit_audit_created_at", RateLimitAuditEvent.created_at)
+Index("idx_rate_limit_audit_endpoint", RateLimitAuditEvent.endpoint, RateLimitAuditEvent.created_at)
+Index("idx_rate_limit_audit_user", RateLimitAuditEvent.user_id, RateLimitAuditEvent.created_at)
 Index("idx_intake_session_user_status", IntakeSession.user_id, IntakeSession.status, IntakeSession.updated_at)
 Index("idx_analysis_runs_user_type_period", AnalysisRun.user_id, AnalysisRun.run_type, AnalysisRun.period_end)
 Index(

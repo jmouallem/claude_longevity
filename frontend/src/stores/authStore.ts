@@ -11,7 +11,6 @@ export interface User {
 }
 
 interface AuthState {
-  token: string | null;
   user: User | null;
   isAuthenticated: boolean;
   loading: boolean;
@@ -20,13 +19,12 @@ interface AuthState {
   login: (username: string, password: string) => Promise<void>;
   loginWithPasskey: (username?: string) => Promise<void>;
   register: (username: string, password: string, displayName: string) => Promise<void>;
-  logout: () => void;
+  logout: () => Promise<void>;
   loadUser: () => Promise<void>;
   clearError: () => void;
 }
 
 export const useAuthStore = create<AuthState>((set) => ({
-  token: localStorage.getItem('longevity_token'),
   user: null,
   isAuthenticated: false,
   loading: false,
@@ -35,12 +33,10 @@ export const useAuthStore = create<AuthState>((set) => ({
   login: async (username: string, password: string) => {
     set({ loading: true, error: null });
     try {
-      const data = await apiClient.post<{ access_token: string }>(
+      await apiClient.post<{ access_token?: string | null }>(
         '/api/auth/login',
         { username, password }
       );
-      apiClient.setToken(data.access_token);
-      set({ token: data.access_token });
       // Fetch user profile
       const user = await apiClient.get<User>('/api/auth/me');
       set({
@@ -65,12 +61,10 @@ export const useAuthStore = create<AuthState>((set) => ({
         { username: (username || '').trim() || null }
       );
       const credential = await getPasskeyAssertion(options.public_key);
-      const data = await apiClient.post<{ access_token: string }>(
+      await apiClient.post<{ access_token?: string | null }>(
         '/api/auth/passkey/login/verify',
         { request_id: options.request_id, credential }
       );
-      apiClient.setToken(data.access_token);
-      set({ token: data.access_token });
       const user = await apiClient.get<User>('/api/auth/me');
       set({
         user,
@@ -89,12 +83,10 @@ export const useAuthStore = create<AuthState>((set) => ({
   register: async (username: string, password: string, displayName: string) => {
     set({ loading: true, error: null });
     try {
-      const data = await apiClient.post<{ access_token: string }>(
+      await apiClient.post<{ access_token?: string | null }>(
         '/api/auth/register',
         { username, password, display_name: displayName }
       );
-      apiClient.setToken(data.access_token);
-      set({ token: data.access_token });
       // Fetch user profile
       const user = await apiClient.get<User>('/api/auth/me');
       set({
@@ -111,10 +103,13 @@ export const useAuthStore = create<AuthState>((set) => ({
     }
   },
 
-  logout: () => {
-    apiClient.clearToken();
+  logout: async () => {
+    try {
+      await apiClient.post('/api/auth/logout');
+    } catch {
+      // Continue with client-side sign-out even if server-side logout fails.
+    }
     set({
-      token: null,
       user: null,
       isAuthenticated: false,
       error: null,
@@ -122,24 +117,16 @@ export const useAuthStore = create<AuthState>((set) => ({
   },
 
   loadUser: async () => {
-    const token = apiClient.getToken();
-    if (!token) {
-      set({ isAuthenticated: false, loading: false });
-      return;
-    }
     set({ loading: true });
     try {
       const user = await apiClient.get<User>('/api/auth/me');
       set({
         user,
-        token,
         isAuthenticated: true,
         loading: false,
       });
     } catch {
-      apiClient.clearToken();
       set({
-        token: null,
         user: null,
         isAuthenticated: false,
         loading: false,

@@ -107,21 +107,17 @@ export function useChat() {
       }
       formData.append('verbosity', verbosity);
 
-      const token = apiClient.getToken();
       const controller = new AbortController();
       abortRef.current = controller;
 
       const response = await fetch('/api/chat', {
         method: 'POST',
-        headers: {
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
         body: formData,
         signal: controller.signal,
+        credentials: 'include',
       });
 
       if (response.status === 401) {
-        apiClient.clearToken();
         window.location.href = '/login';
         return;
       }

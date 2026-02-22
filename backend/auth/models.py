@@ -15,7 +15,7 @@ class LoginRequest(BaseModel):
 
 
 class TokenResponse(BaseModel):
-    access_token: str
+    access_token: str | None = None
     token_type: str = "bearer"
 
 

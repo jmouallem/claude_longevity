@@ -535,3 +535,37 @@ def run_startup_migrations() -> None:
             ON admin_audit_logs (target_user_id, created_at)
             """
         ))
+        conn.execute(text(
+            """
+            CREATE TABLE IF NOT EXISTS rate_limit_audit_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                endpoint TEXT NOT NULL,
+                scope_key TEXT NOT NULL,
+                blocked BOOLEAN NOT NULL DEFAULT 0,
+                retry_after_seconds INTEGER,
+                user_id INTEGER,
+                ip_address TEXT,
+                details_json TEXT,
+                created_at DATETIME,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            )
+            """
+        ))
+        conn.execute(text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_rate_limit_audit_created_at
+            ON rate_limit_audit_events (created_at)
+            """
+        ))
+        conn.execute(text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_rate_limit_audit_endpoint
+            ON rate_limit_audit_events (endpoint, created_at)
+            """
+        ))
+        conn.execute(text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_rate_limit_audit_user
+            ON rate_limit_audit_events (user_id, created_at)
+            """
+        ))

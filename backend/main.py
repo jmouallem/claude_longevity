@@ -23,6 +23,8 @@ from api.admin import router as admin_router
 from services.telemetry_context import clear_request_scope, start_request_scope
 from services.telemetry_service import classify_request_group, flush_request_scope
 
+settings.validate_security_configuration()
+
 # Create all tables
 Base.metadata.create_all(bind=engine)
 run_startup_migrations()
@@ -38,6 +40,19 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def security_headers_middleware(request: Request, call_next):
+    response = await call_next(request)
+    if not settings.SECURITY_HEADERS_ENABLED:
+        return response
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "camera=(self), microphone=(self), geolocation=()"
+    response.headers["Content-Security-Policy"] = settings.SECURITY_CSP
+    return response
 
 
 @app.middleware("http")

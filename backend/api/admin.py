@@ -23,6 +23,7 @@ from db.models import (
     Message,
     ModelUsageEvent,
     PasskeyCredential,
+    RateLimitAuditEvent,
     RequestTelemetryEvent,
     User,
 )
@@ -192,6 +193,7 @@ class AdminPerformanceResponse(BaseModel):
     request_groups: dict[str, RequestGroupPerformance]
     ai_turns: AITurnPerformance
     analysis_sla: AnalysisSlaPerformance
+    rate_limit_blocks_last_window: dict[str, int]
 
 
 def _build_admin_feedback_query(
@@ -786,6 +788,23 @@ def admin_performance_stats(
         dashboard_load_meeting_slo=float(request_groups.get("dashboard", {}).get("p95_ms", 0.0)) <= float(targets.dashboard_p95_load_ms),
         analysis_completion_meeting_slo=float(analysis_sla.get("p95_seconds", 0.0)) <= float(targets.analysis_completion_sla_seconds),
     )
+    since = datetime.now(timezone.utc) - timedelta(hours=max(int(since_hours), 1))
+    try:
+        rate_rows = (
+            db.query(
+                RateLimitAuditEvent.endpoint,
+                func.count(RateLimitAuditEvent.id).label("blocked_count"),
+            )
+            .filter(
+                RateLimitAuditEvent.blocked == True,  # noqa: E712
+                RateLimitAuditEvent.created_at >= since,
+            )
+            .group_by(RateLimitAuditEvent.endpoint)
+            .all()
+        )
+        rate_limit_blocks = {str(row.endpoint): int(row.blocked_count or 0) for row in rate_rows}
+    except OperationalError:
+        rate_limit_blocks = {}
     return AdminPerformanceResponse(
         window_hours=int(snapshot.get("window_hours") or since_hours),
         targets=targets,
@@ -796,6 +815,7 @@ def admin_performance_stats(
         },
         ai_turns=AITurnPerformance.model_validate(ai_turns),
         analysis_sla=AnalysisSlaPerformance.model_validate(analysis_sla),
+        rate_limit_blocks_last_window=rate_limit_blocks,
     )
 
 

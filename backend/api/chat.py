@@ -1,7 +1,7 @@
 import json
 import time
 
-from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException
+from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -11,13 +11,16 @@ from db.models import User
 from ai.orchestrator import process_chat
 from services.telemetry_context import clear_ai_turn_scope, start_request_scope
 from services.telemetry_service import flush_request_scope
-from utils.image_utils import validate_image_size, MAX_IMAGE_SIZE
+from utils.image_utils import validate_image_payload
+from config import settings
+from services.rate_limit_service import RateLimitRule, enforce_rate_limit
 
 router = APIRouter(prefix="/chat", tags=["chat"], dependencies=[Depends(require_non_admin)])
 
 
 @router.post("")
 async def chat(
+    request: Request,
     message: str = Form(...),
     image: UploadFile | None = File(None),
     verbosity: str | None = Form(None),
@@ -25,6 +28,25 @@ async def chat(
     db: Session = Depends(get_db),
 ):
     """Main chat endpoint with SSE streaming response."""
+    client_ip = (request.client.host if request.client else "") or "unknown"
+    allowed, retry_after = enforce_rate_limit(
+        rule=RateLimitRule(
+            endpoint="/api/chat",
+            limit=settings.RATE_LIMIT_CHAT_MESSAGES,
+            window_seconds=settings.RATE_LIMIT_CHAT_WINDOW_SECONDS,
+        ),
+        scope_key=f"user:{user.id}:{client_ip}",
+        user_id=user.id,
+        ip_address=client_ip,
+        details={"message_len": len((message or "").strip())},
+    )
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many chat messages in a short period. Please wait and try again.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
     # Validate API key is configured
     if not user.settings or not user.settings.api_key_encrypted:
         raise HTTPException(
@@ -36,11 +58,10 @@ async def chat(
     image_bytes = None
     if image:
         image_bytes = await image.read()
-        if not validate_image_size(len(image_bytes)):
-            raise HTTPException(
-                status_code=400,
-                detail=f"Image too large. Maximum size is {MAX_IMAGE_SIZE // (1024*1024)}MB.",
-            )
+        try:
+            validate_image_payload(image_bytes, content_type=image.content_type)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     # Capture user id so we can re-load in the streaming generator's own session
     user_id = user.id

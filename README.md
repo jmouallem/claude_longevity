@@ -17,10 +17,14 @@ AI-assisted longevity coaching app with:
 - Backend API: `8001`
 
 ## Environment Variables
-Copy `.env.example` to `.env` in the repo root and set values.
+Copy an example file to `.env` in the repo root and set values:
+- Development: `.env.development.example`
+- Production: `.env.production.example`
+- Legacy/default template: `.env.example`
 
 | Variable | Default | Required | Notes |
 |---|---|---|---|
+| `ENVIRONMENT` | `development` | No | Use `production`/`staging` to enforce secure startup checks. |
 | `SECRET_KEY` | `change-me-in-production` | Yes | JWT signing key. Use a strong random value. |
 | `ENCRYPTION_KEY` | `change-me-in-production-32bytes!` | Yes | Used to derive encryption key for stored API keys. |
 | `DATABASE_URL` | `sqlite:///data/longevity.db` | No | SQLite by default. |
@@ -29,11 +33,28 @@ Copy `.env.example` to `.env` in the repo root and set values.
 | `CORS_ORIGINS` | `["http://localhost:8050","http://localhost:8001"]` | No | Must be JSON array when set in `.env`. |
 | `JWT_ALGORITHM` | `HS256` | No | JWT algorithm. |
 | `JWT_EXPIRY_HOURS` | `72` | No | Access token lifetime. |
+| `ADMIN_JWT_EXPIRY_HOURS` | `12` | No | Admin session JWT lifetime. |
+| `AUTH_COOKIE_NAME` | `longevity_session` | No | HttpOnly session cookie name. |
+| `AUTH_COOKIE_SECURE` | `false` | No | Must be `true` in production-like environments. |
+| `AUTH_COOKIE_HTTPONLY` | `true` | No | Keep enabled to block JS access to session cookie. |
+| `AUTH_COOKIE_SAMESITE` | `lax` | No | `strict`, `lax`, or `none` (requires secure). |
+| `AUTH_COOKIE_DOMAIN` | unset | No | Optional cookie domain override. |
+| `AUTH_COOKIE_PATH` | `/` | No | Cookie path scope. |
+| `SECURITY_HEADERS_ENABLED` | `true` | No | Enables CSP/XFO/nosniff/referrer/permissions headers. |
+| `SECURITY_CSP` | set in config | No | Override default Content-Security-Policy if needed. |
+| `RATE_LIMIT_AUTH_LOGIN_ATTEMPTS` | `10` | No | Max login attempts per window. |
+| `RATE_LIMIT_AUTH_LOGIN_WINDOW_SECONDS` | `300` | No | Login rate limit window. |
+| `RATE_LIMIT_AUTH_REGISTER_ATTEMPTS` | `5` | No | Max register attempts per window. |
+| `RATE_LIMIT_AUTH_REGISTER_WINDOW_SECONDS` | `600` | No | Register rate limit window. |
+| `RATE_LIMIT_CHAT_MESSAGES` | `30` | No | Max chat requests per window. |
+| `RATE_LIMIT_CHAT_WINDOW_SECONDS` | `60` | No | Chat rate limit window. |
 | `ENABLE_WEB_SEARCH` | `true` | No | Enables Phase C web search tool. |
 | `WEB_SEARCH_ALLOWED_SPECIALISTS` | `["orchestrator","nutritionist","supplement_auditor","safety_clinician","movement_coach","sleep_expert"]` | No | JSON array. Specialists allowed to call web search. |
 | `WEB_SEARCH_MAX_RESULTS` | `5` | No | Max web results per query (capped in code). |
 | `WEB_SEARCH_TIMEOUT_SECONDS` | `8` | No | Per-provider timeout. |
 | `WEB_SEARCH_CACHE_TTL_HOURS` | `12` | No | Web search cache expiry window. |
+| `WEB_SEARCH_CIRCUIT_FAIL_THRESHOLD` | `3` | No | Consecutive provider failures before circuit opens. |
+| `WEB_SEARCH_CIRCUIT_OPEN_SECONDS` | `60` | No | Circuit open time before retry. |
 
 ## Local Setup
 
@@ -56,6 +77,9 @@ npm run dev -- --port 8050
 Open:
 - `https://localhost:8050` (Vite dev HTTPS via `@vitejs/plugin-basic-ssl`)
 - API health: `http://localhost:8001/api/health`
+
+Auth/session note:
+- Frontend uses secure cookie-backed sessions (`credentials: include`) and no longer stores auth token in local storage.
 
 Manual stop:
 - In each terminal window, press `Ctrl+C`.
@@ -118,6 +142,14 @@ Frontend production build:
 ```powershell
 cd frontend
 npm run build
+```
+
+Security dependency audit checks:
+```powershell
+python -m pip install pip-audit
+python -m pip-audit -r backend/requirements.txt
+cd frontend
+npm audit --omit=dev --audit-level=high
 ```
 
 ## Troubleshooting

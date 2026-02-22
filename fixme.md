@@ -421,3 +421,35 @@
 - `python -m compileall backend` (pass)
 - `python -m pytest -q backend/tests` (pass, 6 tests)
 - `npm run build` in `frontend/` (pass)
+
+### Phase F Security Hardening (Implemented)
+1. Added production security startup gates in `backend/config.py`:
+- blocks default `SECRET_KEY`, `ENCRYPTION_KEY`, and `ADMIN_PASSWORD` in production/staging.
+- enforces secure cookie requirements in production-like environments.
+2. Migrated auth session transport to cookie-backed auth:
+- login/register/passkey login set HttpOnly session cookie.
+- added `/api/auth/logout` cookie clear endpoint.
+- backend auth now supports cookie token resolution (with bearer fallback).
+- frontend removed `localStorage` token usage and sends `credentials: include`.
+3. Added auth/chat rate limiting:
+- `/api/auth/login`, `/api/auth/register`, `/api/auth/passkey/login/options`, `/api/auth/passkey/login/verify`, and `/api/chat`.
+- returns HTTP `429` with `Retry-After` on limit breach.
+4. Added structured rate-limit audit metrics:
+- new table `rate_limit_audit_events`.
+- integrated into admin performance payload as `rate_limit_blocks_last_window`.
+5. Hardened upload validation:
+- enforce image mime + magic-byte signature checks.
+- allowlist formats: `jpg/jpeg`, `png`, `webp`, `gif`.
+6. Added app-layer security headers middleware:
+- `Content-Security-Policy`
+- `X-Frame-Options`
+- `X-Content-Type-Options`
+- `Referrer-Policy`
+- `Permissions-Policy`
+7. Added dependency security automation:
+- CI workflow `.github/workflows/security-dependency-checks.yml` (`pip-audit` + `npm audit`).
+- scheduled update policy via `.github/dependabot.yml`.
+8. Validation completed for Phase F changes:
+- `python -m compileall backend` (pass)
+- `python -m pytest -q backend/tests` (pass, 6 tests)
+- `npm run build` in `frontend/` (pass)

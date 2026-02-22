@@ -1,0 +1,43 @@
+name: Security Dependency Checks
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  schedule:
+    - cron: "0 9 * * 1"
+
+jobs:
+  backend-security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install backend dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+          pip install pip-audit
+      - name: Run pip-audit
+        run: pip-audit -r backend/requirements.txt
+
+  frontend-security:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: "frontend/package-lock.json"
+      - name: Install frontend dependencies
+        run: npm ci
+      - name: Run npm audit (prod dependencies)
+        run: npm audit --omit=dev --audit-level=high
+
