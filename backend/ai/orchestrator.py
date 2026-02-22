@@ -1058,10 +1058,16 @@ def _assistant_requested_menu_save(db: Session, user: User) -> bool:
     if not last or not last.content:
         return False
     text = _normalize_whitespace(last.content)
-    return (
+    if (
         "save this meal to your menu" in text
         or "save this to your menu" in text
         or "add this to your menu" in text
+    ):
+        return True
+    # Also accept named variants like:
+    # "Do you want me to save Lunch to your menu for quick future logging?"
+    return bool(
+        re.search(r"\b(?:save|add)\b.{0,80}\bto your menu\b", text, flags=re.IGNORECASE)
     )
 
 
