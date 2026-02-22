@@ -1,6 +1,7 @@
 from pathlib import Path
+import time
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
@@ -19,13 +20,15 @@ from api.intake import router as intake_router
 from api.menu import router as menu_router
 from api.analysis import router as analysis_router
 from api.admin import router as admin_router
+from services.telemetry_context import clear_request_scope, start_request_scope
+from services.telemetry_service import classify_request_group, flush_request_scope
 
 # Create all tables
 Base.metadata.create_all(bind=engine)
 run_startup_migrations()
 ensure_admin_account()
 
-app = FastAPI(title="The Longevity Alchemist", version="1.0.0")
+app = FastAPI(title=settings.APP_NAME, version="1.0.0")
 
 # CORS
 app.add_middleware(
@@ -35,6 +38,34 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def telemetry_middleware(request: Request, call_next):
+    group = classify_request_group(request.url.path)
+    skip_streaming_chat = request.url.path == "/api/chat" and request.method.upper() == "POST"
+    started = time.perf_counter()
+    status_code = 500
+    if group and not skip_streaming_chat:
+        start_request_scope(
+            path=request.url.path,
+            method=request.method,
+            request_group=group,
+        )
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        return response
+    finally:
+        if group and not skip_streaming_chat:
+            user_id = getattr(getattr(request, "state", None), "user_id", None)
+            flush_request_scope(
+                status_code=status_code,
+                duration_ms=(time.perf_counter() - started) * 1000.0,
+                user_id=int(user_id) if isinstance(user_id, int) else None,
+            )
+        else:
+            clear_request_scope()
 
 # Routers
 app.include_router(auth_router, prefix="/api")
@@ -58,4 +89,4 @@ if static_dir.exists():
 
 @app.get("/api/health")
 def health_check():
-    return {"status": "ok", "app": "The Longevity Alchemist"}
+    return {"status": "ok", "app": settings.APP_NAME}

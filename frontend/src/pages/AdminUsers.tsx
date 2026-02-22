@@ -7,6 +7,7 @@ interface AdminUser {
   display_name: string;
   role: string;
   has_api_key: boolean;
+  passkey_count: number;
   force_password_change: boolean;
   created_at: string | null;
 }
@@ -89,6 +90,22 @@ export default function AdminUsers() {
     }
   };
 
+  const resetPasskeys = async (userId: number, username: string) => {
+    const confirmed = window.confirm(`Clear all biometric passkeys for ${username}?`);
+    if (!confirmed) return;
+    setActionLoading(true);
+    setMessage('');
+    try {
+      const result = await apiClient.post<{ status: string; deleted: number }>(`/api/admin/users/${userId}/reset-passkeys`, {});
+      setMessage(`Removed ${result.deleted} passkey(s) for ${username}.`);
+      await loadUsers();
+    } catch (e: unknown) {
+      setMessage(e instanceof Error ? e.message : 'Failed to reset passkeys.');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
   const deleteUser = async (userId: number, username: string) => {
     const confirmed = window.confirm(
       `Delete user "${username}" permanently?\n\nThis removes profile, history, logs, messages, and uploaded files. This cannot be undone.`
@@ -148,7 +165,7 @@ export default function AdminUsers() {
                   <div>
                     <p className="text-sm text-slate-100 font-medium">{u.display_name} ({u.username})</p>
                     <p className="text-xs text-slate-400 mt-1">
-                      API key: {u.has_api_key ? 'set' : 'not set'} | Force password change: {u.force_password_change ? 'yes' : 'no'}
+                      API key: {u.has_api_key ? 'set' : 'not set'} | Passkeys: {u.passkey_count} | Force password change: {u.force_password_change ? 'yes' : 'no'}
                       {u.created_at ? ` | Created ${new Date(u.created_at).toLocaleDateString()}` : ''}
                     </p>
                   </div>
@@ -169,6 +186,13 @@ export default function AdminUsers() {
                       className="px-3 py-1.5 text-xs rounded-md border border-rose-700/70 text-rose-300 hover:bg-rose-900/20 disabled:opacity-60"
                     >
                       Reset Data
+                    </button>
+                    <button
+                      onClick={() => resetPasskeys(u.id, u.username)}
+                      disabled={actionLoading}
+                      className="px-3 py-1.5 text-xs rounded-md border border-amber-700/70 text-amber-300 hover:bg-amber-900/20 disabled:opacity-60"
+                    >
+                      Reset Passkeys
                     </button>
                     <button
                       onClick={() => deleteUser(u.id, u.username)}

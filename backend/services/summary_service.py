@@ -11,7 +11,7 @@ from db.models import (
     User, Summary, FoodLog, VitalsLog, ExerciseLog,
     HydrationLog, SupplementLog, FastingLog, SleepLog, DailyChecklistItem,
 )
-from utils.datetime_utils import start_of_day, end_of_day, today_for_tz
+from utils.datetime_utils import start_of_day, end_of_day, today_for_tz, sleep_log_overlaps_window
 from utils.encryption import decrypt_api_key
 
 logger = logging.getLogger(__name__)
@@ -90,7 +90,8 @@ def gather_daily_data(db: Session, user: User, d: date, tz_name: str | None = No
     ).all()
 
     sleep = db.query(SleepLog).filter(
-        SleepLog.user_id == user.id, SleepLog.created_at >= day_start, SleepLog.created_at <= day_end
+        SleepLog.user_id == user.id,
+        sleep_log_overlaps_window(SleepLog, day_start, day_end),
     ).all()
 
     return {

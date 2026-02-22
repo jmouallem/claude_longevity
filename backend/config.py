@@ -3,12 +3,18 @@ from pathlib import Path
 
 
 class Settings(BaseSettings):
+    APP_NAME: str = "Longevity Coach"
     SECRET_KEY: str = "change-me-in-production"
     ENCRYPTION_KEY: str = "change-me-in-production-32bytes!"
     DATABASE_URL: str = "sqlite:///data/longevity.db"
     DATA_DIR: Path = Path("data")
     UPLOAD_DIR: Path = Path("data/uploads")
-    CORS_ORIGINS: list[str] = ["http://localhost:8050", "http://localhost:8001"]
+    CORS_ORIGINS: list[str] = [
+        "http://localhost:8050",
+        "http://localhost:8001",
+        "https://localhost:8050",
+        "https://127.0.0.1:8050",
+    ]
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRY_HOURS: int = 72
     ADMIN_JWT_EXPIRY_HOURS: int = 12
@@ -34,6 +40,18 @@ class Settings(BaseSettings):
     ANALYSIS_DAILY_HOUR_LOCAL: int = 20
     ANALYSIS_WEEKLY_WEEKDAY_LOCAL: int = 6  # Sunday
     ANALYSIS_MONTHLY_DAY_LOCAL: int = 1
+    ENABLE_PASSKEY_AUTH: bool = True
+    PASSKEY_RP_ID: str = "localhost"
+    PASSKEY_RP_NAME: str = "Longevity Coach"
+    PASSKEY_ALLOWED_ORIGINS: list[str] = [
+        "https://localhost:8050",
+        "https://127.0.0.1:8050",
+    ]
+    PASSKEY_CHALLENGE_TTL_SECONDS: int = 300
+    PASSKEY_USER_TOKEN_HOURS: int = 168
+    SLO_CHAT_P95_FIRST_TOKEN_MS: int = 3500
+    SLO_DASHBOARD_P95_LOAD_MS: int = 1200
+    SLO_ANALYSIS_RUN_COMPLETION_SLA_SECONDS: int = 120
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

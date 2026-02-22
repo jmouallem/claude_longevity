@@ -24,6 +24,8 @@ class User(Base):
     settings = relationship("UserSettings", back_populates="user", uselist=False, cascade="all, delete-orphan")
     specialist_config = relationship("SpecialistConfig", back_populates="user", uselist=False, cascade="all, delete-orphan")
     messages = relationship("Message", back_populates="user", cascade="all, delete-orphan")
+    passkey_credentials = relationship("PasskeyCredential", back_populates="user", cascade="all, delete-orphan")
+    passkey_challenges = relationship("PasskeyChallenge", back_populates="user", cascade="all, delete-orphan")
     intake_sessions = relationship("IntakeSession", back_populates="user", cascade="all, delete-orphan")
     meal_templates = relationship("MealTemplate", back_populates="user", cascade="all, delete-orphan")
     meal_template_versions = relationship("MealTemplateVersion", back_populates="user", cascade="all, delete-orphan")
@@ -85,6 +87,40 @@ class UserSettings(Base):
     user = relationship("User", back_populates="settings")
 
 
+class PasskeyCredential(Base):
+    __tablename__ = "passkey_credentials"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    credential_id = Column(Text, nullable=False, unique=True)
+    public_key = Column(Text, nullable=False)
+    sign_count = Column(Integer, nullable=False, default=0)
+    aaguid = Column(Text)
+    device_type = Column(Text)
+    backed_up = Column(Boolean, nullable=False, default=False)
+    transports = Column(Text)  # JSON array
+    label = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    last_used_at = Column(DateTime)
+
+    user = relationship("User", back_populates="passkey_credentials")
+
+
+class PasskeyChallenge(Base):
+    __tablename__ = "passkey_challenges"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    username_normalized = Column(Text, nullable=True)
+    purpose = Column(Text, nullable=False)  # registration | authentication
+    challenge = Column(Text, nullable=False, unique=True)
+    expires_at = Column(DateTime, nullable=False)
+    is_used = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    user = relationship("User", back_populates="passkey_challenges")
+
+
 class SpecialistConfig(Base):
     __tablename__ = "specialist_config"
 
@@ -120,7 +156,7 @@ class ModelUsageEvent(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    usage_type = Column(Text, nullable=False, default="utility")  # utility | reasoning | other
+    usage_type = Column(Text, nullable=False, default="utility")  # utility | reasoning | deep_thinking | other
     operation = Column(Text)  # intent_classification, log_parse, summary_generate, etc.
     model_used = Column(Text, nullable=False)
     tokens_in = Column(Integer, default=0)
@@ -443,6 +479,45 @@ class AnalysisProposal(Base):
     analysis_run = relationship("AnalysisRun", back_populates="proposals")
 
 
+class RequestTelemetryEvent(Base):
+    __tablename__ = "request_telemetry_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    request_group = Column(Text, nullable=False)  # chat | logs | dashboard | analysis
+    path = Column(Text, nullable=False)
+    method = Column(Text, nullable=False)
+    status_code = Column(Integer, nullable=False)
+    duration_ms = Column(Float, nullable=False)
+    db_query_count = Column(Integer, nullable=False, default=0)
+    db_query_time_ms = Column(Float, nullable=False, default=0.0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class AITurnTelemetry(Base):
+    __tablename__ = "ai_turn_telemetry"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    message_id = Column(Integer, ForeignKey("messages.id"), nullable=True)
+    specialist_id = Column(Text, nullable=False)
+    intent_category = Column(Text, nullable=False)
+    first_token_latency_ms = Column(Float, nullable=True)
+    total_latency_ms = Column(Float, nullable=False, default=0.0)
+    utility_calls = Column(Integer, nullable=False, default=0)
+    reasoning_calls = Column(Integer, nullable=False, default=0)
+    deep_calls = Column(Integer, nullable=False, default=0)
+    utility_tokens_in = Column(Integer, nullable=False, default=0)
+    utility_tokens_out = Column(Integer, nullable=False, default=0)
+    reasoning_tokens_in = Column(Integer, nullable=False, default=0)
+    reasoning_tokens_out = Column(Integer, nullable=False, default=0)
+    deep_tokens_in = Column(Integer, nullable=False, default=0)
+    deep_tokens_out = Column(Integer, nullable=False, default=0)
+    failure_count = Column(Integer, nullable=False, default=0)
+    failures_json = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class FeedbackEntry(Base):
     __tablename__ = "feedback_entries"
 
@@ -494,6 +569,10 @@ class IntakeSession(Base):
 Index("idx_messages_user_date", Message.user_id, Message.created_at)
 Index("idx_model_usage_user_date", ModelUsageEvent.user_id, ModelUsageEvent.created_at)
 Index("idx_model_usage_model", ModelUsageEvent.model_used)
+Index("idx_passkey_credentials_user", PasskeyCredential.user_id, PasskeyCredential.created_at)
+Index("idx_passkey_credentials_last_used", PasskeyCredential.user_id, PasskeyCredential.last_used_at)
+Index("idx_passkey_challenges_purpose", PasskeyChallenge.purpose, PasskeyChallenge.expires_at)
+Index("idx_passkey_challenges_user", PasskeyChallenge.user_id, PasskeyChallenge.expires_at)
 Index("idx_meal_templates_user", MealTemplate.user_id)
 Index("idx_meal_templates_user_name", MealTemplate.user_id, MealTemplate.normalized_name, unique=True)
 Index("idx_meal_templates_user_archived", MealTemplate.user_id, MealTemplate.is_archived)
@@ -515,6 +594,14 @@ Index("idx_vitals_log_user_date", VitalsLog.user_id, VitalsLog.logged_at)
 Index("idx_exercise_log_user_date", ExerciseLog.user_id, ExerciseLog.logged_at)
 Index("idx_exercise_plan_user_date", ExercisePlan.user_id, ExercisePlan.target_date)
 Index("idx_daily_checklist_user_date", DailyChecklistItem.user_id, DailyChecklistItem.target_date, DailyChecklistItem.item_type)
+Index(
+    "idx_daily_checklist_unique_item",
+    DailyChecklistItem.user_id,
+    DailyChecklistItem.target_date,
+    DailyChecklistItem.item_type,
+    DailyChecklistItem.item_name,
+    unique=True,
+)
 Index("idx_summaries_user_type", Summary.user_id, Summary.summary_type, Summary.period_start)
 Index("idx_fasting_log_user_date", FastingLog.user_id, FastingLog.fast_start)
 Index("idx_feedback_created_at", FeedbackEntry.created_at)
@@ -526,6 +613,18 @@ Index("idx_admin_audit_admin", AdminAuditLog.admin_user_id, AdminAuditLog.create
 Index("idx_admin_audit_target", AdminAuditLog.target_user_id, AdminAuditLog.created_at)
 Index("idx_intake_session_user_status", IntakeSession.user_id, IntakeSession.status, IntakeSession.updated_at)
 Index("idx_analysis_runs_user_type_period", AnalysisRun.user_id, AnalysisRun.run_type, AnalysisRun.period_end)
+Index(
+    "idx_analysis_runs_unique_window",
+    AnalysisRun.user_id,
+    AnalysisRun.run_type,
+    AnalysisRun.period_start,
+    AnalysisRun.period_end,
+    unique=True,
+)
 Index("idx_analysis_runs_user_status", AnalysisRun.user_id, AnalysisRun.status, AnalysisRun.created_at)
 Index("idx_analysis_proposals_user_status", AnalysisProposal.user_id, AnalysisProposal.status, AnalysisProposal.created_at)
 Index("idx_analysis_proposals_run", AnalysisProposal.analysis_run_id, AnalysisProposal.status)
+Index("idx_request_telemetry_group_date", RequestTelemetryEvent.request_group, RequestTelemetryEvent.created_at)
+Index("idx_request_telemetry_user_date", RequestTelemetryEvent.user_id, RequestTelemetryEvent.created_at)
+Index("idx_ai_turn_telemetry_user_date", AITurnTelemetry.user_id, AITurnTelemetry.created_at)
+Index("idx_ai_turn_telemetry_specialist_date", AITurnTelemetry.specialist_id, AITurnTelemetry.created_at)

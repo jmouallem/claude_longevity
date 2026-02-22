@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, type KeyboardEvent } from 'react';
 import { apiClient } from '../api/client';
+import { createPasskeyCredential, isWebAuthnSupported } from '../utils/webauthn';
 import {
   lbToKg,
   kgToLb,
@@ -73,6 +74,17 @@ interface ProfileData {
   family_history: string | null;
   dietary_preferences: string | null;
   health_goals: string | null;
+}
+
+interface PasskeyCredentialRow {
+  id: number;
+  label: string;
+  credential_id: string;
+  device_type?: string | null;
+  backed_up: boolean;
+  transports: string[];
+  created_at?: string | null;
+  last_used_at?: string | null;
 }
 
 type FrameworkTypeKey = 'dietary' | 'training' | 'metabolic_timing' | 'micronutrient' | 'expert_derived';
@@ -401,7 +413,26 @@ export default function Settings() {
     title: string;
     rationale: string;
     confidence: number | null;
+    merge_count: number;
+    merged_run_ids: number[];
     created_at: string | null;
+  }
+
+  interface ClearRunsResponse {
+    status: string;
+    deleted_runs: number;
+    deleted_proposals: number;
+  }
+
+  interface ClearProposalsResponse {
+    status: string;
+    deleted: number;
+  }
+
+  interface CombineProposalsResponse {
+    status: string;
+    merged: number;
+    remaining: number;
   }
 
   const [analysisRuns, setAnalysisRuns] = useState<AnalysisRunRow[]>([]);
@@ -409,6 +440,7 @@ export default function Settings() {
   const [analysisLoading, setAnalysisLoading] = useState(false);
   const [analysisMessage, setAnalysisMessage] = useState('');
   const [analysisRunType, setAnalysisRunType] = useState<'daily' | 'weekly' | 'monthly'>('daily');
+  const [selectedRunDetail, setSelectedRunDetail] = useState<AnalysisRunRow | null>(null);
 
   // Security state
   const [currentPassword, setCurrentPassword] = useState('');
@@ -420,6 +452,14 @@ export default function Settings() {
   const [resetConfirmation, setResetConfirmation] = useState('');
   const [resetDataSaving, setResetDataSaving] = useState(false);
   const [resetDataMessage, setResetDataMessage] = useState('');
+  const [passkeySupported, setPasskeySupported] = useState(false);
+  const [passkeyEnabled, setPasskeyEnabled] = useState(false);
+  const [passkeyLoading, setPasskeyLoading] = useState(false);
+  const [passkeyCreating, setPasskeyCreating] = useState(false);
+  const [passkeyMessage, setPasskeyMessage] = useState('');
+  const [passkeyCurrentPassword, setPasskeyCurrentPassword] = useState('');
+  const [passkeyLabel, setPasskeyLabel] = useState('');
+  const [passkeyCredentials, setPasskeyCredentials] = useState<PasskeyCredentialRow[]>([]);
   const [toast, setToast] = useState<{ message: string; tone: 'info' | 'warn' | 'success' } | null>(null);
 
   const showToast = useCallback((message: string, tone: 'info' | 'warn' | 'success' = 'info') => {
@@ -502,6 +542,52 @@ export default function Settings() {
     }
   };
 
+  const clearAnalysisRuns = async () => {
+    const ok = window.confirm('Clear all adaptation runs and linked proposals for your account?');
+    if (!ok) return;
+    setAnalysisMessage('');
+    setAnalysisLoading(true);
+    try {
+      const response = await apiClient.delete<ClearRunsResponse>('/api/analysis/runs');
+      setAnalysisMessage(`Cleared ${response.deleted_runs} runs and ${response.deleted_proposals} linked proposals.`);
+      await fetchAnalysis();
+    } catch (e: unknown) {
+      setAnalysisMessage(e instanceof Error ? e.message : 'Failed to clear runs.');
+    } finally {
+      setAnalysisLoading(false);
+    }
+  };
+
+  const clearAnalysisProposals = async () => {
+    const ok = window.confirm('Clear all adaptation proposals for your account?');
+    if (!ok) return;
+    setAnalysisMessage('');
+    setAnalysisLoading(true);
+    try {
+      const response = await apiClient.delete<ClearProposalsResponse>('/api/analysis/proposals');
+      setAnalysisMessage(`Cleared ${response.deleted} proposals.`);
+      await fetchAnalysis();
+    } catch (e: unknown) {
+      setAnalysisMessage(e instanceof Error ? e.message : 'Failed to clear proposals.');
+    } finally {
+      setAnalysisLoading(false);
+    }
+  };
+
+  const combineAnalysisProposals = async () => {
+    setAnalysisMessage('');
+    setAnalysisLoading(true);
+    try {
+      const response = await apiClient.post<CombineProposalsResponse>('/api/analysis/proposals/combine', {});
+      setAnalysisMessage(`Combined ${response.merged} duplicates. ${response.remaining} pending proposals remain.`);
+      await fetchAnalysis();
+    } catch (e: unknown) {
+      setAnalysisMessage(e instanceof Error ? e.message : 'Failed to combine proposals.');
+    } finally {
+      setAnalysisLoading(false);
+    }
+  };
+
   const reviewAnalysisProposal = async (proposalId: number, action: 'approve' | 'reject') => {
     setAnalysisMessage('');
     try {
@@ -510,6 +596,83 @@ export default function Settings() {
       await fetchAnalysis();
     } catch (e: unknown) {
       setAnalysisMessage(e instanceof Error ? e.message : `Failed to ${action} proposal.`);
+    }
+  };
+
+  const fetchPasskeyStatus = useCallback(async () => {
+    const supported = isWebAuthnSupported();
+    setPasskeySupported(supported);
+    if (!supported) {
+      setPasskeyEnabled(false);
+      return;
+    }
+    try {
+      const status = await apiClient.get<{ enabled: boolean }>('/api/auth/passkey/status');
+      setPasskeyEnabled(Boolean(status.enabled));
+    } catch {
+      setPasskeyEnabled(false);
+    }
+  }, []);
+
+  const fetchPasskeys = useCallback(async () => {
+    if (!passkeySupported || !passkeyEnabled) {
+      setPasskeyCredentials([]);
+      return;
+    }
+    setPasskeyLoading(true);
+    setPasskeyMessage('');
+    try {
+      const rows = await apiClient.get<PasskeyCredentialRow[]>('/api/auth/passkey/credentials');
+      setPasskeyCredentials(rows);
+    } catch (e: unknown) {
+      setPasskeyMessage(e instanceof Error ? e.message : 'Failed to load passkeys.');
+    } finally {
+      setPasskeyLoading(false);
+    }
+  }, [passkeyEnabled, passkeySupported]);
+
+  const registerPasskey = async () => {
+    if (!passkeySupported || !passkeyEnabled) {
+      setPasskeyMessage('Passkeys are not available on this device.');
+      return;
+    }
+    if (!passkeyCurrentPassword) {
+      setPasskeyMessage('Enter your current password to add a biometric passkey.');
+      return;
+    }
+    setPasskeyCreating(true);
+    setPasskeyMessage('');
+    try {
+      const options = await apiClient.post<{ request_id: number; public_key: Record<string, unknown> }>(
+        '/api/auth/passkey/register/options',
+        { current_password: passkeyCurrentPassword }
+      );
+      const credential = await createPasskeyCredential(options.public_key);
+      await apiClient.post('/api/auth/passkey/register/verify', {
+        request_id: options.request_id,
+        credential,
+        label: passkeyLabel.trim() || undefined,
+      });
+      setPasskeyCurrentPassword('');
+      setPasskeyLabel('');
+      setPasskeyMessage('Passkey added successfully.');
+      showToast('Biometric sign-in is now enabled for this account.', 'success');
+      await fetchPasskeys();
+    } catch (e: unknown) {
+      setPasskeyMessage(e instanceof Error ? e.message : 'Failed to add passkey.');
+    } finally {
+      setPasskeyCreating(false);
+    }
+  };
+
+  const deletePasskey = async (passkeyId: number) => {
+    setPasskeyMessage('');
+    try {
+      await apiClient.delete(`/api/auth/passkey/credentials/${passkeyId}`);
+      await fetchPasskeys();
+      setPasskeyMessage('Passkey removed.');
+    } catch (e: unknown) {
+      setPasskeyMessage(e instanceof Error ? e.message : 'Failed to remove passkey.');
     }
   };
 
@@ -824,6 +987,10 @@ export default function Settings() {
   }, [fetchProfile]);
 
   useEffect(() => {
+    fetchPasskeyStatus();
+  }, [fetchPasskeyStatus]);
+
+  useEffect(() => {
     if (!profileLoaded) return;
     fetchModels(provider);
   }, [provider, fetchModels, profileLoaded]);
@@ -867,6 +1034,11 @@ export default function Settings() {
   useEffect(() => {
     if (tab === 'adaptation') fetchAnalysis();
   }, [tab, fetchAnalysis]);
+
+  useEffect(() => {
+    if (tab !== 'security') return;
+    fetchPasskeys();
+  }, [tab, fetchPasskeys]);
 
   const saveApiKey = async () => {
     if (!apiKey.trim()) return;
@@ -1077,6 +1249,8 @@ export default function Settings() {
       setResetDataMessage('User data reset successfully. Password unchanged.');
       setResetPassword('');
       setResetConfirmation('');
+      setPasskeyCredentials([]);
+      setPasskeyMessage('');
       await fetchProfile();
       await fetchFrameworks();
       setUsageData(null);
@@ -1862,26 +2036,26 @@ export default function Settings() {
       )}
 
       {tab === 'adaptation' && (
-        <div className="space-y-5">
-          <div className="bg-slate-800 rounded-xl p-6 border border-slate-700 space-y-4">
+        <div className="space-y-3">
+          <div className="bg-slate-800 rounded-xl p-4 border border-slate-700 space-y-3">
             <div className="flex items-center justify-between gap-3">
               <div>
-                <h2 className="text-lg font-semibold text-slate-100">Adaptation Engine</h2>
-                <p className="text-sm text-slate-400">Daily/weekly/monthly longitudinal runs with approval-gated adjustments.</p>
+                <h2 className="text-base font-semibold text-slate-100">Adaptation Engine</h2>
+                <p className="text-xs text-slate-400">Runs, proposals, and approvals.</p>
               </div>
               <button
                 onClick={fetchAnalysis}
-                className="px-3 py-1.5 text-sm text-slate-200 border border-slate-600 rounded-lg hover:bg-slate-700"
+                className="px-2.5 py-1 text-xs text-slate-200 border border-slate-600 rounded-md hover:bg-slate-700"
               >
                 Refresh
               </button>
             </div>
 
-            <div className="flex flex-wrap items-center gap-2">
+            <div className="flex flex-wrap items-center gap-1.5">
               <select
                 value={analysisRunType}
                 onChange={(e) => setAnalysisRunType(e.target.value as 'daily' | 'weekly' | 'monthly')}
-                className="bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-slate-100 text-sm focus:outline-none focus:border-emerald-500"
+                className="bg-slate-700 border border-slate-600 rounded-md px-2.5 py-1.5 text-slate-100 text-xs focus:outline-none focus:border-emerald-500"
               >
                 <option value="daily">Daily</option>
                 <option value="weekly">Weekly</option>
@@ -1890,115 +2064,253 @@ export default function Settings() {
               <button
                 onClick={triggerAnalysisRun}
                 disabled={analysisLoading}
-                className="px-3 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 text-white text-sm rounded-lg"
+                className="px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 text-white text-xs rounded-md"
               >
                 Run Selected
               </button>
               <button
                 onClick={triggerDueAnalyses}
                 disabled={analysisLoading}
-                className="px-3 py-2 bg-slate-700 hover:bg-slate-600 disabled:opacity-60 text-slate-100 text-sm rounded-lg border border-slate-600"
+                className="px-2.5 py-1.5 bg-slate-700 hover:bg-slate-600 disabled:opacity-60 text-slate-100 text-xs rounded-md border border-slate-600"
               >
-                Run Due Windows
+                Run Due
+              </button>
+              <button
+                onClick={combineAnalysisProposals}
+                disabled={analysisLoading}
+                className="px-2.5 py-1.5 bg-slate-700 hover:bg-slate-600 disabled:opacity-60 text-slate-100 text-xs rounded-md border border-slate-600"
+              >
+                Combine Similar
+              </button>
+              <button
+                onClick={clearAnalysisProposals}
+                disabled={analysisLoading}
+                className="px-2.5 py-1.5 bg-slate-700 hover:bg-slate-600 disabled:opacity-60 text-slate-100 text-xs rounded-md border border-slate-600"
+              >
+                Clear Proposals
+              </button>
+              <button
+                onClick={clearAnalysisRuns}
+                disabled={analysisLoading}
+                className="px-2.5 py-1.5 bg-rose-700 hover:bg-rose-600 disabled:opacity-60 text-white text-xs rounded-md"
+              >
+                Clear Runs
               </button>
             </div>
 
             {analysisMessage && (
-              <p className={`text-sm ${analysisMessage.toLowerCase().includes('failed') || analysisMessage.toLowerCase().includes('error') ? 'text-rose-400' : 'text-emerald-400'}`}>
+              <p className={`text-xs ${analysisMessage.toLowerCase().includes('failed') || analysisMessage.toLowerCase().includes('error') ? 'text-rose-400' : 'text-emerald-400'}`}>
                 {analysisMessage}
               </p>
             )}
           </div>
 
-          <div className="bg-slate-800 rounded-xl p-6 border border-slate-700 space-y-3">
-            <h3 className="text-base font-semibold text-slate-100">Recent Runs</h3>
-            {analysisRuns.length === 0 ? (
-              <p className="text-sm text-slate-400">No analysis runs yet.</p>
-            ) : (
-              <div className="space-y-2">
-                {analysisRuns.slice(0, 12).map((run) => (
-                  <div key={run.id} className="rounded-lg border border-slate-700 bg-slate-900/35 p-3">
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="text-sm text-slate-200">
-                        <span className="font-medium">{run.run_type}</span>
-                        <span className="text-slate-500 ml-2">{run.period_start}{run.period_start !== run.period_end ? ` -> ${run.period_end}` : ''}</span>
-                      </div>
-                      <span className={`text-xs px-2 py-0.5 rounded-full ${
-                        run.status === 'completed'
-                          ? 'bg-emerald-900/50 text-emerald-300'
-                          : run.status === 'failed'
-                            ? 'bg-rose-900/50 text-rose-300'
-                            : 'bg-slate-700 text-slate-300'
-                      }`}>
-                        {run.status}
-                      </span>
-                    </div>
-                    <div className="text-xs text-slate-400 mt-1">
-                      Confidence: {run.confidence != null ? `${Math.round(run.confidence * 100)}%` : 'n/a'}
-                      {run.created_at ? ` · ${new Date(run.created_at).toLocaleString()}` : ''}
-                    </div>
-                    {run.summary_markdown && (
-                      <p className="text-sm text-slate-300 mt-2 line-clamp-3">{run.summary_markdown}</p>
-                    )}
-                  </div>
-                ))}
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
+            <div className="bg-slate-800 rounded-xl p-4 border border-slate-700 space-y-2">
+              <div className="flex items-center justify-between">
+                <h3 className="text-sm font-semibold text-slate-100">Recent Runs</h3>
+                <span className="text-xs text-slate-500">{analysisRuns.length}</span>
               </div>
-            )}
-          </div>
-
-          <div className="bg-slate-800 rounded-xl p-6 border border-slate-700 space-y-3">
-            <h3 className="text-base font-semibold text-slate-100">Adjustment Proposals</h3>
-            {analysisProposals.length === 0 ? (
-              <p className="text-sm text-slate-400">No proposals yet.</p>
-            ) : (
-              <div className="space-y-2">
-                {analysisProposals.slice(0, 20).map((proposal) => (
-                  <div key={proposal.id} className="rounded-lg border border-slate-700 bg-slate-900/35 p-3">
-                    <div className="flex items-start justify-between gap-2">
-                      <div>
-                        <p className="text-sm text-slate-100 font-medium">{proposal.title}</p>
-                        <p className="text-xs text-slate-400 mt-1">
-                          {proposal.proposal_kind} · run #{proposal.analysis_run_id}
-                          {proposal.confidence != null ? ` · ${Math.round(proposal.confidence * 100)}%` : ''}
+              {analysisRuns.length === 0 ? (
+                <p className="text-xs text-slate-400">No analysis runs yet.</p>
+              ) : (
+                <div className="space-y-1.5 max-h-[420px] overflow-y-auto pr-1">
+                  {analysisRuns.slice(0, 20).map((run) => (
+                    <div key={run.id} className="rounded-md border border-slate-700 bg-slate-900/35 px-2.5 py-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="text-xs text-slate-200 font-medium">
+                          {run.run_type}
+                          <span className="text-slate-500 ml-1.5">
+                            {run.period_start}{run.period_start !== run.period_end ? ` -> ${run.period_end}` : ''}
+                          </span>
                         </p>
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${
+                          run.status === 'completed'
+                            ? 'bg-emerald-900/50 text-emerald-300'
+                            : run.status === 'failed'
+                              ? 'bg-rose-900/50 text-rose-300'
+                              : 'bg-slate-700 text-slate-300'
+                        }`}>
+                          {run.status}
+                        </span>
                       </div>
-                      <span className={`text-xs px-2 py-0.5 rounded-full ${
-                        proposal.status === 'approved' || proposal.status === 'applied'
-                          ? 'bg-emerald-900/50 text-emerald-300'
-                          : proposal.status === 'rejected'
-                            ? 'bg-rose-900/50 text-rose-300'
-                            : 'bg-amber-900/50 text-amber-300'
-                      }`}>
-                        {proposal.status}
-                      </span>
+                      <p className="text-[11px] text-slate-400 mt-0.5">
+                        {run.confidence != null ? `${Math.round(run.confidence * 100)}%` : 'n/a'}
+                        {run.created_at ? ` | ${new Date(run.created_at).toLocaleString()}` : ''}
+                      </p>
+                      {run.summary_markdown && (
+                        <button
+                          type="button"
+                          onClick={() => setSelectedRunDetail(run)}
+                          className="mt-1 w-full text-left text-xs text-slate-300 line-clamp-2 hover:text-slate-200"
+                          title="View full run summary"
+                        >
+                          {run.summary_markdown}
+                        </button>
+                      )}
                     </div>
-                    <p className="text-sm text-slate-300 mt-2">{proposal.rationale}</p>
-                    {proposal.status === 'pending' && (
-                      <div className="flex gap-2 mt-3">
-                        <button
-                          onClick={() => reviewAnalysisProposal(proposal.id, 'approve')}
-                          className="px-3 py-1.5 text-xs bg-emerald-600 hover:bg-emerald-500 text-white rounded-md"
-                        >
-                          Approve
-                        </button>
-                        <button
-                          onClick={() => reviewAnalysisProposal(proposal.id, 'reject')}
-                          className="px-3 py-1.5 text-xs bg-rose-600 hover:bg-rose-500 text-white rounded-md"
-                        >
-                          Reject
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                ))}
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="bg-slate-800 rounded-xl p-4 border border-slate-700 space-y-2">
+              <div className="flex items-center justify-between">
+                <h3 className="text-sm font-semibold text-slate-100">Adjustment Proposals</h3>
+                <span className="text-xs text-slate-500">{analysisProposals.length}</span>
               </div>
-            )}
+              {analysisProposals.length === 0 ? (
+                <p className="text-xs text-slate-400">No proposals yet.</p>
+              ) : (
+                <div className="space-y-1.5 max-h-[420px] overflow-y-auto pr-1">
+                  {analysisProposals.slice(0, 30).map((proposal) => (
+                    <div key={proposal.id} className="rounded-md border border-slate-700 bg-slate-900/35 px-2.5 py-2">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <p className="text-xs text-slate-100 font-medium line-clamp-1">{proposal.title}</p>
+                          <p className="text-[11px] text-slate-400 mt-0.5">
+                            {proposal.proposal_kind} | run #{proposal.analysis_run_id}
+                            {proposal.confidence != null ? ` | ${Math.round(proposal.confidence * 100)}%` : ''}
+                            {proposal.merge_count > 0 ? ` | merged +${proposal.merge_count}` : ''}
+                          </p>
+                        </div>
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${
+                          proposal.status === 'approved' || proposal.status === 'applied'
+                            ? 'bg-emerald-900/50 text-emerald-300'
+                            : proposal.status === 'rejected'
+                              ? 'bg-rose-900/50 text-rose-300'
+                              : 'bg-amber-900/50 text-amber-300'
+                        }`}>
+                          {proposal.status}
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-300 mt-1 line-clamp-2">{proposal.rationale}</p>
+                      {proposal.status === 'pending' && (
+                        <div className="flex gap-1.5 mt-2">
+                          <button
+                            onClick={() => reviewAnalysisProposal(proposal.id, 'approve')}
+                            className="px-2 py-1 text-[11px] bg-emerald-600 hover:bg-emerald-500 text-white rounded-md"
+                          >
+                            Approve
+                          </button>
+                          <button
+                            onClick={() => reviewAnalysisProposal(proposal.id, 'reject')}
+                            className="px-2 py-1 text-[11px] bg-rose-600 hover:bg-rose-500 text-white rounded-md"
+                          >
+                            Reject
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
         </div>
       )}
 
       {tab === 'security' && (
         <div className="space-y-5">
+          <div className="bg-slate-800 rounded-xl p-6 border border-slate-700 space-y-4">
+            <h2 className="text-lg font-semibold text-slate-100">Biometric Sign-In</h2>
+            <p className="text-sm text-slate-400">
+              Add passkeys for fingerprint/face sign-in. You can register multiple devices.
+            </p>
+
+            {!passkeySupported ? (
+              <p className="text-sm text-amber-300">
+                This browser/device does not support passkeys.
+              </p>
+            ) : !passkeyEnabled ? (
+              <p className="text-sm text-amber-300">
+                Passkeys are currently disabled on this server.
+              </p>
+            ) : (
+              <>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-sm text-slate-400 mb-1">Current Password</label>
+                    <input
+                      type="password"
+                      value={passkeyCurrentPassword}
+                      onChange={(e) => setPasskeyCurrentPassword(e.target.value)}
+                      placeholder="Required to add passkey"
+                      className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-slate-100 text-sm focus:outline-none focus:border-emerald-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm text-slate-400 mb-1">Device Label (optional)</label>
+                    <input
+                      type="text"
+                      value={passkeyLabel}
+                      onChange={(e) => setPasskeyLabel(e.target.value)}
+                      placeholder="e.g. Pixel 9, MacBook"
+                      className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-slate-100 text-sm focus:outline-none focus:border-emerald-500"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    onClick={registerPasskey}
+                    disabled={passkeyCreating || passkeyLoading}
+                    className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium rounded-lg transition-colors"
+                  >
+                    {passkeyCreating ? 'Waiting for biometrics...' : 'Add Passkey'}
+                  </button>
+                  <button
+                    onClick={fetchPasskeys}
+                    disabled={passkeyLoading}
+                    className="px-3 py-2 border border-slate-600 text-slate-200 rounded-lg text-sm hover:bg-slate-700 disabled:opacity-50"
+                  >
+                    Refresh Devices
+                  </button>
+                </div>
+
+                {passkeyMessage && (
+                  <p className={`text-sm ${passkeyMessage.toLowerCase().includes('failed') || passkeyMessage.toLowerCase().includes('incorrect') ? 'text-rose-400' : 'text-emerald-400'}`}>
+                    {passkeyMessage}
+                  </p>
+                )}
+
+                <div className="space-y-2">
+                  <p className="text-sm text-slate-300 font-medium">Registered Devices</p>
+                  {passkeyLoading ? (
+                    <p className="text-sm text-slate-500">Loading...</p>
+                  ) : passkeyCredentials.length === 0 ? (
+                    <p className="text-sm text-slate-500">No passkeys registered yet.</p>
+                  ) : (
+                    <div className="space-y-2">
+                      {passkeyCredentials.map((row) => (
+                        <div key={row.id} className="rounded-lg border border-slate-700 bg-slate-900/40 p-3 flex flex-wrap items-center justify-between gap-2">
+                          <div>
+                            <p className="text-sm text-slate-100 font-medium">
+                              {row.label || 'Unnamed Device'}
+                              {row.backed_up ? (
+                                <span className="ml-2 text-xs text-emerald-300">synced</span>
+                              ) : null}
+                            </p>
+                            <p className="text-xs text-slate-500 mt-1">
+                              {row.device_type || 'passkey'}
+                              {row.last_used_at ? ` · last used ${new Date(row.last_used_at).toLocaleString()}` : ''}
+                            </p>
+                          </div>
+                          <button
+                            onClick={() => deletePasskey(row.id)}
+                            className="px-3 py-1.5 text-xs rounded-md border border-rose-700/70 text-rose-300 hover:bg-rose-900/20"
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+
           <div className="bg-slate-800 rounded-xl p-6 border border-slate-700 space-y-4">
             <h2 className="text-lg font-semibold text-slate-100">Change Password</h2>
             <p className="text-sm text-slate-400">Update your account password.</p>
@@ -2090,6 +2402,42 @@ export default function Settings() {
             >
               {resetDataSaving ? 'Resetting...' : 'Reset My Data'}
             </button>
+          </div>
+        </div>
+      )}
+
+      {selectedRunDetail && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4"
+          onClick={() => setSelectedRunDetail(null)}
+        >
+          <div
+            className="w-full max-w-2xl max-h-[85vh] overflow-y-auto rounded-xl border border-slate-700 bg-slate-900 p-4 sm:p-5"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h3 className="text-sm sm:text-base font-semibold text-slate-100">
+                  {selectedRunDetail.run_type} Run #{selectedRunDetail.id}
+                </h3>
+                <p className="text-xs text-slate-400 mt-1">
+                  {selectedRunDetail.period_start}
+                  {selectedRunDetail.period_start !== selectedRunDetail.period_end ? ` -> ${selectedRunDetail.period_end}` : ''}
+                  {selectedRunDetail.created_at ? ` | ${new Date(selectedRunDetail.created_at).toLocaleString()}` : ''}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSelectedRunDetail(null)}
+                className="px-2 py-1 text-xs text-slate-200 border border-slate-600 rounded-md hover:bg-slate-700"
+              >
+                Close
+              </button>
+            </div>
+
+            <pre className="mt-3 whitespace-pre-wrap break-words text-xs sm:text-sm leading-6 text-slate-200 font-sans">
+              {selectedRunDetail.summary_markdown || 'No run summary text available.'}
+            </pre>
           </div>
         </div>
       )}

@@ -59,6 +59,47 @@ MEDICATION_KEYWORDS = {
     "rosuvastatin", "simvastatin", "levothyroxine", "insulin", "semaglutide",
 }
 
+GENERIC_MEDICATION_PHRASES = {
+    "med",
+    "meds",
+    "medication",
+    "medications",
+    "my med",
+    "my meds",
+    "my medication",
+    "my medications",
+    "morning med",
+    "morning meds",
+    "morning medication",
+    "morning medications",
+    "evening med",
+    "evening meds",
+    "night med",
+    "night meds",
+    "blood pressure med",
+    "blood pressure meds",
+    "blood pressure medication",
+    "blood pressure medications",
+    "bp med",
+    "bp meds",
+    "bp medication",
+    "bp medications",
+}
+
+GENERIC_SUPPLEMENT_PHRASES = {
+    "supplement",
+    "supplements",
+    "my supplement",
+    "my supplements",
+    "vitamin",
+    "vitamins",
+    "my vitamin",
+    "my vitamins",
+    "morning supplements",
+    "evening supplements",
+    "daily supplements",
+}
+
 
 # ---------------------------------------------------------------------------
 # Family / token helpers
@@ -108,6 +149,34 @@ def is_low_signal(name: str) -> bool:
 def looks_like_medication(name: str) -> bool:
     t = name.lower()
     return any(k in t for k in MEDICATION_KEYWORDS)
+
+
+def _normalize_name_text(value: str) -> str:
+    return " ".join((value or "").lower().split())
+
+
+def is_generic_medication_name(name: str) -> bool:
+    t = _normalize_name_text(name)
+    if not t:
+        return True
+    if t in GENERIC_MEDICATION_PHRASES:
+        return True
+    if re.fullmatch(r"(my\s+)?(morning|evening|night|bedtime|daily)?\s*(med|meds|medication|medications)", t):
+        return True
+    if "med" in t and not looks_like_medication(t):
+        return True
+    return False
+
+
+def is_generic_supplement_name(name: str) -> bool:
+    t = _normalize_name_text(name)
+    if not t:
+        return True
+    if t in GENERIC_SUPPLEMENT_PHRASES:
+        return True
+    if re.fullmatch(r"(my\s+)?(morning|evening|night|daily)?\s*(supplement|supplements|vitamin|vitamins)", t):
+        return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -182,11 +251,15 @@ def parse_structured_list(raw: str | None) -> list[StructuredItem]:
         except json.JSONDecodeError:
             pass
 
-    # Fallback: comma-separated
-    for piece in txt.split(","):
-        piece = piece.strip()
-        if piece:
-            items.append(to_structured(piece))
+    # Fallback: avoid comma splitting because doses like "1,200 mcg" are common.
+    # Support semicolon/newline separated legacy inputs, otherwise treat as one item.
+    if ";" in txt or "\n" in txt:
+        for piece in re.split(r"[;\n]+", txt):
+            piece = piece.strip()
+            if piece:
+                items.append(to_structured(piece))
+    elif txt:
+        items.append(to_structured(txt))
 
     return items
 

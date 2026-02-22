@@ -1,4 +1,5 @@
 import json
+import time
 
 from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException
 from fastapi.responses import StreamingResponse
@@ -8,6 +9,8 @@ from auth.utils import get_current_user, require_non_admin
 from db.database import get_db, SessionLocal
 from db.models import User
 from ai.orchestrator import process_chat
+from services.telemetry_context import clear_ai_turn_scope, start_request_scope
+from services.telemetry_service import flush_request_scope
 from utils.image_utils import validate_image_size, MAX_IMAGE_SIZE
 
 router = APIRouter(prefix="/chat", tags=["chat"], dependencies=[Depends(require_non_admin)])
@@ -45,12 +48,25 @@ async def chat(
     async def event_stream():
         # Create a dedicated session for the streaming generator so that
         # SQLAlchemy lazy-loads work throughout the entire SSE lifecycle.
+        started = time.perf_counter()
+        start_request_scope(path="/api/chat", method="POST", request_group="chat")
         stream_db = SessionLocal()
         try:
-            stream_user = stream_db.query(User).get(user_id)
+            stream_user = stream_db.get(User, user_id)
+            if not stream_user:
+                yield f"data: {json.dumps({'type': 'error', 'text': 'User session is no longer valid. Please sign in again.'})}\n\n"
+                return
             async for chunk in process_chat(stream_db, stream_user, message, image_bytes, verbosity):
                 yield f"data: {json.dumps(chunk)}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'text': f'Stream error: {str(e)}'})}\n\n"
         finally:
+            flush_request_scope(
+                status_code=200,
+                duration_ms=(time.perf_counter() - started) * 1000.0,
+                user_id=user_id,
+            )
+            clear_ai_turn_scope()
             stream_db.close()
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")

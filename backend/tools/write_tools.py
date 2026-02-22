@@ -6,6 +6,8 @@ from datetime import datetime, time, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
 from db.models import (
     DailyChecklistItem,
     ExercisePlan,
@@ -102,9 +104,11 @@ def _parse_structured_items_input(value: Any) -> list[StructuredItem]:
                     return [_normalize_structured_item(v) for v in parsed if v is not None]
             except json.JSONDecodeError:
                 pass
-        # Fallback: comma-separated strings
-        return [_normalize_structured_item(part.strip()) for part in txt.split(",") if part.strip()]
-    raise ToolExecutionError("Structured items must be a JSON array, list, or comma-separated string")
+        # Fallback: avoid comma splitting (e.g., "1,200 mcg"); support semicolon/newline separators.
+        if ";" in txt or "\n" in txt:
+            return [_normalize_structured_item(part.strip()) for part in re.split(r"[;\n]+", txt) if part.strip()]
+        return [_normalize_structured_item(txt)]
+    raise ToolExecutionError("Structured items must be a JSON array, list, string, semicolon, or newline-separated input")
 
 
 def _ensure_timezone(tz_name: str) -> str:
@@ -448,27 +452,26 @@ def _tool_checklist_mark_taken(args: dict[str, Any], ctx: ToolContext) -> dict[s
     completed = bool(args.get("completed", True))
     updated: list[str] = []
     for name in targets:
-        row = (
-            ctx.db.query(DailyChecklistItem)
-            .filter(
-                DailyChecklistItem.user_id == ctx.user.id,
-                DailyChecklistItem.target_date == target_date,
-                DailyChecklistItem.item_type == item_type,
-                DailyChecklistItem.item_name == name,
-            )
-            .first()
+        stmt = sqlite_insert(DailyChecklistItem).values(
+            user_id=ctx.user.id,
+            target_date=target_date,
+            item_type=item_type,
+            item_name=name,
+            completed=completed,
         )
-        if not row:
-            row = DailyChecklistItem(
-                user_id=ctx.user.id,
-                target_date=target_date,
-                item_type=item_type,
-                item_name=name,
-                completed=completed,
-            )
-            ctx.db.add(row)
-        else:
-            row.completed = completed
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[
+                DailyChecklistItem.user_id,
+                DailyChecklistItem.target_date,
+                DailyChecklistItem.item_type,
+                DailyChecklistItem.item_name,
+            ],
+            set_={
+                "completed": completed,
+                "updated_at": datetime.utcnow(),
+            },
+        )
+        ctx.db.execute(stmt)
         updated.append(name)
 
     return {"item_type": item_type, "target_date": target_date, "updated_items": updated, "completed": completed}

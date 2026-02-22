@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from auth.utils import get_current_user, require_non_admin
 from db.database import get_db
 from db.models import User, Summary
-from utils.datetime_utils import today_utc
+from utils.datetime_utils import today_for_tz
 
 router = APIRouter(prefix="/summaries", tags=["summaries"], dependencies=[Depends(require_non_admin)])
 
@@ -60,7 +60,8 @@ async def generate_summary(
 
     from services.summary_service import generate_summary as gen_summary
     try:
-        result = await gen_summary(db, user, summary_type, target_date or today_utc())
+        tz_name = getattr(getattr(user, "settings", None), "timezone", None)
+        result = await gen_summary(db, user, summary_type, target_date or today_for_tz(tz_name))
         return {"status": "generated", "summary_id": result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Summary generation failed: {str(e)}")

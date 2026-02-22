@@ -9,19 +9,25 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy import func, or_
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from auth.utils import get_current_user, hash_password, require_admin, verify_password
 from db.database import get_db
 from db.models import (
+    AITurnTelemetry,
     AdminAuditLog,
     AnalysisProposal,
     AnalysisRun,
     FeedbackEntry,
     Message,
     ModelUsageEvent,
+    PasskeyCredential,
+    RequestTelemetryEvent,
     User,
 )
+from config import settings
+from services.telemetry_service import build_performance_snapshot, count_request_events
 from services.user_reset_service import reset_user_data_for_user
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -71,6 +77,7 @@ class AdminUserRow(BaseModel):
     display_name: str
     role: str
     has_api_key: bool
+    passkey_count: int
     force_password_change: bool
     created_at: Optional[str] = None
 
@@ -99,6 +106,11 @@ class AdminDeleteUserResponse(BaseModel):
     removed_files: int
 
 
+class AdminResetPasskeysResponse(BaseModel):
+    status: str
+    deleted: int
+
+
 class AdminStatsResponse(BaseModel):
     total_users: int
     total_admins: int
@@ -111,6 +123,8 @@ class AdminStatsResponse(BaseModel):
     estimated_cost_usd: float
     analysis_runs: int
     analysis_proposals: int
+    total_request_telemetry_events: int
+    total_ai_turn_telemetry_events: int
 
 
 class AdminFeedbackRow(BaseModel):
@@ -124,6 +138,60 @@ class AdminFeedbackRow(BaseModel):
     created_by_user_id: Optional[int] = None
     created_by_username: Optional[str] = None
     created_at: Optional[str] = None
+
+
+class PerformanceHistogramBucket(BaseModel):
+    bucket: str
+    count: int
+
+
+class RequestGroupPerformance(BaseModel):
+    count: int
+    avg_ms: float
+    p50_ms: float
+    p95_ms: float
+    p99_ms: float
+    db_query_count_avg: float
+    db_query_time_ms_avg: float
+    histogram: list[PerformanceHistogramBucket]
+
+
+class AITurnPerformance(BaseModel):
+    count: int
+    first_token_p95_ms: float
+    total_turn_p95_ms: float
+    utility_calls_total: int
+    reasoning_calls_total: int
+    deep_calls_total: int
+    failures_total: int
+    top_failure_reasons: list[dict[str, int | str]]
+
+
+class AnalysisSlaPerformance(BaseModel):
+    count: int
+    p95_seconds: float
+    avg_seconds: float
+
+
+class SloTargets(BaseModel):
+    chat_p95_first_token_ms: int
+    dashboard_p95_load_ms: int
+    analysis_completion_sla_seconds: int
+
+
+class SloStatus(BaseModel):
+    chat_first_token_meeting_slo: bool
+    dashboard_load_meeting_slo: bool
+    analysis_completion_meeting_slo: bool
+
+
+class AdminPerformanceResponse(BaseModel):
+    window_hours: int
+    targets: SloTargets
+    status: SloStatus
+    request_groups: dict[str, RequestGroupPerformance]
+    ai_turns: AITurnPerformance
+    analysis_sla: AnalysisSlaPerformance
 
 
 def _build_admin_feedback_query(
@@ -182,6 +250,12 @@ def list_users(
     rows: list[AdminUserRow] = []
     for u in users:
         has_api_key = bool(u.settings and u.settings.api_key_encrypted)
+        passkey_count = (
+            db.query(func.count(PasskeyCredential.id))
+            .filter(PasskeyCredential.user_id == u.id)
+            .scalar()
+            or 0
+        )
         rows.append(
             AdminUserRow(
                 id=u.id,
@@ -189,6 +263,7 @@ def list_users(
                 display_name=u.display_name,
                 role=u.role or "user",
                 has_api_key=has_api_key,
+                passkey_count=int(passkey_count),
                 force_password_change=bool(u.force_password_change),
                 created_at=u.created_at.isoformat() if u.created_at else None,
             )
@@ -291,6 +366,35 @@ def admin_reset_user_data(
     )
     db.commit()
     return AdminResetDataResponse(status="ok", removed_files=result["removed_files"])
+
+
+@router.post("/users/{target_user_id}/reset-passkeys", response_model=AdminResetPasskeysResponse)
+def admin_reset_user_passkeys(
+    target_user_id: int,
+    admin_user: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    target = db.query(User).filter(User.id == target_user_id).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    if target.role == "admin":
+        raise HTTPException(status_code=400, detail="Admin accounts do not use passkeys")
+
+    deleted = (
+        db.query(PasskeyCredential)
+        .filter(PasskeyCredential.user_id == target.id)
+        .delete(synchronize_session=False)
+    )
+    _audit(
+        db=db,
+        admin_user_id=admin_user.id,
+        target_user_id=target.id,
+        action="admin.user.reset_passkeys",
+        details={"username": target.username, "deleted": int(deleted)},
+        success=True,
+    )
+    db.commit()
+    return AdminResetPasskeysResponse(status="ok", deleted=int(deleted))
 
 
 @router.delete("/users/{target_user_id}", response_model=AdminDeleteUserResponse)
@@ -629,6 +733,11 @@ def admin_stats_overview(
         .scalar()
         or 0
     )
+    total_request_telemetry_events = count_request_events(db)
+    try:
+        total_ai_turn_telemetry_events = int(db.query(func.count(AITurnTelemetry.id)).scalar() or 0)
+    except OperationalError:
+        total_ai_turn_telemetry_events = 0
 
     _audit(
         db=db,
@@ -651,6 +760,42 @@ def admin_stats_overview(
         estimated_cost_usd=round(total_cost, 4),
         analysis_runs=int(analysis_runs),
         analysis_proposals=int(analysis_proposals),
+        total_request_telemetry_events=total_request_telemetry_events,
+        total_ai_turn_telemetry_events=total_ai_turn_telemetry_events,
+    )
+
+
+@router.get("/stats/performance", response_model=AdminPerformanceResponse)
+def admin_performance_stats(
+    since_hours: int = Query(default=24, ge=1, le=168),
+    admin_user: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    _ = admin_user
+    snapshot = build_performance_snapshot(db, since_hours=since_hours)
+    targets = SloTargets(
+        chat_p95_first_token_ms=int(settings.SLO_CHAT_P95_FIRST_TOKEN_MS),
+        dashboard_p95_load_ms=int(settings.SLO_DASHBOARD_P95_LOAD_MS),
+        analysis_completion_sla_seconds=int(settings.SLO_ANALYSIS_RUN_COMPLETION_SLA_SECONDS),
+    )
+    ai_turns = snapshot["ai_turns"]
+    request_groups = snapshot["request_groups"]
+    analysis_sla = snapshot["analysis_sla"]
+    status = SloStatus(
+        chat_first_token_meeting_slo=float(ai_turns.get("first_token_p95_ms", 0.0)) <= float(targets.chat_p95_first_token_ms),
+        dashboard_load_meeting_slo=float(request_groups.get("dashboard", {}).get("p95_ms", 0.0)) <= float(targets.dashboard_p95_load_ms),
+        analysis_completion_meeting_slo=float(analysis_sla.get("p95_seconds", 0.0)) <= float(targets.analysis_completion_sla_seconds),
+    )
+    return AdminPerformanceResponse(
+        window_hours=int(snapshot.get("window_hours") or since_hours),
+        targets=targets,
+        status=status,
+        request_groups={
+            key: RequestGroupPerformance.model_validate(value)
+            for key, value in dict(request_groups).items()
+        },
+        ai_turns=AITurnPerformance.model_validate(ai_turns),
+        analysis_sla=AnalysisSlaPerformance.model_validate(analysis_sla),
     )
 
 

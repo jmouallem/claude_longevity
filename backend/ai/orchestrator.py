@@ -3,6 +3,7 @@ import logging
 import inspect
 import re
 import asyncio
+import time
 from datetime import datetime, timezone, timedelta
 from typing import Any, AsyncGenerator
 
@@ -14,12 +15,33 @@ from ai.specialist_router import classify_intent
 from ai.log_parser import parse_log_data
 from ai.image_analyzer import analyze_image
 from ai.providers import get_provider
-from ai.usage_tracker import track_usage_from_result
+from ai.usage_tracker import track_model_usage, track_usage_from_result
+from db.database import SessionLocal
 from db.models import (
-    User, Message, FeedbackEntry, FoodLog, MealTemplate,
+    User,
+    Message,
+    FeedbackEntry,
+    FoodLog,
+    MealTemplate,
+    VitalsLog,
+    ExerciseLog,
+    HydrationLog,
+    SupplementLog,
+    FastingLog,
+    SleepLog,
+    Notification,
 )
 from services.analysis_service import run_due_analyses_for_user_id
 from services.specialists_config import get_enabled_specialist_ids, get_effective_specialists, parse_overrides
+from services.telemetry_context import (
+    clear_ai_turn_scope,
+    consume_ai_turn_scope,
+    mark_ai_first_token,
+    record_ai_failure,
+    start_ai_turn_scope,
+    update_ai_turn_scope,
+)
+from services.telemetry_service import persist_ai_turn_event
 from tools import tool_registry
 from tools.base import ToolContext, ToolExecutionError
 from utils.encryption import decrypt_api_key
@@ -62,6 +84,29 @@ TIME_QUERY_PATTERNS = (
     r"\bcurrent\s+date\b",
 )
 CHAT_VERBOSITY_MODES = {"normal", "summarized", "straight"}
+TIME_CONFIRMATION_KIND = "time_confirmation"
+TIME_CONFIRM_ACK_TERMS = {
+    "yes",
+    "y",
+    "yep",
+    "yeah",
+    "correct",
+    "confirmed",
+    "thats right",
+    "that's right",
+    "right",
+    "sounds right",
+    "looks right",
+}
+TIME_CONFIRM_REJECT_TERMS = {
+    "no",
+    "nope",
+    "wrong",
+    "incorrect",
+    "not right",
+    "thats wrong",
+    "that's wrong",
+}
 MENU_SAVE_KEYWORDS = (
     "save to menu",
     "save this to menu",
@@ -164,13 +209,17 @@ BP_MED_KEYWORDS = {
     "valsartan",
 }
 
-GENERIC_MEDICATION_PHRASES = {
-    "blood pressure meds",
-    "blood pressure medications",
-    "bp meds",
-    "bp medications",
-    "my meds",
-    "my medications",
+SUPPLEMENT_INTAKE_PHRASES = {
+    "supplement",
+    "supplements",
+    "vitamin",
+    "vitamins",
+    "multivitamin",
+    "stack",
+    "fat burner",
+    "omega",
+    "coq10",
+    "creatine",
 }
 
 MED_MATCH_PROMPT = """You map a user's medication-taking message to their listed medications.
@@ -255,16 +304,48 @@ from utils.med_utils import (
     parse_structured_list,
     cleanup_structured_list,
     looks_like_medication as _looks_like_medication,
+    is_generic_medication_name,
+    is_generic_supplement_name,
 )
 
 
 def _is_generic_medication_phrase(item: str) -> bool:
-    t = " ".join(item.lower().split())
-    return t in GENERIC_MEDICATION_PHRASES
+    return is_generic_medication_name(item)
+
+
+def _is_generic_supplement_phrase(item: str) -> bool:
+    return is_generic_supplement_name(item)
 
 
 def _normalize_alnum(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", value.lower())
+
+
+def _looks_like_medication_intake(text: str, med_names: list[str]) -> bool:
+    normalized_text = " ".join(text.lower().split())
+    alnum_text = _normalize_alnum(text)
+    if any(name.lower() in normalized_text or _normalize_alnum(name) in alnum_text for name in med_names):
+        return True
+    return any(
+        phrase in normalized_text
+        for phrase in (
+            "medication",
+            "medications",
+            "med",
+            "meds",
+            "blood pressure",
+            "bp meds",
+            "bp medications",
+        )
+    )
+
+
+def _looks_like_supplement_intake(text: str, supp_names: list[str]) -> bool:
+    normalized_text = " ".join(text.lower().split())
+    alnum_text = _normalize_alnum(text)
+    if any(name.lower() in normalized_text or _normalize_alnum(name) in alnum_text for name in supp_names):
+        return True
+    return any(phrase in normalized_text for phrase in SUPPLEMENT_INTAKE_PHRASES)
 
 
 def _parse_plain_list(raw: str | None) -> list[str]:
@@ -363,6 +444,31 @@ def _format_web_search_context(results: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _execute_web_search_in_worker(
+    user_id: int,
+    specialist_id: str,
+    query: str,
+    max_results: int,
+) -> dict[str, Any]:
+    worker_db = SessionLocal()
+    try:
+        worker_user = worker_db.get(User, user_id)
+        if not worker_user:
+            raise RuntimeError("User not found for web search execution")
+        out = tool_registry.execute(
+            "web_search",
+            {
+                "query": query,
+                "max_results": max_results,
+            },
+            ToolContext(db=worker_db, user=worker_user, specialist_id=specialist_id),
+        )
+        worker_db.commit()
+        return out if isinstance(out, dict) else {}
+    finally:
+        worker_db.close()
+
+
 def _should_include_time_context(message_text: str) -> bool:
     text = message_text.lower()
     return any(re.search(pattern, text) for pattern in TIME_QUERY_PATTERNS)
@@ -445,7 +551,11 @@ def _normalize_whitespace(text: str) -> str:
 
 
 def _extract_clock_time_token(text: str) -> str | None:
-    match = re.search(r"\b(\d{1,2}:\d{2}\s?(?:am|pm)?)\b", text, flags=re.IGNORECASE)
+    match = re.search(
+        r"\b((?:\d{1,2}:\d{2}\s?(?:am|pm)?)|(?:\d{1,2}\s?(?:am|pm)))\b",
+        text,
+        flags=re.IGNORECASE,
+    )
     if not match:
         return None
     return match.group(1).strip()
@@ -537,6 +647,315 @@ def _build_time_inference_context(payload: dict[str, Any] | None) -> str:
         "- In your reply, include one short confirmation question about the logged time/date.\n"
         "- Keep the log as recorded unless the user corrects it."
     )
+
+
+def _parse_notification_payload(raw: str | None) -> dict[str, Any]:
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _clean_confirmation_text(text: str) -> str:
+    cleaned = re.sub(r"[^a-z0-9:\s]", " ", (text or "").lower())
+    return " ".join(cleaned.split())
+
+
+def _is_confirmation_ack(message_text: str) -> bool:
+    cleaned = _clean_confirmation_text(message_text)
+    if not cleaned:
+        return False
+    if cleaned in TIME_CONFIRM_ACK_TERMS:
+        return True
+    return any(cleaned.startswith(f"{term} ") for term in TIME_CONFIRM_ACK_TERMS)
+
+
+def _is_confirmation_reject(message_text: str) -> bool:
+    cleaned = _clean_confirmation_text(message_text)
+    if not cleaned:
+        return False
+    if cleaned in TIME_CONFIRM_REJECT_TERMS:
+        return True
+    return any(cleaned.startswith(f"{term} ") for term in TIME_CONFIRM_REJECT_TERMS)
+
+
+def _has_explicit_date_token(message_text: str) -> bool:
+    return bool(
+        re.search(r"\b\d{4}-\d{2}-\d{2}\b", message_text)
+        or re.search(r"\b\d{1,2}/\d{1,2}(?:/\d{2,4})?\b", message_text)
+        or re.search(
+            r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\s+\d{1,2}(?:,\s*\d{4})?\b",
+            message_text,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def _should_consume_time_confirmation_message(message_text: str) -> bool:
+    normalized = _normalize_whitespace(message_text)
+    if not normalized:
+        return False
+    if " and " in normalized or "," in normalized or ";" in normalized:
+        return False
+    return len(normalized.split()) <= 12
+
+
+def _resolve_time_confirmation_target(
+    category: str,
+    payload: dict[str, Any] | None,
+    saved_out: dict[str, Any] | None,
+) -> tuple[int, str, str] | None:
+    if not isinstance(payload, dict) or not isinstance(saved_out, dict):
+        return None
+
+    base = {
+        "log_food": ("food_log_id", "logged_at"),
+        "log_vitals": ("vitals_log_id", "logged_at"),
+        "log_exercise": ("exercise_log_id", "logged_at"),
+        "log_hydration": ("hydration_log_id", "logged_at"),
+        "log_supplement": ("supplement_log_id", "logged_at"),
+    }
+
+    if category in base:
+        id_key, field = base[category]
+    elif category == "log_fasting":
+        action = str(payload.get("action", "")).strip().lower()
+        id_key = "fasting_log_id"
+        field = "fast_end" if action == "end" else "fast_start"
+    elif category == "log_sleep":
+        action = str(payload.get("action", "")).strip().lower()
+        id_key = "sleep_log_id"
+        field = "sleep_end" if action == "end" else "sleep_start"
+    else:
+        return None
+
+    try:
+        row_id = int(saved_out.get(id_key))
+    except (TypeError, ValueError):
+        return None
+
+    recorded_time = payload.get(field) or payload.get("logged_at") or payload.get("event_time")
+    recorded_iso = str(recorded_time or "").strip()
+    if not recorded_iso:
+        return None
+    return row_id, field, recorded_iso
+
+
+def _persist_low_confidence_time_confirmation(
+    db: Session,
+    user: User,
+    category: str,
+    parsed_payload: dict[str, Any] | None,
+    saved_out: dict[str, Any] | None,
+) -> Notification | None:
+    if not isinstance(parsed_payload, dict):
+        return None
+    if str(parsed_payload.get("_inferred_time_confidence", "")).strip().lower() != "low":
+        return None
+
+    target = _resolve_time_confirmation_target(category, parsed_payload, saved_out)
+    if not target:
+        return None
+    row_id, field, recorded_iso = target
+    reason = str(parsed_payload.get("_inferred_time_reason", "")).strip() or "unknown"
+
+    existing_rows = (
+        db.query(Notification)
+        .filter(
+            Notification.user_id == user.id,
+            Notification.category == "system",
+            Notification.is_read.is_(False),
+        )
+        .order_by(Notification.created_at.desc())
+        .limit(25)
+        .all()
+    )
+    for row in existing_rows:
+        payload = _parse_notification_payload(row.payload)
+        try:
+            payload_record_id = int(payload.get("record_id", -1))
+        except (TypeError, ValueError):
+            payload_record_id = -1
+        if (
+            payload.get("kind") == TIME_CONFIRMATION_KIND
+            and str(payload.get("category")) == category
+            and payload_record_id == row_id
+            and str(payload.get("field")) == field
+        ):
+            payload.update(
+                {
+                    "status": "pending",
+                    "inferred_iso": recorded_iso,
+                    "reason": reason,
+                    "confidence": "low",
+                }
+            )
+            row.payload = json.dumps(payload, ensure_ascii=True)
+            row.title = "Confirm logged time"
+            row.message = "I inferred this event time with low confidence. Please confirm or provide a corrected time."
+            return row
+
+    payload = {
+        "kind": TIME_CONFIRMATION_KIND,
+        "status": "pending",
+        "category": category,
+        "record_id": row_id,
+        "field": field,
+        "inferred_iso": recorded_iso,
+        "reason": reason,
+        "confidence": "low",
+    }
+    notification = Notification(
+        user_id=user.id,
+        category="system",
+        title="Confirm logged time",
+        message="I inferred this event time with low confidence. Please confirm or provide a corrected time.",
+        payload=json.dumps(payload, ensure_ascii=True),
+        is_read=False,
+    )
+    db.add(notification)
+    return notification
+
+
+def _latest_pending_time_confirmation(db: Session, user: User) -> tuple[Notification | None, dict[str, Any] | None]:
+    rows = (
+        db.query(Notification)
+        .filter(
+            Notification.user_id == user.id,
+            Notification.category == "system",
+            Notification.is_read.is_(False),
+        )
+        .order_by(Notification.created_at.desc())
+        .limit(50)
+        .all()
+    )
+    for row in rows:
+        payload = _parse_notification_payload(row.payload)
+        if payload.get("kind") == TIME_CONFIRMATION_KIND and str(payload.get("status", "pending")) == "pending":
+            return row, payload
+    return None, None
+
+
+def _apply_time_correction_to_row(
+    db: Session,
+    user: User,
+    payload: dict[str, Any],
+    corrected_utc: datetime,
+) -> bool:
+    category = str(payload.get("category", "")).strip().lower()
+    field = str(payload.get("field", "")).strip()
+    try:
+        row_id = int(payload.get("record_id"))
+    except (TypeError, ValueError):
+        return False
+
+    model_map: dict[str, type] = {
+        "log_food": FoodLog,
+        "log_vitals": VitalsLog,
+        "log_exercise": ExerciseLog,
+        "log_hydration": HydrationLog,
+        "log_supplement": SupplementLog,
+        "log_fasting": FastingLog,
+        "log_sleep": SleepLog,
+    }
+    model = model_map.get(category)
+    if model is None:
+        return False
+
+    row = db.get(model, row_id)
+    if row is None or int(getattr(row, "user_id", -1)) != int(user.id):
+        return False
+    if not hasattr(row, field):
+        return False
+
+    setattr(row, field, corrected_utc)
+
+    if isinstance(row, SleepLog) and row.sleep_start and row.sleep_end:
+        minutes = int((row.sleep_end - row.sleep_start).total_seconds() // 60)
+        row.duration_minutes = max(0, minutes)
+    if isinstance(row, FastingLog) and row.fast_start and row.fast_end:
+        minutes = int((row.fast_end - row.fast_start).total_seconds() // 60)
+        row.duration_minutes = max(0, minutes)
+    return True
+
+
+def _build_pending_time_confirmation_context(payload: dict[str, Any]) -> str:
+    category = str(payload.get("category", "event")).replace("log_", "").replace("_", " ")
+    field = str(payload.get("field", "time")).replace("_", " ")
+    inferred_iso = str(payload.get("inferred_iso", "")).strip() or "unknown"
+    reason = str(payload.get("reason", "")).strip() or "unknown"
+    return (
+        "## Pending Time Confirmation\n"
+        "There is an unresolved low-confidence event time.\n"
+        f"- Event type: {category}\n"
+        f"- Field: {field}\n"
+        f"- Currently recorded: {inferred_iso}\n"
+        f"- Inference reason: {reason}\n"
+        "- Ask the user to confirm this time or provide a corrected date/time in this reply.\n"
+        "- Do not describe this timestamp as final until confirmed."
+    )
+
+
+def _handle_pending_time_confirmation(
+    db: Session,
+    user: User,
+    message_text: str,
+    reference_utc: datetime,
+    timezone_name: str | None,
+) -> dict[str, Any]:
+    note, payload = _latest_pending_time_confirmation(db, user)
+    if note is None or payload is None:
+        return {"context": "", "skip_log_parse": False}
+
+    if _is_confirmation_ack(message_text):
+        payload["status"] = "confirmed"
+        payload["confirmed_at"] = reference_utc.isoformat()
+        note.payload = json.dumps(payload, ensure_ascii=True)
+        note.is_read = True
+        note.read_at = reference_utc
+        db.commit()
+        return {
+            "context": "## Time Confirmation\nThe user has confirmed a previously inferred event time. Acknowledge confirmation briefly.",
+            "skip_log_parse": _should_consume_time_confirmation_message(message_text),
+        }
+
+    if _extract_clock_time_token(message_text) or _has_explicit_date_token(message_text):
+        corrected = infer_event_datetime(message_text, reference_utc, timezone_name)
+        if _apply_time_correction_to_row(db, user, payload, corrected.event_utc):
+            payload["status"] = "corrected"
+            payload["corrected_iso"] = corrected.event_utc.isoformat()
+            payload["corrected_at"] = reference_utc.isoformat()
+            note.payload = json.dumps(payload, ensure_ascii=True)
+            note.is_read = True
+            note.read_at = reference_utc
+            db.commit()
+            return {
+                "context": (
+                    "## Time Correction Applied\n"
+                    f"User corrected the prior event time. Updated value: {corrected.event_utc.isoformat()}.\n"
+                    "Acknowledge the correction and continue."
+                ),
+                "skip_log_parse": _should_consume_time_confirmation_message(message_text),
+            }
+
+    if _is_confirmation_reject(message_text):
+        return {
+            "context": (
+                "## Pending Time Confirmation\n"
+                "User rejected a previously inferred event time.\n"
+                "- Ask for the exact date/time now.\n"
+                "- Keep the current value as provisional until corrected."
+            ),
+            "skip_log_parse": False,
+        }
+
+    return {
+        "context": _build_pending_time_confirmation_context(payload),
+        "skip_log_parse": False,
+    }
 
 
 def _last_assistant_message(db: Session, user: User) -> Message | None:
@@ -854,6 +1273,36 @@ def _format_menu_context(menu_action: dict[str, Any] | None, followup_hint: dict
     return "\n".join(lines).strip()
 
 
+def _build_log_write_context(
+    category: str,
+    parsed_log: dict[str, Any] | None,
+    saved_out: dict[str, Any] | None,
+    write_error: str | None,
+) -> str:
+    if not category.startswith("log_"):
+        return ""
+    if isinstance(saved_out, dict):
+        return (
+            "## Write Status\n"
+            "- Structured log write: success\n"
+            "- You may confirm this event as saved."
+        )
+    if isinstance(parsed_log, dict):
+        reason = (write_error or "unknown").strip() or "unknown"
+        return (
+            "## Write Status\n"
+            "- Structured log write: failed\n"
+            f"- Failure reason: {reason}\n"
+            "- Do not claim this event was saved.\n"
+            "- Tell the user save failed and ask them to retry."
+        )
+    return (
+        "## Write Status\n"
+        "- No structured payload could be extracted for this logging intent.\n"
+        "- Do not claim this event was saved."
+    )
+
+
 def _followup_line_from_hint(followup_hint: dict[str, Any] | None) -> str:
     if not followup_hint:
         return ""
@@ -1100,6 +1549,7 @@ async def _log_agent_feedback_if_needed(
             db.add(row)
 
     except Exception as e:
+        record_ai_failure("utility", "feedback_extract", str(e))
         logger.warning(f"Agent feedback extraction failed: {e}")
 
 
@@ -1124,8 +1574,14 @@ async def _mark_checklist_completed_for_meds(
         return
 
     med_items = parse_structured_list(settings.medications)
-    med_names = [item.get("name", "") for item in med_items if item.get("name")]
+    med_names = [
+        item.get("name", "")
+        for item in med_items
+        if item.get("name") and not _is_generic_medication_phrase(item.get("name", ""))
+    ]
     if not med_names:
+        return
+    if not _looks_like_medication_intake(combined_input, med_names):
         return
 
     def _contains_bp_keyword(med_name: str) -> bool:
@@ -1190,6 +1646,7 @@ async def _mark_checklist_completed_for_meds(
                     if key in allowed and allowed[key] not in targets:
                         targets.append(allowed[key])
         except Exception as e:
+            record_ai_failure("utility", "medication_match", str(e))
             logger.warning(f"AI med matching failed, falling back to heuristic: {e}")
 
     if not targets:
@@ -1243,8 +1700,14 @@ async def _mark_checklist_completed_for_supplements(
         return
 
     supp_items = parse_structured_list(settings.supplements)
-    supp_names = [item.get("name", "").strip() for item in supp_items if item.get("name")]
+    supp_names = [
+        item.get("name", "").strip()
+        for item in supp_items
+        if item.get("name") and not _is_generic_supplement_phrase(item.get("name", ""))
+    ]
     if not supp_names:
+        return
+    if not _looks_like_supplement_intake(combined_input, supp_names):
         return
 
     targets: list[str] = []
@@ -1311,6 +1774,7 @@ async def _mark_checklist_completed_for_supplements(
                     if key in allowed and allowed[key] not in targets:
                         targets.append(allowed[key])
         except Exception as e:
+            record_ai_failure("utility", "supplement_match", str(e))
             logger.warning(f"AI supplement matching failed, falling back to heuristics: {e}")
 
     # 4) Last-resort fallback for explicit group phrases
@@ -1398,6 +1862,19 @@ async def _apply_profile_updates(
     if not settings:
         return
 
+    # Opportunistic cleanup of legacy generic placeholders ("morning meds", "my vitamins").
+    existing_meds = parse_structured_list(settings.medications)
+    cleaned_meds = [m for m in existing_meds if not _is_generic_medication_phrase(m.get("name", ""))]
+    meds_json = cleanup_structured_list(json.dumps(cleaned_meds, ensure_ascii=True)) if cleaned_meds else None
+    if meds_json != settings.medications:
+        settings.medications = meds_json
+
+    existing_supps = parse_structured_list(settings.supplements)
+    cleaned_supps = [s for s in existing_supps if not _is_generic_supplement_phrase(s.get("name", ""))]
+    supps_json = cleanup_structured_list(json.dumps(cleaned_supps, ensure_ascii=True)) if cleaned_supps else None
+    if supps_json != settings.supplements:
+        settings.supplements = supps_json
+
     try:
         result = await provider.chat(
             messages=[{"role": "user", "content": f"{PROFILE_EXTRACT_PROMPT}\n\nMessage: {combined_input}"}],
@@ -1434,8 +1911,9 @@ async def _apply_profile_updates(
         goals = [str(x).strip() for x in extracted.get("health_goals", []) if str(x).strip()]
         family = [str(x).strip() for x in extracted.get("family_history", []) if str(x).strip()]
 
-        # Drop generic placeholders like "blood pressure meds"
+        # Drop generic placeholders like "blood pressure meds" / "morning meds"
         med_items = [m for m in med_items if not _is_generic_medication_phrase(m.get("name", ""))]
+        supp_items = [s for s in supp_items if not _is_generic_supplement_phrase(s.get("name", ""))]
 
         # Move likely-Rx items from supplements to medications
         moved_to_meds: list[StructuredItem] = []
@@ -1462,17 +1940,12 @@ async def _apply_profile_updates(
 
         if not med_items and not supp_items and not conditions and not dietary and not goals and not family:
             # Even when extractor returns nothing new, run cleanup on existing data
-            cleaned = cleanup_structured_list(settings.supplements)
-            if cleaned != settings.supplements:
-                settings.supplements = cleaned
-            await _mark_checklist_completed_for_meds(db, provider, user, combined_input, reference_utc=reference_utc)
-            await _mark_checklist_completed_for_supplements(
-                db,
-                provider,
-                user,
-                combined_input,
-                reference_utc=reference_utc,
-            )
+            cleaned_supp = cleanup_structured_list(settings.supplements)
+            if cleaned_supp != settings.supplements:
+                settings.supplements = cleaned_supp
+            cleaned_med = cleanup_structured_list(settings.medications)
+            if cleaned_med != settings.medications:
+                settings.medications = cleaned_med
             return
 
         tool_ctx = ToolContext(db=db, user=user, specialist_id="orchestrator", reference_utc=reference_utc)
@@ -1512,32 +1985,9 @@ async def _apply_profile_updates(
                 tool_registry.execute("framework_sync_from_profile", {}, tool_ctx)
             except Exception as e:
                 logger.warning(f"Framework sync tool failed: {e}")
-
-        await _mark_checklist_completed_for_meds(db, provider, user, combined_input, reference_utc=reference_utc)
-        await _mark_checklist_completed_for_supplements(
-            db,
-            provider,
-            user,
-            combined_input,
-            reference_utc=reference_utc,
-        )
     except Exception as e:
+        record_ai_failure("utility", "profile_extract", str(e))
         logger.warning(f"Profile auto-sync extraction failed: {e}")
-        # Even if profile extraction fails, still try checklist updates from intent text.
-        try:
-            await _mark_checklist_completed_for_meds(db, provider, user, combined_input, reference_utc=reference_utc)
-        except Exception as med_err:
-            logger.warning(f"Checklist medication fallback failed: {med_err}")
-        try:
-            await _mark_checklist_completed_for_supplements(
-                db,
-                provider,
-                user,
-                combined_input,
-                reference_utc=reference_utc,
-            )
-        except Exception as supp_err:
-            logger.warning(f"Checklist supplement fallback failed: {supp_err}")
 
 
 async def save_structured_log(
@@ -1673,6 +2123,8 @@ async def process_chat(
 
     api_key = decrypt_api_key(user_settings.api_key_encrypted)
     message_received_utc = datetime.now(timezone.utc)
+    turn_started_perf = time.perf_counter()
+    start_ai_turn_scope(user_id=user.id, specialist_id="orchestrator", intent_category="general_chat")
     provider = get_provider(
         user_settings.ai_provider,
         api_key,
@@ -1689,6 +2141,13 @@ async def process_chat(
             image_context = f"\n[Image analysis: {analysis['content']}]"
 
     combined_input = message + image_context
+    time_confirmation_gate = _handle_pending_time_confirmation(
+        db=db,
+        user=user,
+        message_text=message,
+        reference_utc=message_received_utc,
+        timezone_name=getattr(user_settings, "timezone", None),
+    )
 
     # 2. Classify intent
     overrides = parse_overrides(user.specialist_config)
@@ -1707,6 +2166,7 @@ async def process_chat(
     )
     category = intent["category"]
     specialist = intent["specialist"]
+    update_ai_turn_scope(specialist_id=specialist, intent_category=category)
     specialist_name = _resolve_specialist_name(overrides, specialist)
 
     # 2b. Auto-log global feedback from user bug/enhancement messages under specialist.
@@ -1757,7 +2217,8 @@ async def process_chat(
     # 3. Parse and save structured data if it's a logging intent
     parsed_log_data: dict[str, Any] | None = None
     saved_log_out: dict[str, Any] | None = None
-    if category.startswith("log_") and not menu_command_only:
+    log_write_error: str | None = None
+    if category.startswith("log_") and not menu_command_only and not bool(time_confirmation_gate.get("skip_log_parse")):
         user_profile = ""
         if user_settings.current_weight_kg:
             if user_settings.weight_unit == "lb":
@@ -1790,9 +2251,19 @@ async def process_chat(
                     parsed_log_data,
                     reference_utc=message_received_utc,
                 )
+                _persist_low_confidence_time_confirmation(
+                    db=db,
+                    user=user,
+                    category=category,
+                    parsed_payload=parsed_log_data,
+                    saved_out=saved_log_out,
+                )
+                db.commit()
             except ToolExecutionError as e:
+                log_write_error = str(e)
                 logger.warning(f"Structured log tool write failed ({category}): {e}")
             except Exception as e:
+                log_write_error = str(e)
                 logger.warning(f"Structured log save failed ({category}): {e}")
 
     # 3a. Chat-driven menu actions (save/update meal templates).
@@ -1841,13 +2312,12 @@ async def process_chat(
     web_results: list[dict] = []
     if _should_use_web_search(message, category, specialist):
         try:
-            search_out = tool_registry.execute(
-                "web_search",
-                {
-                    "query": message,
-                    "max_results": settings.WEB_SEARCH_MAX_RESULTS,
-                },
-                ToolContext(db=db, user=user, specialist_id=specialist),
+            search_out = await asyncio.to_thread(
+                _execute_web_search_in_worker,
+                user.id,
+                specialist,
+                message,
+                settings.WEB_SEARCH_MAX_RESULTS,
             )
             web_results = search_out.get("results", []) if isinstance(search_out, dict) else []
         except Exception as e:
@@ -1867,8 +2337,15 @@ async def process_chat(
             logger.warning(f"time_now tool failed: {e}")
 
     menu_context = _format_menu_context(menu_action_result, menu_followup_hint)
+    log_write_context = _build_log_write_context(
+        category=category,
+        parsed_log=parsed_log_data,
+        saved_out=saved_log_out,
+        write_error=log_write_error,
+    )
     verbosity_context = _verbosity_style_context(_normalize_chat_verbosity(verbosity))
     time_inference_context = _build_time_inference_context(parsed_log_data)
+    pending_time_confirmation_context = str(time_confirmation_gate.get("context", "") or "")
 
     # 3e. Trigger due longitudinal analysis windows in background to keep chat latency low.
     if settings.ENABLE_LONGITUDINAL_ANALYSIS and settings.ANALYSIS_AUTORUN_ON_CHAT:
@@ -1878,15 +2355,19 @@ async def process_chat(
             logger.warning(f"Due longitudinal analysis dispatch failed: {e}")
 
     # 4. Build context
-    system_context = build_context(db, user, specialist)
+    system_context = build_context(db, user, specialist, intent_category=category)
     if web_results:
         system_context = f"{system_context}\n\n{_format_web_search_context(web_results)}"
     if time_context:
         system_context = f"{system_context}\n\n{time_context}"
     if menu_context:
         system_context = f"{system_context}\n\n{menu_context}"
+    if log_write_context:
+        system_context = f"{system_context}\n\n{log_write_context}"
     if time_inference_context:
         system_context = f"{system_context}\n\n{time_inference_context}"
+    if pending_time_confirmation_context:
+        system_context = f"{system_context}\n\n{pending_time_confirmation_context}"
     if verbosity_context:
         system_context = f"{system_context}\n\n{verbosity_context}"
 
@@ -1920,6 +2401,7 @@ async def process_chat(
     full_response = ""
     tokens_in = 0
     tokens_out = 0
+    first_token_recorded = False
 
     try:
         stream = await provider.chat(
@@ -1939,10 +2421,23 @@ async def process_chat(
             if chunk.get("type") == "chunk":
                 text = chunk.get("text", "")
                 full_response += text
+                if text and not first_token_recorded:
+                    mark_ai_first_token((time.perf_counter() - turn_started_perf) * 1000.0)
+                    first_token_recorded = True
                 yield {"type": "chunk", "text": text}
             elif chunk.get("type") == "done":
                 tokens_in = chunk.get("tokens_in", 0)
                 tokens_out = chunk.get("tokens_out", 0)
+
+        track_model_usage(
+            db=db,
+            user_id=user.id,
+            model_used=provider.get_reasoning_model(),
+            operation="chat_generate",
+            usage_type="reasoning",
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+        )
 
         followup_line = _followup_line_from_hint(menu_followup_hint)
         if followup_line and not _response_already_has_followup(full_response, menu_followup_hint):
@@ -1954,6 +2449,7 @@ async def process_chat(
 
     except Exception as e:
         logger.error(f"AI generation failed: {e}")
+        record_ai_failure("reasoning", "chat_generate", str(e))
         error_msg = f"I encountered an error: {str(e)}. Please try again."
         full_response = error_msg
         yield {"type": "error", "text": error_msg}
@@ -1970,3 +2466,33 @@ async def process_chat(
     )
     db.add(assistant_msg)
     db.commit()
+
+    total_turn_latency_ms = (time.perf_counter() - turn_started_perf) * 1000.0
+    turn_scope = consume_ai_turn_scope()
+    if turn_scope:
+        try:
+            persist_ai_turn_event(
+                {
+                    "user_id": turn_scope.user_id,
+                    "message_id": assistant_msg.id,
+                    "specialist_id": turn_scope.specialist_id,
+                    "intent_category": turn_scope.intent_category,
+                    "first_token_latency_ms": turn_scope.first_token_latency_ms,
+                    "total_latency_ms": total_turn_latency_ms,
+                    "utility_calls": turn_scope.utility_calls,
+                    "reasoning_calls": turn_scope.reasoning_calls,
+                    "deep_calls": turn_scope.deep_calls,
+                    "utility_tokens_in": turn_scope.utility_tokens_in,
+                    "utility_tokens_out": turn_scope.utility_tokens_out,
+                    "reasoning_tokens_in": turn_scope.reasoning_tokens_in,
+                    "reasoning_tokens_out": turn_scope.reasoning_tokens_out,
+                    "deep_tokens_in": turn_scope.deep_tokens_in,
+                    "deep_tokens_out": turn_scope.deep_tokens_out,
+                    "failure_count": turn_scope.failure_count,
+                    "failures_json": json.dumps(turn_scope.failures, ensure_ascii=True),
+                }
+            )
+        except Exception as e:
+            logger.warning(f"AI turn telemetry persistence failed: {e}")
+    else:
+        clear_ai_turn_scope()

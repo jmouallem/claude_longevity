@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 import bcrypt
 import jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
@@ -25,8 +25,17 @@ def verify_password(password: str, hashed: str) -> bool:
     return bcrypt.checkpw(password.encode(), hashed.encode())
 
 
-def create_token(user_id: int, role: str = "user", token_version: int = 0) -> str:
-    expiry_hours = settings.ADMIN_JWT_EXPIRY_HOURS if role == "admin" else settings.JWT_EXPIRY_HOURS
+def create_token(
+    user_id: int,
+    role: str = "user",
+    token_version: int = 0,
+    expiry_hours_override: int | None = None,
+) -> str:
+    expiry_hours = (
+        int(expiry_hours_override)
+        if expiry_hours_override is not None
+        else (settings.ADMIN_JWT_EXPIRY_HOURS if role == "admin" else settings.JWT_EXPIRY_HOURS)
+    )
     payload = {
         "sub": str(user_id),
         "role": role,
@@ -47,6 +56,7 @@ def decode_token(token: str) -> dict:
 
 
 def get_current_user(
+    request: Request,
     credentials: HTTPAuthorizationCredentials = Depends(security),
     db: Session = Depends(get_db),
 ) -> User:
@@ -58,6 +68,7 @@ def get_current_user(
     token_version = int(token_payload.get("tv", 0))
     if token_version != int(user.token_version or 0):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session invalidated. Please sign in again.")
+    request.state.user_id = user.id
     return user
 
 

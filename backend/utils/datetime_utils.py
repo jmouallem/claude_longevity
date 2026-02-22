@@ -1,6 +1,8 @@
 from datetime import datetime, date, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+from sqlalchemy import and_, or_
+
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -57,3 +59,41 @@ def fasting_duration_minutes(start: datetime, end: datetime | None = None) -> in
         end = utcnow()
     delta = end - start
     return int(delta.total_seconds() / 60)
+
+
+def sleep_log_overlaps_window(model, start_dt: datetime, end_dt: datetime):
+    """
+    SQLAlchemy filter expression for sleep events that overlap a UTC window.
+
+    Canonical precedence:
+    1. If both start/end exist, include any overlap with window.
+    2. If only start exists, include when start is inside window.
+    3. If only end exists, include when end is inside window.
+    4. Fallback to created_at for legacy rows with no start/end.
+    """
+    return or_(
+        and_(
+            model.sleep_start.isnot(None),
+            model.sleep_end.isnot(None),
+            model.sleep_start <= end_dt,
+            model.sleep_end >= start_dt,
+        ),
+        and_(
+            model.sleep_start.isnot(None),
+            model.sleep_end.is_(None),
+            model.sleep_start >= start_dt,
+            model.sleep_start <= end_dt,
+        ),
+        and_(
+            model.sleep_start.is_(None),
+            model.sleep_end.isnot(None),
+            model.sleep_end >= start_dt,
+            model.sleep_end <= end_dt,
+        ),
+        and_(
+            model.sleep_start.is_(None),
+            model.sleep_end.is_(None),
+            model.created_at >= start_dt,
+            model.created_at <= end_dt,
+        ),
+    )

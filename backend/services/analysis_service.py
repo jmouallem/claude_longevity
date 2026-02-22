@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import logging
 import calendar
+import re
+from difflib import SequenceMatcher
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from statistics import mean
@@ -10,6 +12,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 
 from ai.context_builder import format_user_profile
 from ai.providers import get_provider
@@ -31,7 +34,7 @@ from db.models import (
     VitalsLog,
 )
 from services.health_framework_service import active_frameworks_for_context, update_framework, upsert_framework
-from utils.datetime_utils import end_of_day, start_of_day, today_for_tz
+from utils.datetime_utils import end_of_day, start_of_day, today_for_tz, sleep_log_overlaps_window
 from utils.encryption import decrypt_api_key
 from utils.med_utils import parse_structured_list
 
@@ -40,6 +43,26 @@ logger = logging.getLogger(__name__)
 VALID_RUN_TYPES = {"daily", "weekly", "monthly"}
 PROPOSAL_KINDS = {"guidance_update", "prompt_adjustment", "experiment"}
 PROPOSAL_STATUSES = {"pending", "approved", "rejected", "applied", "expired"}
+PROPOSAL_TITLE_STOPWORDS = {
+    "and",
+    "for",
+    "the",
+    "with",
+    "from",
+    "into",
+    "your",
+    "this",
+    "that",
+    "user",
+    "daily",
+    "today",
+    "toward",
+    "towards",
+    "improve",
+    "improvement",
+    "enhance",
+    "enhancement",
+}
 
 UTILITY_SIGNAL_PROMPT = """Extract short longitudinal signal annotations from these notes.
 Return JSON only:
@@ -270,8 +293,7 @@ def _collect_period_metrics(
     ).all()
     sleep = db.query(SleepLog).filter(
         SleepLog.user_id == user.id,
-        SleepLog.created_at >= start_dt,
-        SleepLog.created_at <= end_dt,
+        sleep_log_overlaps_window(SleepLog, start_dt, end_dt),
     ).all()
     supp_logs = db.query(SupplementLog).filter(
         SupplementLog.user_id == user.id,
@@ -425,7 +447,10 @@ def _collect_notes_for_signals(db: Session, user: User, window: AnalysisWindow, 
     for row in db.query(ExerciseLog).filter(ExerciseLog.user_id == user.id, ExerciseLog.logged_at >= start_dt, ExerciseLog.logged_at <= end_dt).all():
         if row.notes:
             notes.append(f"Exercise note: {row.notes.strip()}")
-    for row in db.query(SleepLog).filter(SleepLog.user_id == user.id, SleepLog.created_at >= start_dt, SleepLog.created_at <= end_dt).all():
+    for row in db.query(SleepLog).filter(
+        SleepLog.user_id == user.id,
+        sleep_log_overlaps_window(SleepLog, start_dt, end_dt),
+    ).all():
         if row.notes:
             notes.append(f"Sleep note: {row.notes.strip()}")
     for row in db.query(FastingLog).filter(FastingLog.user_id == user.id, FastingLog.fast_start >= start_dt, FastingLog.fast_start <= end_dt).all():
@@ -520,6 +545,108 @@ def _normalize_proposal_payload(payload: Any) -> dict[str, Any]:
     return {"raw": str(payload)}
 
 
+def _normalize_title_tokens(title: str) -> list[str]:
+    raw = re.findall(r"[a-z0-9]+", (title or "").lower())
+    return [t for t in raw if len(t) >= 3 and t not in PROPOSAL_TITLE_STOPWORDS]
+
+
+def _proposal_title_similarity(a: str, b: str) -> float:
+    a_tokens = _normalize_title_tokens(a)
+    b_tokens = _normalize_title_tokens(b)
+    if not a_tokens or not b_tokens:
+        return 0.0
+    a_norm = " ".join(a_tokens)
+    b_norm = " ".join(b_tokens)
+    return SequenceMatcher(None, a_norm, b_norm).ratio()
+
+
+def _proposal_target(payload: dict[str, Any]) -> str:
+    return str(payload.get("target", "")).strip().lower()
+
+
+def _proposals_are_similar(left: AnalysisProposal, right: AnalysisProposal) -> bool:
+    if left.proposal_kind != right.proposal_kind:
+        return False
+    l_payload = _safe_json_loads(left.proposal_json or "{}", fallback={})
+    r_payload = _safe_json_loads(right.proposal_json or "{}", fallback={})
+    l_target = _proposal_target(l_payload if isinstance(l_payload, dict) else {})
+    r_target = _proposal_target(r_payload if isinstance(r_payload, dict) else {})
+    if l_target and r_target and l_target != r_target:
+        return False
+    return _proposal_title_similarity(left.title or "", right.title or "") >= 0.82
+
+
+def _merge_proposals_into_survivor(survivor: AnalysisProposal, duplicate: AnalysisProposal) -> None:
+    survivor_payload = _safe_json_loads(survivor.proposal_json or "{}", fallback={})
+    if not isinstance(survivor_payload, dict):
+        survivor_payload = {}
+
+    merged = survivor_payload.get("_merged_proposals")
+    if not isinstance(merged, list):
+        merged = []
+    merged.append(
+        {
+            "proposal_id": duplicate.id,
+            "analysis_run_id": duplicate.analysis_run_id,
+            "title": duplicate.title,
+            "confidence": duplicate.confidence,
+            "created_at": duplicate.created_at.isoformat() if duplicate.created_at else None,
+        }
+    )
+    # Keep a compact, stable dedupe trace.
+    merged = merged[-40:]
+    survivor_payload["_merged_proposals"] = merged
+    survivor_payload["_merge_count"] = int(survivor_payload.get("_merge_count", 0) or 0) + 1
+    survivor_payload["_merged_run_ids"] = sorted(
+        {
+            int(survivor.analysis_run_id),
+            *[int(item.get("analysis_run_id")) for item in merged if item.get("analysis_run_id") is not None],
+        }
+    )
+    survivor.proposal_json = _json_dump(survivor_payload)
+
+    if duplicate.confidence is not None:
+        if survivor.confidence is None:
+            survivor.confidence = duplicate.confidence
+        else:
+            survivor.confidence = max(float(survivor.confidence), float(duplicate.confidence))
+
+    dup_rationale = (duplicate.rationale or "").strip()
+    if dup_rationale and dup_rationale not in (survivor.rationale or ""):
+        survivor.rationale = f"{(survivor.rationale or '').strip()} | {dup_rationale}".strip(" |")
+
+    if not survivor.diff_markdown and duplicate.diff_markdown:
+        survivor.diff_markdown = duplicate.diff_markdown
+
+
+def combine_similar_pending_proposals(
+    db: Session,
+    user_id: int,
+) -> dict[str, int]:
+    rows = (
+        db.query(AnalysisProposal)
+        .filter(
+            AnalysisProposal.user_id == user_id,
+            AnalysisProposal.status == "pending",
+        )
+        .order_by(AnalysisProposal.created_at.desc(), AnalysisProposal.id.desc())
+        .all()
+    )
+    survivors: list[AnalysisProposal] = []
+    merged = 0
+
+    for row in rows:
+        match = next((candidate for candidate in survivors if _proposals_are_similar(candidate, row)), None)
+        if not match:
+            survivors.append(row)
+            continue
+        _merge_proposals_into_survivor(match, row)
+        db.delete(row)
+        merged += 1
+
+    return {"merged": merged, "remaining": len(survivors)}
+
+
 def _prepare_proposal_rows(
     run: AnalysisRun,
     raw_proposals: list[dict[str, Any]],
@@ -571,34 +698,85 @@ async def run_longitudinal_analysis(
     tz_name = _timezone_for_user(user)
     target_day = target_date or today_for_tz(tz_name)
     window = _window_for(run_type, target_day)
+    existing = (
+        db.query(AnalysisRun)
+        .filter(
+            AnalysisRun.user_id == user.id,
+            AnalysisRun.run_type == run_type,
+            AnalysisRun.period_start == window.period_start.isoformat(),
+            AnalysisRun.period_end == window.period_end.isoformat(),
+        )
+        .order_by(AnalysisRun.created_at.desc(), AnalysisRun.id.desc())
+        .first()
+    )
 
-    if not force:
-        existing = (
+    run: AnalysisRun
+    if existing:
+        if not force and existing.status in {"running", "completed"}:
+            return existing
+        db.query(AnalysisProposal).filter(AnalysisProposal.analysis_run_id == existing.id).delete(synchronize_session=False)
+        existing.status = "running"
+        existing.confidence = None
+        existing.metrics_json = None
+        existing.missing_data_json = None
+        existing.risk_flags_json = None
+        existing.synthesis_json = None
+        existing.summary_markdown = f"Analysis queued by {trigger}."
+        existing.completed_at = None
+        existing.error_message = None
+        existing.used_utility_model = None
+        existing.used_reasoning_model = None
+        existing.used_deep_model = None
+        existing.created_at = datetime.now(timezone.utc)
+        run = existing
+    else:
+        run = AnalysisRun(
+            user_id=user.id,
+            run_type=run_type,
+            period_start=window.period_start.isoformat(),
+            period_end=window.period_end.isoformat(),
+            status="running",
+            summary_markdown=f"Analysis queued by {trigger}.",
+            created_at=datetime.now(timezone.utc),
+        )
+        db.add(run)
+
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        winner = (
             db.query(AnalysisRun)
             .filter(
                 AnalysisRun.user_id == user.id,
                 AnalysisRun.run_type == run_type,
                 AnalysisRun.period_start == window.period_start.isoformat(),
                 AnalysisRun.period_end == window.period_end.isoformat(),
-                AnalysisRun.status.in_(["running", "completed"]),
             )
-            .order_by(AnalysisRun.created_at.desc())
+            .order_by(AnalysisRun.created_at.desc(), AnalysisRun.id.desc())
             .first()
         )
-        if existing:
-            return existing
+        if winner is None:
+            raise
+        run = winner
+        if not force and run.status in {"running", "completed"}:
+            return run
+        db.query(AnalysisProposal).filter(AnalysisProposal.analysis_run_id == run.id).delete(synchronize_session=False)
+        run.status = "running"
+        run.confidence = None
+        run.metrics_json = None
+        run.missing_data_json = None
+        run.risk_flags_json = None
+        run.synthesis_json = None
+        run.summary_markdown = f"Analysis queued by {trigger}."
+        run.completed_at = None
+        run.error_message = None
+        run.used_utility_model = None
+        run.used_reasoning_model = None
+        run.used_deep_model = None
+        run.created_at = datetime.now(timezone.utc)
+        db.commit()
 
-    run = AnalysisRun(
-        user_id=user.id,
-        run_type=run_type,
-        period_start=window.period_start.isoformat(),
-        period_end=window.period_end.isoformat(),
-        status="running",
-        summary_markdown=f"Analysis queued by {trigger}.",
-        created_at=datetime.now(timezone.utc),
-    )
-    db.add(run)
-    db.commit()
     db.refresh(run)
 
     metrics, missing_domains, base_risk_flags = _collect_period_metrics(db, user, window, tz_name)
@@ -702,7 +880,7 @@ async def run_longitudinal_analysis(
                     result=deep_result,
                     model_used=provider.get_deep_thinking_model(),
                     operation="analysis_deep_synthesis:monthly",
-                    usage_type="other",
+                    usage_type="deep_thinking",
                 )
                 deep_payload_raw = _safe_json_loads(str(deep_result.get("content") or ""), fallback={})
                 deep_payload = deep_payload_raw if isinstance(deep_payload_raw, dict) else {}
@@ -745,6 +923,10 @@ async def run_longitudinal_analysis(
 
         for proposal in _prepare_proposal_rows(run, proposals_raw):
             db.add(proposal)
+
+        # Auto-combine repetitive pending proposals so users don't see duplicates
+        # across daily/weekly/monthly windows with similar intent.
+        combine_similar_pending_proposals(db, user.id)
 
         db.commit()
         db.refresh(run)
@@ -854,6 +1036,12 @@ def serialize_analysis_run(run: AnalysisRun) -> dict[str, Any]:
 
 def serialize_analysis_proposal(row: AnalysisProposal) -> dict[str, Any]:
     payload = _safe_json_loads(row.proposal_json or "{}", fallback={})
+    payload_obj = payload if isinstance(payload, dict) else {}
+    merge_count = int(payload_obj.get("_merge_count", 0) or 0)
+    merged_run_ids = payload_obj.get("_merged_run_ids", [])
+    if not isinstance(merged_run_ids, list):
+        merged_run_ids = []
+    merged_run_ids = [int(v) for v in merged_run_ids if str(v).strip().isdigit()]
     return {
         "id": row.id,
         "user_id": row.user_id,
@@ -864,7 +1052,9 @@ def serialize_analysis_proposal(row: AnalysisProposal) -> dict[str, Any]:
         "rationale": row.rationale,
         "confidence": row.confidence,
         "requires_approval": bool(row.requires_approval),
-        "payload": payload if isinstance(payload, dict) else {},
+        "payload": payload_obj,
+        "merge_count": merge_count,
+        "merged_run_ids": merged_run_ids,
         "diff_markdown": row.diff_markdown,
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "reviewed_at": row.reviewed_at.isoformat() if row.reviewed_at else None,

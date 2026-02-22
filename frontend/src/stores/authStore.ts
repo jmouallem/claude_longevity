@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { apiClient } from '../api/client';
+import { getPasskeyAssertion } from '../utils/webauthn';
 
 export interface User {
   id: number;
@@ -17,6 +18,7 @@ interface AuthState {
   error: string | null;
 
   login: (username: string, password: string) => Promise<void>;
+  loginWithPasskey: (username?: string) => Promise<void>;
   register: (username: string, password: string, displayName: string) => Promise<void>;
   logout: () => void;
   loadUser: () => Promise<void>;
@@ -50,6 +52,35 @@ export const useAuthStore = create<AuthState>((set) => ({
       set({
         loading: false,
         error: err instanceof Error ? err.message : 'Login failed',
+      });
+      throw err;
+    }
+  },
+
+  loginWithPasskey: async (username?: string) => {
+    set({ loading: true, error: null });
+    try {
+      const options = await apiClient.post<{ request_id: number; public_key: Record<string, unknown> }>(
+        '/api/auth/passkey/login/options',
+        { username: (username || '').trim() || null }
+      );
+      const credential = await getPasskeyAssertion(options.public_key);
+      const data = await apiClient.post<{ access_token: string }>(
+        '/api/auth/passkey/login/verify',
+        { request_id: options.request_id, credential }
+      );
+      apiClient.setToken(data.access_token);
+      set({ token: data.access_token });
+      const user = await apiClient.get<User>('/api/auth/me');
+      set({
+        user,
+        isAuthenticated: true,
+        loading: false,
+      });
+    } catch (err) {
+      set({
+        loading: false,
+        error: err instanceof Error ? err.message : 'Passkey sign-in failed',
       });
       throw err;
     }

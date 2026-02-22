@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useChat, type ChatVerbosity } from '../hooks/useChat';
 import ChatMessage from '../components/ChatMessage';
 import ChatInput from '../components/ChatInput';
+import { APP_NAME } from '../constants/branding';
 
 const PENDING_IMAGE_KEY = 'chat_pending_image_data_url';
 const PENDING_IMAGE_NAME_KEY = 'chat_pending_image_name';
@@ -147,7 +148,7 @@ export default function Chat() {
                 </svg>
               </div>
               <h2 className="text-xl font-semibold text-slate-100 mb-2">
-                Welcome to The Longevity Alchemist!
+                Welcome to {APP_NAME}!
               </h2>
               <p className="text-slate-400 text-sm leading-relaxed">
                 I'm your AI health coach. Start by telling me about your health goals,

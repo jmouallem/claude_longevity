@@ -390,6 +390,25 @@ def _normalize_models_for_provider(
     return normalized_reasoning, normalized_utility, normalized_deep
 
 
+def _supported_providers() -> set[str]:
+    defaults = _get_default_models()
+    providers = {str(p).strip().lower() for p in defaults.keys() if str(p).strip()}
+    if not providers:
+        providers = set(_FALLBACK_DEFAULTS.keys())
+    return providers
+
+
+def _require_supported_provider(provider: str) -> str:
+    normalized = str(provider or "").strip().lower()
+    providers = _supported_providers()
+    if normalized not in providers:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported provider '{provider}'. Supported providers: {', '.join(sorted(providers))}",
+        )
+    return normalized
+
+
 def _sync_user_models_for_provider(user_settings: UserSettings) -> bool:
     normalized_reasoning, normalized_utility, normalized_deep = _normalize_models_for_provider(
         user_settings.ai_provider,
@@ -683,11 +702,12 @@ def set_api_key(
     db: Session = Depends(get_db),
 ):
     s = user.settings
-    s.ai_provider = req.ai_provider
+    provider = _require_supported_provider(req.ai_provider)
+    s.ai_provider = provider
     s.api_key_encrypted = encrypt_api_key(req.api_key)
 
     normalized_reasoning, normalized_utility, normalized_deep = _normalize_models_for_provider(
-        req.ai_provider,
+        provider,
         req.reasoning_model,
         req.utility_model,
         req.deep_thinking_model,

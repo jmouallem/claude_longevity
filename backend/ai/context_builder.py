@@ -10,10 +10,35 @@ from db.models import (
 )
 from services.health_framework_service import FRAMEWORK_TYPES, active_frameworks_for_context, ensure_default_frameworks
 from services.specialists_config import get_specialist_prompt, get_system_prompt, parse_overrides
-from utils.datetime_utils import start_of_day, end_of_day, today_utc, today_for_tz
+from utils.datetime_utils import start_of_day, end_of_day, today_for_tz, sleep_log_overlaps_window
 from utils.units import cm_to_ft_in, kg_to_lb, ml_to_oz
 
 CONTEXT_DIR = Path(__file__).parent.parent / "context"
+_DEFAULT_CONTEXT_MAX_CHARS = 18000
+
+
+def _context_budget(intent_category: str | None) -> dict[str, int]:
+    category = str(intent_category or "").strip().lower()
+    is_log = category.startswith("log_")
+    return {
+        "max_total": 13000 if is_log else _DEFAULT_CONTEXT_MAX_CHARS,
+        "max_profile": 1500,
+        "max_framework": 1400,
+        "max_meds_supps": 1800,
+        "max_snapshot": 2200 if is_log else 3200,
+        "max_daily_summary": 1200 if is_log else 1800,
+        "max_weekly_summary": 900 if is_log else 1500,
+        "max_guidance": 1600,
+        "min_section_chars": 220,
+    }
+
+
+def _clip_block(text: str, max_chars: int) -> str:
+    raw = (text or "").strip()
+    if len(raw) <= max_chars:
+        return raw
+    keep = max(80, max_chars - 24)
+    return f"{raw[:keep].rstrip()}\n...[truncated]"
 
 
 def _format_height(cm_value: float, unit: str) -> str:
@@ -226,10 +251,13 @@ def compute_today_snapshot(db: Session, user: User, target_date: date | None = N
             ex_lines.append(f"  - {e.exercise_type}: {e.duration_minutes or '?'} min")
         sections.append(f"Exercise today:\n" + "\n".join(ex_lines))
 
-    # Sleep (latest entry, prioritizing completed durations)
+    # Sleep (latest entry for the same local day window)
     sleep_logs = (
         db.query(SleepLog)
-        .filter(SleepLog.user_id == user.id)
+        .filter(
+            SleepLog.user_id == user.id,
+            sleep_log_overlaps_window(SleepLog, day_start, day_end),
+        )
         .order_by(SleepLog.created_at.desc())
         .limit(15)
         .all()
@@ -291,21 +319,40 @@ def get_latest_summary(db: Session, user: User, summary_type: str) -> str | None
     return None
 
 
-def build_context(db: Session, user: User, specialist: str = "orchestrator") -> str:
-    """Build the full context string for an AI call."""
-    sections = []
+def build_context(
+    db: Session,
+    user: User,
+    specialist: str = "orchestrator",
+    intent_category: str | None = None,
+) -> str:
+    """Build context with bounded section budgets and prioritized inclusion."""
+    budget = _context_budget(intent_category)
+    sections: list[dict[str, object]] = []
     overrides = parse_overrides(user.specialist_config)
 
+    def _add_section(
+        text: str,
+        *,
+        max_chars: int | None = None,
+        required: bool = False,
+    ) -> None:
+        payload = (text or "").strip()
+        if not payload:
+            return
+        if max_chars and max_chars > 0:
+            payload = _clip_block(payload, max_chars)
+        sections.append({"text": payload, "required": required})
+
     # 1. Base system prompt
-    sections.append(get_system_prompt(overrides))
+    _add_section(get_system_prompt(overrides), required=True)
 
     # 2. Specialist instructions
     if specialist and specialist != "orchestrator":
         specialist_prompt = get_specialist_prompt(specialist, overrides)
         if specialist_prompt:
-            sections.append(specialist_prompt)
+            _add_section(specialist_prompt, required=True)
 
-    # 2b. User identity
+    # 3. User identity
     display_name = (user.display_name or "").strip()
     username = (user.username or "").strip()
     if display_name or username:
@@ -314,38 +361,75 @@ def build_context(db: Session, user: User, specialist: str = "orchestrator") -> 
             identity_lines.append(f"- Name: {display_name}")
         if username and username != display_name:
             identity_lines.append(f"- Username: {username}")
-        sections.append(f"## User Identity\n" + "\n".join(identity_lines))
+        _add_section(f"## User Identity\n" + "\n".join(identity_lines), required=True)
 
-    # 3. User profile
+    # 4. Current user profile
     profile = format_user_profile(user.settings)
-    sections.append(f"## Current User Profile\n{profile}")
+    _add_section(f"## Current User Profile\n{profile}", max_chars=budget["max_profile"], required=True)
 
-    # 4. Prioritized health optimization framework
+    # 5. Active framework priorities
     framework_text = format_active_frameworks(db, user)
-    sections.append(f"## Prioritized Health Optimization Framework\n{framework_text}")
+    _add_section(
+        f"## Prioritized Health Optimization Framework\n{framework_text}",
+        max_chars=budget["max_framework"],
+        required=True,
+    )
 
-    # 5. Medications & supplements
+    # 6. Medications & supplements
     if user.settings:
         meds = format_medications(user.settings.medications)
         supps = format_supplements(user.settings.supplements)
-        sections.append(f"## Medications\n{meds}\n\n## Supplements\n{supps}")
+        _add_section(
+            f"## Medications\n{meds}\n\n## Supplements\n{supps}",
+            max_chars=budget["max_meds_supps"],
+            required=True,
+        )
 
-    # 6. Today's snapshot
+    # 7. Today snapshot
     snapshot = compute_today_snapshot(db, user)
-    sections.append(f"## Today's Status\n{snapshot}")
-
-    # 7. Recent summaries
-    daily = get_latest_summary(db, user, "daily")
-    weekly = get_latest_summary(db, user, "weekly")
-    if daily:
-        sections.append(f"## Yesterday's Summary\n{daily}")
-    if weekly:
-        sections.append(f"## Last Week's Summary\n{weekly}")
+    _add_section(
+        f"## Today's Status\n{snapshot}",
+        max_chars=budget["max_snapshot"],
+        required=True,
+    )
 
     # 8. Approved adaptive guidance (user-approved proposals only)
     from services.analysis_service import get_approved_guidance_for_context
     approved_guidance = get_approved_guidance_for_context(db, user)
     if approved_guidance:
-        sections.append(approved_guidance)
+        _add_section(approved_guidance, max_chars=budget["max_guidance"])
 
-    return "\n\n".join(sections)
+    # 9. Recent summaries (lowest priority, clipped first)
+    daily = get_latest_summary(db, user, "daily")
+    weekly = get_latest_summary(db, user, "weekly")
+    if daily:
+        _add_section(f"## Yesterday's Summary\n{daily}", max_chars=budget["max_daily_summary"])
+    if weekly:
+        _add_section(f"## Last Week's Summary\n{weekly}", max_chars=budget["max_weekly_summary"])
+
+    max_total = int(budget["max_total"])
+    min_required = int(budget["min_section_chars"])
+    selected: list[str] = []
+    used = 0
+    for section in sections:
+        text = str(section.get("text", "")).strip()
+        if not text:
+            continue
+        required = bool(section.get("required", False))
+        section_len = len(text)
+        join_cost = 2 if selected else 0
+        if used + join_cost + section_len <= max_total:
+            selected.append(text)
+            used += join_cost + section_len
+            continue
+        if not required:
+            continue
+        remaining = max_total - used - join_cost
+        if remaining < min_required:
+            continue
+        trimmed = _clip_block(text, remaining)
+        if trimmed:
+            selected.append(trimmed)
+            used += join_cost + len(trimmed)
+
+    return "\n\n".join(selected)

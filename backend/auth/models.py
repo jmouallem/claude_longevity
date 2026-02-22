@@ -1,3 +1,5 @@
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 
@@ -25,3 +27,44 @@ class UserResponse(BaseModel):
     force_password_change: bool
 
     model_config = {"from_attributes": True}
+
+
+class PasskeyStatusResponse(BaseModel):
+    enabled: bool
+    rp_id: str
+    rp_name: str
+
+
+class PasskeyRegisterOptionsRequest(BaseModel):
+    current_password: str
+
+
+class PasskeyBeginRequest(BaseModel):
+    username: str | None = None
+
+
+class PasskeyBeginResponse(BaseModel):
+    request_id: int
+    public_key: dict[str, Any]
+
+
+class PasskeyVerifyRegistrationRequest(BaseModel):
+    request_id: int
+    credential: dict[str, Any]
+    label: str | None = None
+
+
+class PasskeyVerifyAuthenticationRequest(BaseModel):
+    request_id: int
+    credential: dict[str, Any]
+
+
+class PasskeyCredentialResponse(BaseModel):
+    id: int
+    label: str
+    credential_id: str
+    device_type: str | None = None
+    backed_up: bool
+    transports: list[str]
+    created_at: str | None = None
+    last_used_at: str | None = None

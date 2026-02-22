@@ -1,7 +1,10 @@
+import time
+
 from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
 
 from config import settings
+from services.telemetry_context import add_request_db_query
 
 
 engine = create_engine(
@@ -18,6 +21,31 @@ def set_sqlite_pragma(dbapi_connection, connection_record):
     cursor.execute("PRAGMA journal_mode=WAL")
     cursor.execute("PRAGMA foreign_keys=ON")
     cursor.close()
+
+
+@event.listens_for(engine, "before_cursor_execute")
+def before_cursor_execute(conn, cursor, statement, parameters, context, executemany):
+    _ = cursor
+    _ = statement
+    _ = parameters
+    _ = context
+    _ = executemany
+    conn.info.setdefault("_query_start_time", []).append(time.perf_counter())
+
+
+@event.listens_for(engine, "after_cursor_execute")
+def after_cursor_execute(conn, cursor, statement, parameters, context, executemany):
+    _ = cursor
+    _ = statement
+    _ = parameters
+    _ = context
+    _ = executemany
+    start_stack = conn.info.get("_query_start_time")
+    if not start_stack:
+        return
+    started = start_stack.pop()
+    duration_ms = max((time.perf_counter() - started) * 1000.0, 0.0)
+    add_request_db_query(duration_ms)
 
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -52,7 +80,14 @@ def run_startup_migrations() -> None:
     user_settings_columns = _table_columns("user_settings")
     meal_template_columns = _table_columns("meal_templates")
     food_log_columns = _table_columns("food_log")
-    if not user_columns and not user_settings_columns and not meal_template_columns and not food_log_columns:
+    daily_checklist_columns = _table_columns("daily_checklist_item")
+    if (
+        not user_columns
+        and not user_settings_columns
+        and not meal_template_columns
+        and not food_log_columns
+        and not daily_checklist_columns
+    ):
         # Tables may not exist yet on first boot.
         return
 
@@ -165,6 +200,32 @@ def run_startup_migrations() -> None:
                 """
             ))
 
+        if daily_checklist_columns:
+            # Normalize names and dedupe legacy rows before enforcing uniqueness.
+            conn.execute(text("UPDATE daily_checklist_item SET item_name = TRIM(item_name) WHERE item_name IS NOT NULL"))
+            conn.execute(text(
+                """
+                DELETE FROM daily_checklist_item
+                WHERE id NOT IN (
+                    SELECT MAX(id)
+                    FROM daily_checklist_item
+                    GROUP BY user_id, target_date, item_type, item_name
+                )
+                """
+            ))
+            conn.execute(text(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_checklist_unique_item
+                ON daily_checklist_item (user_id, target_date, item_type, item_name)
+                """
+            ))
+            conn.execute(text(
+                """
+                CREATE INDEX IF NOT EXISTS idx_daily_checklist_user_date
+                ON daily_checklist_item (user_id, target_date, item_type)
+                """
+            ))
+
         # New supporting tables for meal versioning + response analytics.
         conn.execute(text(
             """
@@ -225,6 +286,67 @@ def run_startup_migrations() -> None:
             ON meal_response_signals (meal_template_id, created_at)
             """
         ))
+
+        # Passkey (WebAuthn) credentials and challenge records.
+        conn.execute(text(
+            """
+            CREATE TABLE IF NOT EXISTS passkey_credentials (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                credential_id TEXT NOT NULL UNIQUE,
+                public_key TEXT NOT NULL,
+                sign_count INTEGER NOT NULL DEFAULT 0,
+                aaguid TEXT,
+                device_type TEXT,
+                backed_up BOOLEAN NOT NULL DEFAULT 0,
+                transports TEXT,
+                label TEXT,
+                created_at DATETIME,
+                last_used_at DATETIME,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            )
+            """
+        ))
+        conn.execute(text(
+            """
+            CREATE TABLE IF NOT EXISTS passkey_challenges (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                username_normalized TEXT,
+                purpose TEXT NOT NULL,
+                challenge TEXT NOT NULL UNIQUE,
+                expires_at DATETIME NOT NULL,
+                is_used BOOLEAN NOT NULL DEFAULT 0,
+                created_at DATETIME,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            )
+            """
+        ))
+        conn.execute(text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_passkey_credentials_user
+            ON passkey_credentials (user_id, created_at)
+            """
+        ))
+        conn.execute(text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_passkey_credentials_last_used
+            ON passkey_credentials (user_id, last_used_at)
+            """
+        ))
+        conn.execute(text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_passkey_challenges_purpose
+            ON passkey_challenges (purpose, expires_at)
+            """
+        ))
+        conn.execute(text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_passkey_challenges_user
+            ON passkey_challenges (user_id, expires_at)
+            """
+        ))
+        conn.execute(text("DELETE FROM passkey_challenges WHERE expires_at < CURRENT_TIMESTAMP"))
 
         # Per-user prioritized health optimization frameworks.
         conn.execute(text(
@@ -321,6 +443,44 @@ def run_startup_migrations() -> None:
             """
             CREATE INDEX IF NOT EXISTS idx_analysis_runs_user_type_period
             ON analysis_runs (user_id, run_type, period_end)
+            """
+        ))
+        # Deduplicate legacy windows before enforcing one-run-per-window uniqueness.
+        conn.execute(text(
+            """
+            DELETE FROM analysis_proposals
+            WHERE analysis_run_id IN (
+                SELECT id
+                FROM analysis_runs
+                WHERE id NOT IN (
+                    SELECT MAX(id)
+                    FROM analysis_runs
+                    GROUP BY user_id, run_type, period_start, period_end
+                )
+            )
+            """
+        ))
+        conn.execute(text(
+            """
+            DELETE FROM analysis_runs
+            WHERE id NOT IN (
+                SELECT MAX(id)
+                FROM analysis_runs
+                GROUP BY user_id, run_type, period_start, period_end
+            )
+            """
+        ))
+        # Remove any lingering orphan proposals.
+        conn.execute(text(
+            """
+            DELETE FROM analysis_proposals
+            WHERE analysis_run_id NOT IN (SELECT id FROM analysis_runs)
+            """
+        ))
+        conn.execute(text(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_analysis_runs_unique_window
+            ON analysis_runs (user_id, run_type, period_start, period_end)
             """
         ))
         conn.execute(text(

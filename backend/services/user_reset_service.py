@@ -19,6 +19,8 @@ from db.models import (
     Message,
     ModelUsageEvent,
     Notification,
+    PasskeyChallenge,
+    PasskeyCredential,
     SleepLog,
     SpecialistConfig,
     Summary,
@@ -79,6 +81,8 @@ def reset_user_data_for_user(db, user: User) -> dict[str, int]:
     db.query(AnalysisProposal).filter(AnalysisProposal.user_id == user.id).delete(synchronize_session=False)
     db.query(AnalysisRun).filter(AnalysisRun.user_id == user.id).delete(synchronize_session=False)
     db.query(HealthOptimizationFramework).filter(HealthOptimizationFramework.user_id == user.id).delete(synchronize_session=False)
+    db.query(PasskeyCredential).filter(PasskeyCredential.user_id == user.id).delete(synchronize_session=False)
+    db.query(PasskeyChallenge).filter(PasskeyChallenge.user_id == user.id).delete(synchronize_session=False)
 
     defaults = _anthropic_defaults()
     s = user.settings

@@ -1,6 +1,7 @@
 from datetime import date, datetime, timezone
 from typing import Optional
 import re
+import json
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -18,8 +19,12 @@ from ai.usage_tracker import track_usage_from_result
 from tools import tool_registry
 from tools.base import ToolContext, ToolExecutionError
 from utils.encryption import decrypt_api_key
-from utils.datetime_utils import start_of_day, end_of_day, today_utc
-from utils.med_utils import parse_structured_list, structured_to_display
+from utils.datetime_utils import start_of_day, end_of_day, today_for_tz, sleep_log_overlaps_window
+from utils.med_utils import (
+    parse_structured_list,
+    is_generic_medication_name,
+    is_generic_supplement_name,
+)
 
 router = APIRouter(prefix="/logs", tags=["logs"], dependencies=[Depends(require_non_admin)])
 
@@ -121,12 +126,25 @@ class ChecklistToggleRequest(BaseModel):
 
 # --- Helper ---
 
-def get_logs_for_date(db, model, user_id, target_date, date_field="logged_at"):
-    d = target_date or today_utc()
+def _user_timezone(user: User) -> str | None:
+    return getattr(getattr(user, "settings", None), "timezone", None) or None
+
+
+def _profile_checklist_entries_read_only(user: User) -> tuple[list[dict], list[dict]]:
+    settings = getattr(user, "settings", None)
+    med_items = parse_structured_list(settings.medications if settings else None)
+    supp_items = parse_structured_list(settings.supplements if settings else None)
+    cleaned_meds = [m for m in med_items if not is_generic_medication_name(m.get("name", ""))]
+    cleaned_supps = [s for s in supp_items if not is_generic_supplement_name(s.get("name", ""))]
+    return cleaned_meds, cleaned_supps
+
+
+def get_logs_for_date(db, model, user_id, target_date, date_field="logged_at", tz_name: str | None = None):
+    d = target_date or today_for_tz(tz_name)
     field = getattr(model, date_field)
     return (
         db.query(model)
-        .filter(model.user_id == user_id, field >= start_of_day(d), field <= end_of_day(d))
+        .filter(model.user_id == user_id, field >= start_of_day(d, tz_name), field <= end_of_day(d, tz_name))
         .order_by(field)
         .all()
     )
@@ -158,16 +176,20 @@ def compute_plan_status(
     target_minutes: Optional[int],
     exercise_logs: list[ExerciseLog],
     target_date: date,
+    today_local: date,
 ) -> tuple[bool, str, int, int]:
     completed_minutes = sum(l.duration_minutes or 0 for l in exercise_logs)
     match_types = PLAN_MATCH_TYPES.get(plan_type, PLAN_MATCH_TYPES["mixed"])
     matching = [l for l in exercise_logs if l.exercise_type in match_types] if match_types else []
     matching_sessions = len(matching)
-    today = today_utc()
-
     if plan_type == "rest_day":
         if completed_minutes == 0:
-            return (target_date < today, "on_track" if target_date >= today else "completed", completed_minutes, 0)
+            return (
+                target_date < today_local,
+                "on_track" if target_date >= today_local else "completed",
+                completed_minutes,
+                0,
+            )
         return (False, "off_plan", completed_minutes, 0)
 
     needed_minutes = target_minutes or 20
@@ -175,7 +197,7 @@ def compute_plan_status(
     done = matching_sessions > 0 and matched_minutes >= needed_minutes
     if done:
         return (True, "completed", completed_minutes, matching_sessions)
-    if target_date < today:
+    if target_date < today_local:
         return (False, "missed", completed_minutes, matching_sessions)
     return (False, "pending", completed_minutes, matching_sessions)
 
@@ -254,7 +276,8 @@ def get_food_logs(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    logs = get_logs_for_date(db, FoodLog, user.id, target_date)
+    tz_name = _user_timezone(user)
+    logs = get_logs_for_date(db, FoodLog, user.id, target_date, tz_name=tz_name)
     fields = [
         "logged_at",
         "meal_label",
@@ -295,23 +318,24 @@ def get_vitals_logs(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    tz_name = _user_timezone(user)
     if date_from or date_to:
-        start_date = date_from or date_to or today_utc()
-        end_date = date_to or date_from or today_utc()
+        start_date = date_from or date_to or today_for_tz(tz_name)
+        end_date = date_to or date_from or today_for_tz(tz_name)
         if end_date < start_date:
             start_date, end_date = end_date, start_date
         logs = (
             db.query(VitalsLog)
             .filter(
                 VitalsLog.user_id == user.id,
-                VitalsLog.logged_at >= start_of_day(start_date),
-                VitalsLog.logged_at <= end_of_day(end_date),
+                VitalsLog.logged_at >= start_of_day(start_date, tz_name),
+                VitalsLog.logged_at <= end_of_day(end_date, tz_name),
             )
             .order_by(VitalsLog.logged_at)
             .all()
         )
     else:
-        logs = get_logs_for_date(db, VitalsLog, user.id, target_date)
+        logs = get_logs_for_date(db, VitalsLog, user.id, target_date, tz_name=tz_name)
     fields = ["logged_at", "weight_kg", "bp_systolic", "bp_diastolic", "heart_rate", "blood_glucose", "temperature_c", "spo2", "notes"]
     return [serialize_log(l, fields) for l in logs]
 
@@ -338,7 +362,8 @@ def get_exercise_logs(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    logs = get_logs_for_date(db, ExerciseLog, user.id, target_date)
+    tz_name = _user_timezone(user)
+    logs = get_logs_for_date(db, ExerciseLog, user.id, target_date, tz_name=tz_name)
     fields = ["logged_at", "exercise_type", "duration_minutes", "details", "max_hr", "avg_hr", "calories_burned", "notes"]
     return [serialize_log(l, fields) for l in logs]
 
@@ -363,7 +388,9 @@ def get_exercise_plan(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    d = target_date or today_utc()
+    tz_name = _user_timezone(user)
+    d = target_date or today_for_tz(tz_name)
+    today_local = today_for_tz(tz_name)
     d_iso = d.isoformat()
     plan = (
         db.query(ExercisePlan)
@@ -384,12 +411,13 @@ def get_exercise_plan(
             matching_sessions=0,
         )
 
-    exercise_logs = get_logs_for_date(db, ExerciseLog, user.id, d)
+    exercise_logs = get_logs_for_date(db, ExerciseLog, user.id, d, tz_name=tz_name)
     completed, status, completed_minutes, matching_sessions = compute_plan_status(
         plan.plan_type,
         plan.target_minutes,
         exercise_logs,
         d,
+        today_local,
     )
     return ExercisePlanResponse(
         target_date=plan.target_date,
@@ -414,7 +442,9 @@ async def generate_exercise_plan(
     if not settings or not settings.api_key_encrypted:
         raise HTTPException(status_code=400, detail="Please configure your API key in Settings before generating a plan.")
 
-    d = target_date or today_utc()
+    tz_name = _user_timezone(user)
+    d = target_date or today_for_tz(tz_name)
+    today_local = today_for_tz(tz_name)
     d_iso = d.isoformat()
     api_key = decrypt_api_key(settings.api_key_encrypted)
     provider = get_provider(
@@ -476,12 +506,13 @@ async def generate_exercise_plan(
     if not plan:
         raise HTTPException(status_code=500, detail="Failed to persist exercise plan")
 
-    exercise_logs = get_logs_for_date(db, ExerciseLog, user.id, d)
+    exercise_logs = get_logs_for_date(db, ExerciseLog, user.id, d, tz_name=tz_name)
     completed, status, completed_minutes, matching_sessions = compute_plan_status(
         plan.plan_type,
         plan.target_minutes,
         exercise_logs,
         d,
+        today_local,
     )
     return ExercisePlanResponse(
         target_date=plan.target_date,
@@ -502,17 +533,29 @@ def get_daily_checklist(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    d = target_date or today_utc()
+    tz_name = _user_timezone(user)
+    d = target_date or today_for_tz(tz_name)
     d_iso = d.isoformat()
-    med_structured = parse_structured_list(user.settings.medications if user.settings else None)
-    supp_structured = parse_structured_list(user.settings.supplements if user.settings else None)
+    med_structured, supp_structured = _profile_checklist_entries_read_only(user)
+
+    valid_med_names = {item.get("name", "").strip().lower() for item in med_structured if item.get("name")}
+    valid_supp_names = {item.get("name", "").strip().lower() for item in supp_structured if item.get("name")}
 
     states = (
         db.query(DailyChecklistItem)
         .filter(DailyChecklistItem.user_id == user.id, DailyChecklistItem.target_date == d_iso)
         .all()
     )
-    by_key = {(s.item_type, s.item_name.strip().lower()): bool(s.completed) for s in states}
+
+    by_key = {}
+    for s in states:
+        name_key = s.item_name.strip().lower()
+        if s.item_type == "medication":
+            if name_key in valid_med_names and not is_generic_medication_name(s.item_name):
+                by_key[(s.item_type, name_key)] = bool(s.completed)
+        elif s.item_type == "supplement":
+            if name_key in valid_supp_names and not is_generic_supplement_name(s.item_name):
+                by_key[(s.item_type, name_key)] = bool(s.completed)
 
     med_items = [
         ChecklistItem(
@@ -547,7 +590,7 @@ def toggle_daily_checklist(
     name = req.item_name.strip()
     if not name:
         raise HTTPException(status_code=400, detail="item_name is required")
-    d_iso = req.target_date or today_utc().isoformat()
+    d_iso = req.target_date or today_for_tz(_user_timezone(user)).isoformat()
 
     try:
         tool_registry.execute(
@@ -574,7 +617,7 @@ def get_hydration_logs(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    logs = get_logs_for_date(db, HydrationLog, user.id, target_date)
+    logs = get_logs_for_date(db, HydrationLog, user.id, target_date, tz_name=_user_timezone(user))
     fields = ["logged_at", "amount_ml", "source", "notes"]
     return [serialize_log(l, fields) for l in logs]
 
@@ -601,7 +644,7 @@ def get_supplement_logs(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    logs = get_logs_for_date(db, SupplementLog, user.id, target_date)
+    logs = get_logs_for_date(db, SupplementLog, user.id, target_date, tz_name=_user_timezone(user))
     fields = ["logged_at", "supplements", "timing", "notes"]
     return [serialize_log(l, fields) for l in logs]
 
@@ -694,12 +737,17 @@ def get_sleep_logs(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    tz_name = _user_timezone(user)
     if target_date:
+        day_start = start_of_day(target_date, tz_name)
+        day_end = end_of_day(target_date, tz_name)
         logs = (
             db.query(SleepLog)
-            .filter(SleepLog.user_id == user.id)
-            .order_by(SleepLog.created_at.desc())
-            .limit(7)
+            .filter(
+                SleepLog.user_id == user.id,
+                sleep_log_overlaps_window(SleepLog, day_start, day_end),
+            )
+            .order_by(SleepLog.created_at.asc())
             .all()
         )
     else:
@@ -737,9 +785,10 @@ def get_daily_totals(
     db: Session = Depends(get_db),
 ):
     """Get aggregated daily totals for food, hydration, exercise."""
-    d = target_date or today_utc()
-    day_start = start_of_day(d)
-    day_end = end_of_day(d)
+    tz_name = _user_timezone(user)
+    d = target_date or today_for_tz(tz_name)
+    day_start = start_of_day(d, tz_name)
+    day_end = end_of_day(d, tz_name)
 
     # Food totals
     foods = db.query(FoodLog).filter(

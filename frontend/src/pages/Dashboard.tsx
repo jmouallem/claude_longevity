@@ -33,6 +33,7 @@ interface ProfileData {
   weight_unit: WeightUnit;
   hydration_unit: HydrationUnit;
   medical_conditions: string | null;
+  timezone?: string | null;
 }
 
 interface WeightPoint {
@@ -65,8 +66,34 @@ interface DailyChecklist {
   supplements: ChecklistItem[];
 }
 
-function today(): string {
-  return new Date().toISOString().slice(0, 10);
+function dayKeyForTimezone(timezone?: string | null, when: Date = new Date()): string {
+  if (!timezone) return toIsoDate(when);
+  try {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(when);
+    const year = parts.find((p) => p.type === 'year')?.value;
+    const month = parts.find((p) => p.type === 'month')?.value;
+    const day = parts.find((p) => p.type === 'day')?.value;
+    if (year && month && day) return `${year}-${month}-${day}`;
+  } catch {
+    // fallback to local date below
+  }
+  return toIsoDate(when);
+}
+
+function today(timezone?: string | null): string {
+  return dayKeyForTimezone(timezone, new Date());
+}
+
+function shiftIsoDate(isoDate: string, days: number): string {
+  const [y, m, d] = isoDate.split('-').map((x) => Number(x));
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCDate(dt.getUTCDate() + days);
+  return dt.toISOString().slice(0, 10);
 }
 
 function MacroBar({ protein, carbs, fat }: { protein: number; carbs: number; fat: number }) {
@@ -391,30 +418,28 @@ export default function Dashboard() {
   const [generatingPlan, setGeneratingPlan] = useState(false);
   const [genMessage, setGenMessage] = useState('');
   const [loading, setLoading] = useState(true);
+  const [targetDate, setTargetDate] = useState<string>(today());
 
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
-      const [t, v, p] = await Promise.all([
-        apiClient.get<DailyTotals>(`/api/logs/daily-totals?target_date=${today()}`),
-        apiClient.get<Vital[]>(`/api/logs/vitals?target_date=${today()}`),
-        apiClient.get<ProfileData>('/api/settings/profile'),
+      const p = await apiClient.get<ProfileData>('/api/settings/profile');
+      const todayKey = today(p.timezone);
+      const fromIso = shiftIsoDate(todayKey, -13);
+      const toIso = todayKey;
+      const [t, v, vitalsRange, plan, c] = await Promise.all([
+        apiClient.get<DailyTotals>(`/api/logs/daily-totals?target_date=${todayKey}`),
+        apiClient.get<Vital[]>(`/api/logs/vitals?target_date=${todayKey}`),
+        apiClient.get<Vital[]>(`/api/logs/vitals?date_from=${fromIso}&date_to=${toIso}`),
+        apiClient.get<ExercisePlan>(`/api/logs/exercise-plan?target_date=${todayKey}`),
+        apiClient.get<DailyChecklist>(`/api/logs/checklist?target_date=${todayKey}`),
       ]);
-      const to = new Date();
-      const from = new Date();
-      from.setDate(to.getDate() - 13);
-      const fromIso = toIsoDate(from);
-      const toIso = toIsoDate(to);
-      const vitalsRange = await apiClient.get<Vital[]>(
-        `/api/logs/vitals?date_from=${fromIso}&date_to=${toIso}`
-      );
-      const plan = await apiClient.get<ExercisePlan>(`/api/logs/exercise-plan?target_date=${today()}`);
-      const c = await apiClient.get<DailyChecklist>(`/api/logs/checklist?target_date=${today()}`);
       setTotals(t);
       setVitals(v);
       setProfile(p);
       setExercisePlan(plan);
       setChecklist(c);
+      setTargetDate(todayKey);
       setVitalsWindow(vitalsRange);
       setWeightSeries(buildWeightSeries(vitalsRange, fromIso, toIso));
       setWeightRange({ from: fromIso, to: toIso });
@@ -446,7 +471,7 @@ export default function Dashboard() {
     setGeneratingPlan(true);
     setGenMessage('');
     try {
-      const plan = await apiClient.post<ExercisePlan>(`/api/logs/exercise-plan/generate?target_date=${today()}`);
+      const plan = await apiClient.post<ExercisePlan>(`/api/logs/exercise-plan/generate?target_date=${targetDate}`);
       setExercisePlan(plan);
       setGenMessage('Exercise plan generated.');
     } catch (e: unknown) {
@@ -459,7 +484,7 @@ export default function Dashboard() {
   const toggleChecklist = async (itemType: 'medication' | 'supplement', itemName: string, completed: boolean) => {
     try {
       await apiClient.put('/api/logs/checklist', {
-        target_date: today(),
+        target_date: targetDate,
         item_type: itemType,
         item_name: itemName,
         completed,

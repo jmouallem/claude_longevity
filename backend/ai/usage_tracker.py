@@ -3,6 +3,7 @@ from __future__ import annotations
 from sqlalchemy.orm import Session
 
 from db.models import ModelUsageEvent
+from services.telemetry_context import record_ai_call
 
 
 def _to_int(value) -> int:
@@ -32,6 +33,13 @@ def track_model_usage(
             tokens_in=_to_int(tokens_in),
             tokens_out=_to_int(tokens_out),
         )
+    )
+    record_ai_call(
+        usage_type=usage_type,
+        model_used=model_used,
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
+        operation=operation,
     )
 
 

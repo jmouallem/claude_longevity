@@ -1,9 +1,11 @@
 import json
 import logging
+import re
 
 from sqlalchemy.orm import Session
 
 from ai.usage_tracker import track_usage_from_result
+from services.telemetry_context import record_ai_failure
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +120,269 @@ CATEGORY_TO_PROMPT = {
 }
 
 
+def _normalize_text(value: str) -> str:
+    return " ".join((value or "").strip().split())
+
+
+def _extract_time_token(message: str) -> str | None:
+    match = re.search(r"\b(\d{1,2}:\d{2}\s?(?:am|pm)?)\b", message, flags=re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    match = re.search(r"\b(\d{1,2}\s?(?:am|pm))\b", message, flags=re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    return None
+
+
+def _deterministic_food_parse(message: str) -> dict:
+    text = _normalize_text(message)
+    lowered = text.lower()
+    meal_label = "Meal"
+    if "breakfast" in lowered:
+        meal_label = "Breakfast"
+    elif "lunch" in lowered:
+        meal_label = "Lunch"
+    elif "dinner" in lowered:
+        meal_label = "Dinner"
+    elif "snack" in lowered:
+        meal_label = "Snack"
+
+    base = text
+    for cue in ("i had ", "i ate ", "for breakfast", "for lunch", "for dinner"):
+        idx = lowered.find(cue)
+        if idx >= 0 and cue.startswith("i "):
+            base = text[idx + len(cue):]
+            break
+    base = re.sub(r"\b(for (breakfast|lunch|dinner|snack))\b", "", base, flags=re.IGNORECASE).strip(" .")
+    if not base:
+        base = text
+
+    items: list[dict[str, str]] = []
+    for raw in re.split(r",|\band\b", base, flags=re.IGNORECASE):
+        name = _normalize_text(raw).strip(" .")
+        if not name:
+            continue
+        items.append({"name": name, "quantity": "", "unit": ""})
+    if not items:
+        items = [{"name": base, "quantity": "", "unit": ""}]
+
+    calories = None
+    cal_match = re.search(r"(\d{1,4})\s*(k?cal|calories?)\b", lowered)
+    if cal_match:
+        try:
+            calories = float(cal_match.group(1))
+        except ValueError:
+            calories = None
+
+    return {
+        "logged_at": _extract_time_token(message),
+        "meal_label": meal_label,
+        "items": items,
+        "calories": calories,
+        "protein_g": None,
+        "carbs_g": None,
+        "fat_g": None,
+        "fiber_g": None,
+        "sodium_mg": None,
+        "notes": "Deterministic fallback parse",
+    }
+
+
+def _deterministic_vitals_parse(message: str) -> dict:
+    lowered = message.lower()
+    bp_sys = None
+    bp_dia = None
+    bp_match = re.search(r"\b(\d{2,3})\s*/\s*(\d{2,3})\b", lowered)
+    if bp_match:
+        bp_sys = int(bp_match.group(1))
+        bp_dia = int(bp_match.group(2))
+
+    weight = None
+    weight_match = re.search(r"\b(\d{2,3}(?:\.\d+)?)\s*(kg|lb|lbs)\b", lowered)
+    if weight_match:
+        weight = float(weight_match.group(1))
+        if weight_match.group(2).startswith("lb"):
+            weight = round(weight / 2.205, 3)
+
+    hr = None
+    hr_match = re.search(r"(?:heart rate|hr)\s*(?:is|at|:)?\s*(\d{2,3})\b", lowered)
+    if hr_match:
+        hr = int(hr_match.group(1))
+
+    return {
+        "logged_at": _extract_time_token(message),
+        "weight_kg": weight,
+        "bp_systolic": bp_sys,
+        "bp_diastolic": bp_dia,
+        "heart_rate": hr,
+        "blood_glucose": None,
+        "temperature_c": None,
+        "spo2": None,
+        "notes": "Deterministic fallback parse",
+    }
+
+
+def _deterministic_exercise_parse(message: str) -> dict:
+    lowered = message.lower()
+    exercise_type = "other"
+    mapping = {
+        "strength": "strength",
+        "hiit": "hiit",
+        "walk": "walk",
+        "run": "run",
+        "cycling": "cycling",
+        "bike": "cycling",
+        "swim": "swimming",
+        "yoga": "yoga",
+        "mobility": "mobility",
+        "zone 2": "zone2_cardio",
+    }
+    for cue, ex_type in mapping.items():
+        if cue in lowered:
+            exercise_type = ex_type
+            break
+
+    duration = None
+    duration_match = re.search(r"\b(\d{1,3})\s*(min|mins|minutes)\b", lowered)
+    if duration_match:
+        duration = int(duration_match.group(1))
+
+    return {
+        "logged_at": _extract_time_token(message),
+        "exercise_type": exercise_type,
+        "duration_minutes": duration,
+        "details": {},
+        "max_hr": None,
+        "avg_hr": None,
+        "calories_burned": None,
+        "notes": "Deterministic fallback parse",
+    }
+
+
+def _deterministic_supplement_parse(message: str) -> dict | None:
+    text = _normalize_text(message)
+    lowered = text.lower()
+    base = text
+    for cue in ("i took ", "took my ", "had my ", "i had ", "i take "):
+        idx = lowered.find(cue)
+        if idx >= 0:
+            base = text[idx + len(cue):]
+            break
+    base = base.strip(" .")
+    if not base:
+        return None
+
+    supplements = []
+    for raw in re.split(r",|\band\b", base, flags=re.IGNORECASE):
+        name = _normalize_text(raw).strip(" .")
+        if not name:
+            continue
+        supplements.append({"name": name, "dose": ""})
+
+    if not supplements:
+        return None
+
+    timing = ""
+    if "morning" in lowered:
+        timing = "morning"
+    elif "lunch" in lowered or "with lunch" in lowered:
+        timing = "with_meal"
+    elif "dinner" in lowered or "with dinner" in lowered:
+        timing = "with_meal"
+    elif "evening" in lowered or "bedtime" in lowered:
+        timing = "evening"
+
+    return {
+        "logged_at": _extract_time_token(message),
+        "supplements": supplements,
+        "timing": timing,
+        "notes": "Deterministic fallback parse",
+    }
+
+
+def _deterministic_fasting_parse(message: str) -> dict:
+    lowered = message.lower()
+    action = "start"
+    if any(k in lowered for k in ("end fast", "broke my fast", "break fast", "finished fast", "stop fast")):
+        action = "end"
+    return {
+        "action": action,
+        "fast_start": _extract_time_token(message) if action == "start" else None,
+        "fast_end": _extract_time_token(message) if action == "end" else None,
+        "fast_type": None,
+        "notes": "Deterministic fallback parse",
+    }
+
+
+def _deterministic_sleep_parse(message: str) -> dict:
+    lowered = message.lower()
+    action = "auto"
+    if any(k in lowered for k in ("woke up", "wake up", "got up", "slept", "sleep end")):
+        action = "end"
+    elif any(k in lowered for k in ("going to bed", "go to bed", "bedtime", "sleep now", "going to sleep")):
+        action = "start"
+    return {
+        "action": action,
+        "sleep_start": _extract_time_token(message) if action == "start" else None,
+        "sleep_end": _extract_time_token(message) if action == "end" else None,
+        "duration_minutes": None,
+        "quality": None,
+        "notes": "Deterministic fallback parse",
+    }
+
+
+def _deterministic_hydration_parse(message: str) -> dict:
+    lowered = message.lower()
+    amount_ml = 250.0
+    match = re.search(r"\b(\d+(?:\.\d+)?)\s*(ml|milliliters?|l|liters?|oz|ounces?|cup|cups|glass|glasses|bottle|bottles)\b", lowered)
+    if match:
+        value = float(match.group(1))
+        unit = match.group(2)
+        if unit.startswith("ml"):
+            amount_ml = value
+        elif unit.startswith("l"):
+            amount_ml = value * 1000
+        elif unit.startswith("oz") or unit.startswith("ounce"):
+            amount_ml = value * 29.5735
+        elif unit.startswith("cup") or unit.startswith("glass"):
+            amount_ml = value * 250
+        elif unit.startswith("bottle"):
+            amount_ml = value * 500
+
+    source = "water"
+    if "coffee" in lowered:
+        source = "coffee"
+    elif "tea" in lowered:
+        source = "tea"
+    elif "juice" in lowered:
+        source = "juice"
+
+    return {
+        "logged_at": _extract_time_token(message),
+        "amount_ml": round(amount_ml, 2),
+        "source": source,
+        "notes": "Deterministic fallback parse",
+    }
+
+
+def _deterministic_parse_by_category(message: str, category: str) -> dict | None:
+    if category == "log_food":
+        return _deterministic_food_parse(message)
+    if category == "log_vitals":
+        return _deterministic_vitals_parse(message)
+    if category == "log_exercise":
+        return _deterministic_exercise_parse(message)
+    if category == "log_supplement":
+        return _deterministic_supplement_parse(message)
+    if category == "log_fasting":
+        return _deterministic_fasting_parse(message)
+    if category == "log_sleep":
+        return _deterministic_sleep_parse(message)
+    if category == "log_hydration":
+        return _deterministic_hydration_parse(message)
+    return None
+
+
 async def parse_log_data(
     provider,
     message: str,
@@ -160,7 +425,12 @@ async def parse_log_data(
                 text = text[4:]
             text = text.strip()
 
-        return json.loads(text)
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            return parsed
+        logger.warning(f"Log parsing returned non-dict for category {category}; falling back")
+        return _deterministic_parse_by_category(message, category)
     except Exception as e:
+        record_ai_failure("utility", f"log_parse:{category}", str(e))
         logger.error(f"Log parsing failed for category {category}: {e}")
-        return None
+        return _deterministic_parse_by_category(message, category)

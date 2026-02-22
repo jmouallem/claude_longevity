@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../stores/authStore';
+import { APP_NAME } from '../constants/branding';
 
 export default function Register() {
   const [username, setUsername] = useState('');
@@ -29,7 +30,7 @@ export default function Register() {
       <div className="w-full max-w-md">
         {/* Header */}
         <div className="text-center mb-8">
-          <h1 className="text-3xl font-bold text-emerald-500">The Longevity Alchemist</h1>
+          <h1 className="text-3xl font-bold text-emerald-500">{APP_NAME}</h1>
           <p className="mt-2 text-slate-400">Create your account</p>
         </div>
 
