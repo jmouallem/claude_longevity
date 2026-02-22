@@ -453,3 +453,17 @@
 - `python -m compileall backend` (pass)
 - `python -m pytest -q backend/tests` (pass, 6 tests)
 - `npm run build` in `frontend/` (pass)
+
+### Phase G Verification and Rollout (In Progress)
+1. Added CI quality gate workflow:
+- `.github/workflows/quality-gates.yml`
+- Runs backend dependency install, compile check, test suite, and frontend production build on push/PR to `main`.
+2. Added verification tests in `backend/tests/test_phase_g_verification.py`:
+- Security header assertions on `/api/health`.
+- Cookie-session register/login/logout flow assertions.
+- Rate limiter block behavior assertions.
+- Upload signature/content-type mismatch rejection assertion.
+3. Validation completed for new Phase G checks:
+- `python -m compileall backend` (pass)
+- `python -m pytest -q backend/tests` (pass, 13 tests)
+- `npm run build` in `frontend/` (pass)
