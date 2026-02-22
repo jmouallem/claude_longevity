@@ -1,9 +1,24 @@
 # Render Install / Replacement Guide
 
-This runbook replaces your current `n8n` Docker web service on Render with this app (`claude_longevity`) on the same service.
+This runbook covers both:
+- creating a **new Render project/service** from this repo, and
+- replacing your current `n8n` service with this app (`claude_longevity`).
 
 Target service:
 - `https://dashboard.render.com/web/srv-d2d76abuibrs739auji0`
+
+## Quick path: create a NEW project/service (recommended)
+
+1. Push latest `main` (includes `render.yaml` Blueprint).
+2. In Render dashboard, click `New` -> `Blueprint`.
+3. Select repo: `jmouallem/claude_longevity`.
+4. Render detects `render.yaml`; choose `Apply`.
+5. Set required non-synced variables:
+   - `ADMIN_PASSWORD`
+   - `CORS_ORIGINS` (JSON array, include your final Render app URL, e.g. `["https://your-app.onrender.com"]`)
+6. Deploy.
+7. Verify `GET /api/health` is healthy.
+8. Login and change admin password immediately.
 
 ## 1) Pre-cutover checklist
 

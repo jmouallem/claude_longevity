@@ -1,0 +1,36 @@
+services:
+  - type: web
+    name: longevity-coach
+    runtime: docker
+    plan: starter
+    autoDeploy: true
+    healthCheckPath: /api/health
+    dockerContext: .
+    dockerfilePath: ./Dockerfile
+    disk:
+      name: longevity-data
+      mountPath: /var/data
+      sizeGB: 10
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: DATA_DIR
+        value: /var/data
+      - key: UPLOAD_DIR
+        value: /var/data/uploads
+      - key: DATABASE_URL
+        value: sqlite:////var/data/longevity.db
+      - key: SECRET_KEY
+        generateValue: true
+      - key: ENCRYPTION_KEY
+        generateValue: true
+      - key: ADMIN_USERNAME
+        value: longadmin
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: AUTH_COOKIE_SECURE
+        value: "true"
+      - key: AUTH_COOKIE_SAMESITE
+        value: lax
+      - key: CORS_ORIGINS
+        sync: false
