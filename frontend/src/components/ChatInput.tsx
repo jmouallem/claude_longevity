@@ -7,6 +7,8 @@ interface ChatInputProps {
   selectedImage: File | null;
   onSelectedImageChange: (file: File | null) => void;
   disabled?: boolean;
+  fillText?: string | null;
+  onFillConsumed?: () => void;
 }
 
 export default function ChatInput({
@@ -14,6 +16,8 @@ export default function ChatInput({
   selectedImage,
   onSelectedImageChange,
   disabled = false,
+  fillText,
+  onFillConsumed,
 }: ChatInputProps) {
   const [text, setText] = useState('');
   const [selectedImagePreview, setSelectedImagePreview] = useState<string | null>(null);
@@ -50,6 +54,15 @@ export default function ChatInput({
       cancelled = true;
     };
   }, [selectedImage]);
+
+  // Allow parent to pre-fill input (e.g. "Discuss" buttons in goal panel)
+  useEffect(() => {
+    if (fillText) {
+      setText(fillText);
+      onFillConsumed?.();
+      setTimeout(() => textareaRef.current?.focus(), 0);
+    }
+  }, [fillText, onFillConsumed]);
 
   const handleSubmit = useCallback(() => {
     const trimmed = text.trim();

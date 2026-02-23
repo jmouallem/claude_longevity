@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { apiClient } from '../api/client';
 import FastingTimer from '../components/FastingTimer';
 import { kgToLb, mlToOz, round1, type HydrationUnit, type WeightUnit } from '../utils/units';
@@ -34,6 +35,9 @@ interface ProfileData {
   hydration_unit: HydrationUnit;
   medical_conditions: string | null;
   timezone?: string | null;
+  age?: number | null;
+  sex?: string | null;
+  height_cm?: number | null;
 }
 
 interface WeightPoint {
@@ -64,6 +68,21 @@ interface DailyChecklist {
   target_date: string;
   medications: ChecklistItem[];
   supplements: ChecklistItem[];
+}
+
+interface DailyPlanTask {
+  id: number;
+  title: string;
+  description: string | null;
+  status: 'pending' | 'completed' | 'missed' | 'skipped';
+  progress_pct: number;
+  framework_name?: string | null;
+}
+
+interface DailyPlanSnapshot {
+  upcoming_tasks: DailyPlanTask[];
+  stats: { total: number; completed: number; pending: number };
+  reward: { completed_daily_streak: number };
 }
 
 interface DashboardSnapshot {
@@ -426,6 +445,7 @@ function VitalsTrendChart({
 }
 
 export default function Dashboard() {
+  const navigate = useNavigate();
   const [totals, setTotals] = useState<DailyTotals | null>(null);
   const [vitals, setVitals] = useState<Vital[]>([]);
   const [profile, setProfile] = useState<ProfileData | null>(null);
@@ -439,11 +459,16 @@ export default function Dashboard() {
   const [genMessage, setGenMessage] = useState('');
   const [loading, setLoading] = useState(true);
   const [targetDate, setTargetDate] = useState<string>(today());
+  const [planSnapshot, setPlanSnapshot] = useState<DailyPlanSnapshot | null>(null);
+  const [planBusyTaskId, setPlanBusyTaskId] = useState<number | null>(null);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
-      const snapshot = await apiClient.get<DashboardSnapshot>('/api/logs/dashboard');
+      const [snapshot, planData] = await Promise.all([
+        apiClient.get<DashboardSnapshot>('/api/logs/dashboard'),
+        apiClient.get<DailyPlanSnapshot>('/api/plan/snapshot?cycle_type=daily').catch(() => null),
+      ]);
       const p = snapshot.profile || null;
       const todayKey = snapshot.target_date || today(p?.timezone);
       const fromIso = snapshot.date_from || shiftIsoDate(todayKey, -13);
@@ -459,12 +484,26 @@ export default function Dashboard() {
       setVitalsWindow(vitalsRange);
       setWeightSeries(buildWeightSeries(vitalsRange, fromIso, toIso));
       setWeightRange({ from: fromIso, to: toIso });
+      setPlanSnapshot(planData);
     } catch {
       // individual cards will show empty state
     } finally {
       setLoading(false);
     }
   }, []);
+
+  const markTaskComplete = async (taskId: number) => {
+    setPlanBusyTaskId(taskId);
+    try {
+      await apiClient.post(`/api/plan/tasks/${taskId}/status`, { status: 'completed' });
+      const updated = await apiClient.get<DailyPlanSnapshot>('/api/plan/snapshot?cycle_type=daily').catch(() => null);
+      setPlanSnapshot(updated);
+    } catch {
+      // no-op
+    } finally {
+      setPlanBusyTaskId(null);
+    }
+  };
 
   useEffect(() => {
     fetchData();
@@ -524,10 +563,19 @@ export default function Dashboard() {
   const carbs = totals?.food.carbs_g ?? 0;
   const fat = totals?.food.fat_g ?? 0;
 
+  // Mifflin-St Jeor BMR × 1.375 (lightly active) for calorie target
+  const calorieTarget = (() => {
+    if (profile?.current_weight_kg && profile?.height_cm && profile?.age) {
+      const bmr = profile.sex?.toLowerCase().startsWith('f')
+        ? 10 * profile.current_weight_kg + 6.25 * profile.height_cm - 5 * profile.age - 161
+        : 10 * profile.current_weight_kg + 6.25 * profile.height_cm - 5 * profile.age + 5;
+      return Math.round(bmr * 1.375);
+    }
+    return 2200;
+  })();
   const proteinTargetG = profile?.current_weight_kg
     ? Math.max(80, round1(profile.current_weight_kg * 1.6))
     : 120;
-  const calorieTarget = 2200;
   const fatTargetG = round1((calorieTarget * 0.3) / 9);
   const carbsTargetG = round1(Math.max(80, (calorieTarget - proteinTargetG * 4 - fatTargetG * 9) / 4));
 
@@ -558,9 +606,15 @@ export default function Dashboard() {
     );
   }
 
+  const pendingTasks = (planSnapshot?.upcoming_tasks || []).filter((t) => t.status !== 'completed');
+  const completedTasks = (planSnapshot?.upcoming_tasks || []).filter((t) => t.status === 'completed');
+  const totalTasks = planSnapshot?.upcoming_tasks?.length ?? 0;
+  const streak = planSnapshot?.reward?.completed_daily_streak ?? 0;
+  const allDoneToday = totalTasks > 0 && completedTasks.length === totalTasks;
+
   return (
     <div className="max-w-6xl mx-auto px-4 py-6">
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex items-center justify-between mb-4">
         <div>
           <h1 className="text-2xl font-bold text-slate-100">Dashboard</h1>
           <p className="text-slate-400 text-sm mt-1">{new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}</p>
@@ -576,21 +630,125 @@ export default function Dashboard() {
             disabled={generating}
             className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium rounded-lg transition-colors"
           >
-            {generating ? 'Generating...' : 'Generate Daily Summary'}
+            {generating ? 'Generating...' : 'Daily Summary'}
           </button>
         </div>
       </div>
 
+      {/* Today's Focus coaching card */}
+      {planSnapshot && totalTasks > 0 && (
+        <div className={`mb-5 rounded-xl border p-4 ${
+          allDoneToday
+            ? 'border-emerald-700/50 bg-emerald-950/30'
+            : 'border-slate-700 bg-slate-800/60'
+        }`}>
+          <div className="flex items-center justify-between gap-3 mb-3">
+            <div className="flex items-center gap-3">
+              <div>
+                <h2 className="text-sm font-semibold text-slate-100">
+                  {allDoneToday ? "Today's plan complete!" : "Today's Focus"}
+                </h2>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  {completedTasks.length}/{totalTasks} goals done
+                  {streak > 1 ? ` · ${streak}-day streak` : ''}
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              {/* Progress ring */}
+              <svg width="40" height="40" viewBox="0 0 40 40" className="shrink-0">
+                <circle cx="20" cy="20" r="16" fill="none" stroke="rgba(51,65,85,1)" strokeWidth="4" />
+                <circle
+                  cx="20" cy="20" r="16" fill="none"
+                  stroke={allDoneToday ? 'rgb(52,211,153)' : 'rgb(56,189,248)'}
+                  strokeWidth="4"
+                  strokeLinecap="round"
+                  strokeDasharray={`${totalTasks > 0 ? (completedTasks.length / totalTasks) * 100.5 : 0} 100.5`}
+                  transform="rotate(-90 20 20)"
+                />
+                <text x="20" y="24" textAnchor="middle" fontSize="10" fill={allDoneToday ? 'rgb(52,211,153)' : 'rgb(148,163,184)'} fontWeight="600">
+                  {totalTasks > 0 ? Math.round((completedTasks.length / totalTasks) * 100) : 0}%
+                </text>
+              </svg>
+              <button
+                type="button"
+                onClick={() => navigate('/chat')}
+                className="px-3 py-1.5 text-xs rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white font-medium transition-colors"
+              >
+                Chat with Coach
+              </button>
+            </div>
+          </div>
+
+          {!allDoneToday && pendingTasks.length > 0 && (
+            <div className="space-y-2">
+              {pendingTasks.slice(0, 3).map((task) => (
+                <div
+                  key={task.id}
+                  className="flex items-center gap-3 rounded-lg border border-slate-700 bg-slate-900/50 px-3 py-2"
+                >
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm text-slate-100 font-medium truncate">{task.title}</p>
+                    {task.framework_name && (
+                      <p className="text-[11px] text-cyan-400 mt-0.5">{task.framework_name}</p>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <span className="text-xs text-slate-400">{Math.round(task.progress_pct)}%</span>
+                    <button
+                      type="button"
+                      onClick={() => markTaskComplete(task.id)}
+                      disabled={planBusyTaskId === task.id}
+                      className="px-2.5 py-1 text-xs rounded-md bg-emerald-700/80 hover:bg-emerald-600 text-white disabled:opacity-50 transition-colors"
+                    >
+                      {planBusyTaskId === task.id ? '...' : 'Done'}
+                    </button>
+                  </div>
+                </div>
+              ))}
+              {pendingTasks.length > 3 && (
+                <button
+                  type="button"
+                  onClick={() => navigate('/plan')}
+                  className="text-xs text-slate-400 hover:text-slate-200 mt-1"
+                >
+                  +{pendingTasks.length - 3} more → View Plan
+                </button>
+              )}
+            </div>
+          )}
+
+          {allDoneToday && (
+            <p className="text-sm text-emerald-300">
+              All goals completed for today. Great work! Keep it up tomorrow.
+            </p>
+          )}
+        </div>
+      )}
+
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
         {/* Calories */}
         <Card title="Calories">
-          <p className="text-3xl font-bold text-slate-100">
-            {totals ? Math.round(totals.food.calories) : 0}
-            <span className="text-lg font-normal text-slate-500 ml-1">kcal</span>
-          </p>
+          <div className="flex items-end justify-between">
+            <p className="text-3xl font-bold text-slate-100">
+              {totals ? Math.round(totals.food.calories) : 0}
+              <span className="text-lg font-normal text-slate-500 ml-1">kcal</span>
+            </p>
+            <span className="text-xs text-slate-500 mb-1">goal {calorieTarget}</span>
+          </div>
           {totals && (
             <>
-              <p className="text-xs text-slate-500 mt-1">{totals.food.meal_count} meal{totals.food.meal_count !== 1 ? 's' : ''} logged</p>
+              <div className="mt-1 mb-2">
+                <div className="h-1.5 rounded-full bg-slate-700 overflow-hidden">
+                  <div
+                    className={`h-full rounded-full transition-all duration-500 ${
+                      totals.food.calories > calorieTarget ? 'bg-rose-500' : 'bg-emerald-500'
+                    }`}
+                    style={{ width: `${Math.min((totals.food.calories / calorieTarget) * 100, 100)}%` }}
+                  />
+                </div>
+                <p className="text-xs text-slate-500 mt-1">{totals.food.meal_count} meal{totals.food.meal_count !== 1 ? 's' : ''} · {Math.max(0, calorieTarget - Math.round(totals.food.calories))} kcal remaining</p>
+              </div>
               <MacroBar protein={totals.food.protein_g} carbs={totals.food.carbs_g} fat={totals.food.fat_g} />
             </>
           )}

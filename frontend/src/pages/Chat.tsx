@@ -60,18 +60,32 @@ function GoalPanel({
   tasks,
   notifications,
   onMarkComplete,
+  onDiscuss,
   loadingTaskId,
 }: {
   tasks: UpcomingTask[];
   notifications: PlanSnapshotLite['notifications'];
   onMarkComplete: (id: number) => void;
+  onDiscuss: (taskTitle: string) => void;
   loadingTaskId: number | null;
 }) {
+  const completed = tasks.filter((t) => t.status === 'completed').length;
+  const total = tasks.length;
+
   return (
     <div className="h-full rounded-xl border border-slate-700 bg-slate-800/70 p-3 sm:p-4 space-y-3 overflow-y-auto">
-      <div>
-        <h3 className="text-sm font-semibold text-slate-100">Upcoming Goals</h3>
-        <p className="text-xs text-slate-400 mt-0.5">Complete these next actions to stay on plan.</p>
+      <div className="flex items-start justify-between gap-2">
+        <div>
+          <h3 className="text-sm font-semibold text-slate-100">Today's Goals</h3>
+          <p className="text-xs text-slate-400 mt-0.5">Complete these next actions to stay on plan.</p>
+        </div>
+        {total > 0 && (
+          <span className={`text-xs px-2 py-0.5 rounded-full shrink-0 ${
+            completed === total ? 'bg-emerald-900/60 text-emerald-300' : 'bg-slate-700 text-slate-300'
+          }`}>
+            {completed}/{total}
+          </span>
+        )}
       </div>
 
       {tasks.length === 0 ? (
@@ -79,28 +93,51 @@ function GoalPanel({
       ) : (
         <div className="space-y-2">
           {tasks.map((task) => (
-            <div key={task.id} className="rounded-lg border border-slate-700 bg-slate-900/40 p-2.5">
-              <p className="text-sm text-slate-100 font-medium">{task.title}</p>
+            <div key={task.id} className={`rounded-lg border p-2.5 ${
+              task.status === 'completed'
+                ? 'border-emerald-800/40 bg-emerald-950/20'
+                : 'border-slate-700 bg-slate-900/40'
+            }`}>
+              <div className="flex items-start justify-between gap-1">
+                <p className={`text-sm font-medium flex-1 ${task.status === 'completed' ? 'line-through text-slate-400' : 'text-slate-100'}`}>
+                  {task.title}
+                </p>
+                {task.status === 'completed' && (
+                  <span className="text-emerald-400 text-xs shrink-0">✓</span>
+                )}
+              </div>
               {task.description && <p className="text-xs text-slate-400 mt-0.5">{task.description}</p>}
               {task.framework_name && <p className="text-[11px] text-cyan-300 mt-0.5">{task.framework_name}</p>}
               <div className="mt-2">
                 <div className="flex items-center justify-between text-[11px] text-slate-400 mb-1">
                   <span>{Math.round(task.progress_pct)}%</span>
-                  <span>{task.status}</span>
+                  <span className="capitalize">{task.status}</span>
                 </div>
                 <div className="h-1.5 rounded-full bg-slate-700 overflow-hidden">
-                  <div className="h-full bg-sky-500" style={{ width: `${Math.min(task.progress_pct, 100)}%` }} />
+                  <div
+                    className={`h-full ${task.status === 'completed' ? 'bg-emerald-500' : 'bg-sky-500'}`}
+                    style={{ width: `${Math.min(task.progress_pct, 100)}%` }}
+                  />
                 </div>
               </div>
               {task.status !== 'completed' && (
-                <button
-                  type="button"
-                  onClick={() => onMarkComplete(task.id)}
-                  disabled={loadingTaskId === task.id}
-                  className="mt-2 px-2.5 py-1 text-xs rounded-md bg-emerald-600 hover:bg-emerald-500 text-white disabled:opacity-50"
-                >
-                  {loadingTaskId === task.id ? 'Saving...' : 'Complete'}
-                </button>
+                <div className="mt-2 flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => onMarkComplete(task.id)}
+                    disabled={loadingTaskId === task.id}
+                    className="px-2.5 py-1 text-xs rounded-md bg-emerald-600 hover:bg-emerald-500 text-white disabled:opacity-50"
+                  >
+                    {loadingTaskId === task.id ? 'Saving...' : 'Done'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onDiscuss(task.title)}
+                    className="px-2.5 py-1 text-xs rounded-md border border-slate-600 bg-slate-800 hover:bg-slate-700 text-slate-300"
+                  >
+                    Discuss
+                  </button>
+                </div>
               )}
             </div>
           ))}
@@ -129,6 +166,14 @@ function GoalPanel({
   );
 }
 
+const QUICK_PROMPTS = [
+  { label: 'What should I focus on now?', text: 'What should I focus on right now based on my plan?' },
+  { label: 'Log a meal', text: 'I want to log a meal.' },
+  { label: 'Log exercise', text: 'I want to log my workout.' },
+  { label: 'Log water', text: 'I drank some water. Log it for me.' },
+  { label: 'Check my progress', text: "How am I doing today?" },
+];
+
 export default function Chat() {
   const { messages, loading, error, sendMessage, loadHistory } = useChat();
   const [selectedImage, setSelectedImage] = useState<File | null>(null);
@@ -136,6 +181,7 @@ export default function Chat() {
   const [planSnapshot, setPlanSnapshot] = useState<PlanSnapshotLite | null>(null);
   const [planBusyTaskId, setPlanBusyTaskId] = useState<number | null>(null);
   const [mobileGoalsOpen, setMobileGoalsOpen] = useState(false);
+  const [chatFill, setChatFill] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const hasLoadedRef = useRef(false);
   const verbosityOptions: Array<{ key: ChatVerbosity; label: string; hover: string }> = [
@@ -163,6 +209,11 @@ export default function Chat() {
     } finally {
       setPlanBusyTaskId(null);
     }
+  };
+
+  const handleDiscuss = (taskTitle: string) => {
+    setChatFill(`Help me with this goal: ${taskTitle}`);
+    setMobileGoalsOpen(false);
   };
 
   // Load history on mount
@@ -261,27 +312,54 @@ export default function Chat() {
           {/* Messages area */}
           <div className="min-h-0 overflow-y-auto pb-20 sm:pb-24">
             {messages.length === 0 && !loading ? (
-              <div className="flex items-center justify-center h-full">
-                <div className="text-center max-w-md">
-                  <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-emerald-500/10 flex items-center justify-center">
-                    <svg
-                      className="w-8 h-8 text-emerald-500"
-                      fill="none"
-                      viewBox="0 0 24 24"
-                      stroke="currentColor"
-                      strokeWidth={1.5}
-                    >
-                      <path
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.455 2.456L21.75 6l-1.036.259a3.375 3.375 0 00-2.455 2.456z"
-                      />
+              <div className="flex flex-col items-center justify-center h-full gap-6 max-w-lg mx-auto px-2">
+                <div className="text-center">
+                  <div className="w-14 h-14 mx-auto mb-3 rounded-full bg-emerald-500/10 flex items-center justify-center">
+                    <svg className="w-7 h-7 text-emerald-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.455 2.456L21.75 6l-1.036.259a3.375 3.375 0 00-2.455 2.456z" />
                     </svg>
                   </div>
-                  <h2 className="text-xl font-semibold text-slate-100 mb-2">Welcome to {APP_NAME}!</h2>
-                  <p className="text-slate-400 text-sm leading-relaxed">
-                    I&apos;ll coach you through your next goals. Start by logging one action, and I&apos;ll guide the next step.
-                  </p>
+                  <h2 className="text-lg font-semibold text-slate-100 mb-1">{APP_NAME}</h2>
+                  <p className="text-slate-400 text-sm">Your active coach is ready. What are we doing right now?</p>
+                </div>
+
+                {/* Top pending task highlight */}
+                {planSnapshot && planSnapshot.upcoming_tasks.filter(t => t.status !== 'completed').length > 0 && (
+                  <div className="w-full rounded-xl border border-emerald-800/40 bg-emerald-950/20 p-3.5">
+                    <p className="text-xs text-emerald-400 font-medium mb-2">Top priority right now</p>
+                    {planSnapshot.upcoming_tasks
+                      .filter(t => t.status !== 'completed')
+                      .slice(0, 2)
+                      .map(task => (
+                        <button
+                          key={task.id}
+                          type="button"
+                          onClick={() => setChatFill(`Help me with this goal: ${task.title}`)}
+                          className="w-full text-left rounded-lg border border-slate-700 bg-slate-900/60 hover:bg-slate-800 px-3 py-2 mb-1.5 last:mb-0 transition-colors"
+                        >
+                          <p className="text-sm text-slate-100 font-medium">{task.title}</p>
+                          {task.description && <p className="text-xs text-slate-400 mt-0.5">{task.description}</p>}
+                          {task.framework_name && <p className="text-[11px] text-cyan-300 mt-0.5">{task.framework_name}</p>}
+                        </button>
+                      ))}
+                  </div>
+                )}
+
+                {/* Quick prompt chips */}
+                <div className="w-full">
+                  <p className="text-xs text-slate-500 mb-2 text-center">Quick starts</p>
+                  <div className="flex flex-wrap gap-2 justify-center">
+                    {QUICK_PROMPTS.map((p) => (
+                      <button
+                        key={p.label}
+                        type="button"
+                        onClick={() => setChatFill(p.text)}
+                        className="px-3 py-1.5 text-xs rounded-full border border-slate-600 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-slate-100 transition-colors"
+                      >
+                        {p.label}
+                      </button>
+                    ))}
+                  </div>
                 </div>
               </div>
             ) : (
@@ -300,6 +378,7 @@ export default function Chat() {
               tasks={planSnapshot?.upcoming_tasks || []}
               notifications={planSnapshot?.notifications || []}
               onMarkComplete={markTaskComplete}
+              onDiscuss={handleDiscuss}
               loadingTaskId={planBusyTaskId}
             />
           </div>
@@ -324,6 +403,7 @@ export default function Chat() {
                 tasks={planSnapshot?.upcoming_tasks || []}
                 notifications={planSnapshot?.notifications || []}
                 onMarkComplete={markTaskComplete}
+                onDiscuss={handleDiscuss}
                 loadingTaskId={planBusyTaskId}
               />
             </div>
@@ -359,6 +439,8 @@ export default function Chat() {
         selectedImage={selectedImage}
         onSelectedImageChange={handleSelectedImageChange}
         disabled={isStreaming}
+        fillText={chatFill}
+        onFillConsumed={() => setChatFill(null)}
       />
     </div>
   );
