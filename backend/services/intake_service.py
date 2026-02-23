@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from db.models import IntakeSession, UserSettings
 from services.health_framework_service import sync_frameworks_from_settings
+from services.coaching_plan_service import ensure_plan_seeded
 from utils.med_utils import cleanup_structured_list, merge_structured_items, parse_structured_list, to_structured
 from utils.units import lb_to_kg
 
@@ -640,6 +641,7 @@ def finalize_session(session: IntakeSession, settings: UserSettings, db: Session
 
     if db is not None and settings.user is not None:
         sync_frameworks_from_settings(db, settings.user, source="intake", commit=False)
+        ensure_plan_seeded(db, settings.user)
 
     return patch
 

@@ -36,6 +36,7 @@ from config import settings
 from db.database import get_db
 from db.models import User, UserSettings, SpecialistConfig
 from services.health_framework_service import ensure_default_frameworks
+from services.coaching_plan_service import ensure_plan_seeded
 from services.rate_limit_service import RateLimitRule, enforce_rate_limit
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -108,9 +109,13 @@ def register(req: RegisterRequest, request: Request, response: Response, db: Ses
     db.flush()
 
     # Create default settings and specialist config
-    db.add(UserSettings(user_id=user.id))
+    settings_row = UserSettings(user_id=user.id)
+    db.add(settings_row)
     db.add(SpecialistConfig(user_id=user.id))
+    db.flush()
+    user.settings = settings_row
     ensure_default_frameworks(db, user.id)
+    ensure_plan_seeded(db, user)
     db.commit()
     token = create_token(user.id, role=user.role, token_version=user.token_version)
     _set_session_cookie(response, token, max_age_seconds=max(int(settings.JWT_EXPIRY_HOURS), 1) * 3600)

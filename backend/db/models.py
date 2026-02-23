@@ -39,6 +39,8 @@ class User(Base):
         cascade="all, delete-orphan",
         foreign_keys="AnalysisProposal.user_id",
     )
+    coaching_plan_tasks = relationship("CoachingPlanTask", back_populates="user", cascade="all, delete-orphan")
+    coaching_plan_adjustments = relationship("CoachingPlanAdjustment", back_populates="user", cascade="all, delete-orphan")
     admin_actions = relationship(
         "AdminAuditLog",
         back_populates="admin_user",
@@ -79,6 +81,9 @@ class UserSettings(Base):
     dietary_preferences = Column(Text)  # JSON array
     health_goals = Column(Text)  # JSON array
     timezone = Column(Text, default="America/Edmonton")
+    coaching_why = Column(Text)
+    plan_visibility_mode = Column(Text, default="top3")  # top3 | all
+    plan_max_visible_tasks = Column(Integer, default=3)
     usage_reset_at = Column(DateTime, nullable=True)
     intake_completed_at = Column(DateTime, nullable=True)
     intake_skipped_at = Column(DateTime, nullable=True)
@@ -479,6 +484,53 @@ class AnalysisProposal(Base):
     analysis_run = relationship("AnalysisRun", back_populates="proposals")
 
 
+class CoachingPlanTask(Base):
+    __tablename__ = "coaching_plan_tasks"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    cycle_type = Column(Text, nullable=False)  # daily | weekly | monthly
+    cycle_start = Column(Text, nullable=False)  # YYYY-MM-DD
+    cycle_end = Column(Text, nullable=False)  # YYYY-MM-DD
+    target_metric = Column(Text, nullable=False)
+    title = Column(Text, nullable=False)
+    description = Column(Text)
+    domain = Column(Text, nullable=False, default="general")
+    framework_type = Column(Text)
+    framework_name = Column(Text)
+    priority_score = Column(Integer, nullable=False, default=50)
+    target_value = Column(Float)
+    target_unit = Column(Text)
+    status = Column(Text, nullable=False, default="pending")  # pending | completed | missed | skipped
+    progress_pct = Column(Float, nullable=False, default=0.0)
+    due_at = Column(DateTime)
+    completed_at = Column(DateTime)
+    source = Column(Text, nullable=False, default="system")  # intake | user | adaptive | system
+    metadata_json = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    user = relationship("User", back_populates="coaching_plan_tasks")
+
+
+class CoachingPlanAdjustment(Base):
+    __tablename__ = "coaching_plan_adjustments"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    cycle_anchor = Column(Text)  # YYYY-MM-DD (usually weekly cycle_end)
+    title = Column(Text, nullable=False)
+    rationale = Column(Text, nullable=False)
+    change_json = Column(Text, nullable=False)  # JSON payload with reversible operations
+    status = Column(Text, nullable=False, default="applied")  # applied | undone | expired
+    applied_at = Column(DateTime, default=datetime.utcnow)
+    undo_expires_at = Column(DateTime, nullable=False)
+    undone_at = Column(DateTime)
+    source = Column(Text, nullable=False, default="plan_engine")
+
+    user = relationship("User", back_populates="coaching_plan_adjustments")
+
+
 class RequestTelemetryEvent(Base):
     __tablename__ = "request_telemetry_events"
 
@@ -641,6 +693,19 @@ Index(
 Index("idx_analysis_runs_user_status", AnalysisRun.user_id, AnalysisRun.status, AnalysisRun.created_at)
 Index("idx_analysis_proposals_user_status", AnalysisProposal.user_id, AnalysisProposal.status, AnalysisProposal.created_at)
 Index("idx_analysis_proposals_run", AnalysisProposal.analysis_run_id, AnalysisProposal.status)
+Index("idx_plan_tasks_user_cycle", CoachingPlanTask.user_id, CoachingPlanTask.cycle_type, CoachingPlanTask.cycle_start)
+Index("idx_plan_tasks_user_status_due", CoachingPlanTask.user_id, CoachingPlanTask.status, CoachingPlanTask.due_at)
+Index(
+    "idx_plan_tasks_unique_metric_window",
+    CoachingPlanTask.user_id,
+    CoachingPlanTask.cycle_type,
+    CoachingPlanTask.cycle_start,
+    CoachingPlanTask.target_metric,
+    CoachingPlanTask.framework_name,
+    unique=True,
+)
+Index("idx_plan_adjustments_user_date", CoachingPlanAdjustment.user_id, CoachingPlanAdjustment.applied_at)
+Index("idx_plan_adjustments_user_status", CoachingPlanAdjustment.user_id, CoachingPlanAdjustment.status, CoachingPlanAdjustment.undo_expires_at)
 Index("idx_request_telemetry_group_date", RequestTelemetryEvent.request_group, RequestTelemetryEvent.created_at)
 Index("idx_request_telemetry_user_date", RequestTelemetryEvent.user_id, RequestTelemetryEvent.created_at)
 Index("idx_ai_turn_telemetry_user_date", AITurnTelemetry.user_id, AITurnTelemetry.created_at)

@@ -29,12 +29,14 @@ from services.health_framework_service import (
     upsert_framework,
 )
 from services.user_reset_service import reset_user_data_for_user
+from services.coaching_plan_service import ensure_plan_seeded
 from utils.encryption import encrypt_api_key, decrypt_api_key
 
 router = APIRouter(prefix="/settings", tags=["settings"], dependencies=[Depends(require_non_admin)])
 ALLOWED_HEIGHT_UNITS = {"cm", "ft"}
 ALLOWED_WEIGHT_UNITS = {"kg", "lb"}
 ALLOWED_HYDRATION_UNITS = {"ml", "oz"}
+ALLOWED_PLAN_VISIBILITY = {"top3", "all"}
 
 
 class APIKeyRequest(BaseModel):
@@ -70,6 +72,9 @@ class ProfileUpdate(BaseModel):
     dietary_preferences: Optional[str] = None
     health_goals: Optional[str] = None
     timezone: Optional[str] = None
+    coaching_why: Optional[str] = None
+    plan_visibility_mode: Optional[str] = None
+    plan_max_visible_tasks: Optional[int] = None
 
 
 class ProfileResponse(BaseModel):
@@ -94,6 +99,9 @@ class ProfileResponse(BaseModel):
     dietary_preferences: Optional[str] = None
     health_goals: Optional[str] = None
     timezone: Optional[str] = None
+    coaching_why: Optional[str] = None
+    plan_visibility_mode: str
+    plan_max_visible_tasks: int
 
 
 class FrameworkUpsertRequest(BaseModel):
@@ -503,6 +511,9 @@ def get_profile(user: User = Depends(get_current_user), db: Session = Depends(ge
         dietary_preferences=s.dietary_preferences,
         health_goals=s.health_goals,
         timezone=s.timezone,
+        coaching_why=s.coaching_why,
+        plan_visibility_mode=s.plan_visibility_mode or "top3",
+        plan_max_visible_tasks=int(s.plan_max_visible_tasks or 3),
     )
 
 
@@ -562,6 +573,13 @@ def update_profile(
         raise HTTPException(status_code=400, detail="Invalid weight_unit")
     if "hydration_unit" in payload and payload["hydration_unit"] not in ALLOWED_HYDRATION_UNITS:
         raise HTTPException(status_code=400, detail="Invalid hydration_unit")
+    if "plan_visibility_mode" in payload and payload["plan_visibility_mode"] not in ALLOWED_PLAN_VISIBILITY:
+        raise HTTPException(status_code=400, detail="Invalid plan_visibility_mode")
+    if "plan_max_visible_tasks" in payload:
+        try:
+            payload["plan_max_visible_tasks"] = max(1, min(int(payload["plan_max_visible_tasks"]), 10))
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Invalid plan_max_visible_tasks") from exc
 
     tool_ctx = ToolContext(db=db, user=user, specialist_id="orchestrator")
     patch_fields = {
@@ -579,6 +597,9 @@ def update_profile(
         "dietary_preferences",
         "health_goals",
         "timezone",
+        "coaching_why",
+        "plan_visibility_mode",
+        "plan_max_visible_tasks",
     }
 
     patch_payload = {k: v for k, v in payload.items() if k in patch_fields}
@@ -598,6 +619,7 @@ def update_profile(
 
     # Profile updates can imply strategy framework activation (e.g., keto, IF).
     sync_frameworks_from_settings(db, user, source="user", commit=False)
+    ensure_plan_seeded(db, user)
     db.commit()
     return {"status": "ok"}
 
@@ -638,6 +660,8 @@ def create_or_upsert_framework(
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    ensure_plan_seeded(db, user)
+    db.commit()
     return {"status": "ok", "item": _serialize_framework_for_user(db, user.id, row.id), "demoted_ids": demoted_ids}
 
 
@@ -666,6 +690,8 @@ def patch_framework(
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    ensure_plan_seeded(db, user)
+    db.commit()
     return {"status": "ok", "item": _serialize_framework_for_user(db, user.id, row.id), "demoted_ids": demoted_ids}
 
 
@@ -687,6 +713,8 @@ def remove_framework(
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    ensure_plan_seeded(db, user)
+    db.commit()
     return {"status": "ok", "deleted_id": row.id}
 
 

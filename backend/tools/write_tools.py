@@ -243,6 +243,9 @@ def _tool_profile_patch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any
         "dietary_preferences",
         "health_goals",
         "family_history",
+        "coaching_why",
+        "plan_visibility_mode",
+        "plan_max_visible_tasks",
     }
     unknown = set(patch.keys()) - allowed
     if unknown:
@@ -316,6 +319,32 @@ def _tool_profile_patch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any
                 if v not in VALID_FITNESS:
                     raise ToolExecutionError("Invalid `fitness_level`")
                 s.fitness_level = v
+            changed.append(key)
+            continue
+
+        if key == "coaching_why":
+            text = " ".join(str(value or "").split()).strip()
+            s.coaching_why = text or None
+            changed.append(key)
+            continue
+
+        if key == "plan_visibility_mode":
+            if value is None:
+                continue
+            mode = str(value).strip().lower()
+            if mode not in {"top3", "all"}:
+                raise ToolExecutionError("`plan_visibility_mode` must be top3 or all")
+            s.plan_visibility_mode = mode
+            changed.append(key)
+            continue
+
+        if key == "plan_max_visible_tasks":
+            if value is None:
+                continue
+            count = _to_int(value, key)
+            if count is None:
+                raise ToolExecutionError("`plan_max_visible_tasks` must be an integer")
+            s.plan_max_visible_tasks = max(1, min(int(count), 10))
             changed.append(key)
             continue
 

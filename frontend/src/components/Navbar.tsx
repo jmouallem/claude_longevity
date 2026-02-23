@@ -5,6 +5,7 @@ import { APP_NAME } from '../constants/branding';
 
 const primaryNavLinks = [
   { to: '/chat', label: 'Chat' },
+  { to: '/plan', label: 'Plan' },
   { to: '/dashboard', label: 'Dashboard' },
   { to: '/history', label: 'History' },
   { to: '/menu', label: 'Menu' },

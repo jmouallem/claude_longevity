@@ -13,6 +13,7 @@ import Settings from './pages/Settings';
 import Specialists from './pages/Specialists';
 import Feedback from './pages/Feedback';
 import Menu from './pages/Menu';
+import Plan from './pages/Plan';
 import AdminStats from './pages/AdminStats';
 import AdminUsers from './pages/AdminUsers';
 import AdminSecurity from './pages/AdminSecurity';
@@ -93,6 +94,7 @@ function AuthenticatedLayout() {
         <Route path="dashboard" element={<Dashboard />} />
         <Route path="history" element={<History />} />
         <Route path="menu" element={<Menu />} />
+        <Route path="plan" element={<Plan />} />
         <Route path="feedback" element={<Feedback />} />
         <Route path="settings" element={<Settings />} />
         <Route path="specialists" element={<Specialists />} />

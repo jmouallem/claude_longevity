@@ -6,6 +6,8 @@ from config import settings as app_settings
 from db.models import (
     AnalysisProposal,
     AnalysisRun,
+    CoachingPlanAdjustment,
+    CoachingPlanTask,
     DailyChecklistItem,
     ExerciseLog,
     ExercisePlan,
@@ -30,6 +32,7 @@ from db.models import (
     VitalsLog,
 )
 from services.health_framework_service import ensure_default_frameworks
+from services.coaching_plan_service import ensure_plan_seeded
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +83,8 @@ def reset_user_data_for_user(db, user: User) -> dict[str, int]:
     db.query(ModelUsageEvent).filter(ModelUsageEvent.user_id == user.id).delete(synchronize_session=False)
     db.query(AnalysisProposal).filter(AnalysisProposal.user_id == user.id).delete(synchronize_session=False)
     db.query(AnalysisRun).filter(AnalysisRun.user_id == user.id).delete(synchronize_session=False)
+    db.query(CoachingPlanTask).filter(CoachingPlanTask.user_id == user.id).delete(synchronize_session=False)
+    db.query(CoachingPlanAdjustment).filter(CoachingPlanAdjustment.user_id == user.id).delete(synchronize_session=False)
     db.query(HealthOptimizationFramework).filter(HealthOptimizationFramework.user_id == user.id).delete(synchronize_session=False)
     db.query(PasskeyCredential).filter(PasskeyCredential.user_id == user.id).delete(synchronize_session=False)
     db.query(PasskeyChallenge).filter(PasskeyChallenge.user_id == user.id).delete(synchronize_session=False)
@@ -110,6 +115,9 @@ def reset_user_data_for_user(db, user: User) -> dict[str, int]:
     s.dietary_preferences = None
     s.health_goals = None
     s.timezone = "America/Edmonton"
+    s.coaching_why = None
+    s.plan_visibility_mode = "top3"
+    s.plan_max_visible_tasks = 3
     s.usage_reset_at = None
     s.intake_completed_at = None
     s.intake_skipped_at = None
@@ -122,6 +130,7 @@ def reset_user_data_for_user(db, user: User) -> dict[str, int]:
     cfg.specialist_overrides = None
 
     ensure_default_frameworks(db, user.id)
+    ensure_plan_seeded(db, user)
     db.commit()
 
     removed_files = 0

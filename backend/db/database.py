@@ -117,6 +117,12 @@ def run_startup_migrations() -> None:
             alter_statements.append("ALTER TABLE user_settings ADD COLUMN intake_completed_at DATETIME")
         if "intake_skipped_at" not in user_settings_columns:
             alter_statements.append("ALTER TABLE user_settings ADD COLUMN intake_skipped_at DATETIME")
+        if "coaching_why" not in user_settings_columns:
+            alter_statements.append("ALTER TABLE user_settings ADD COLUMN coaching_why TEXT")
+        if "plan_visibility_mode" not in user_settings_columns:
+            alter_statements.append("ALTER TABLE user_settings ADD COLUMN plan_visibility_mode TEXT DEFAULT 'top3'")
+        if "plan_max_visible_tasks" not in user_settings_columns:
+            alter_statements.append("ALTER TABLE user_settings ADD COLUMN plan_max_visible_tasks INTEGER DEFAULT 3")
 
     if meal_template_columns:
         if "is_archived" not in meal_template_columns:
@@ -190,6 +196,8 @@ def run_startup_migrations() -> None:
                 SET deep_thinking_model = COALESCE(deep_thinking_model, reasoning_model, 'claude-sonnet-4-20250514')
                 """
             ))
+            conn.execute(text("UPDATE user_settings SET plan_visibility_mode = COALESCE(plan_visibility_mode, 'top3')"))
+            conn.execute(text("UPDATE user_settings SET plan_max_visible_tasks = COALESCE(plan_max_visible_tasks, 3)"))
         if meal_template_columns:
             conn.execute(text("UPDATE meal_templates SET is_archived = COALESCE(is_archived, 0)"))
         if food_log_columns:
@@ -499,6 +507,85 @@ def run_startup_migrations() -> None:
             """
             CREATE INDEX IF NOT EXISTS idx_analysis_proposals_run
             ON analysis_proposals (analysis_run_id, status)
+            """
+        ))
+
+        # Coaching loop task engine tables.
+        conn.execute(text(
+            """
+            CREATE TABLE IF NOT EXISTS coaching_plan_tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                cycle_type TEXT NOT NULL,
+                cycle_start TEXT NOT NULL,
+                cycle_end TEXT NOT NULL,
+                target_metric TEXT NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT,
+                domain TEXT NOT NULL DEFAULT 'general',
+                framework_type TEXT,
+                framework_name TEXT,
+                priority_score INTEGER NOT NULL DEFAULT 50,
+                target_value FLOAT,
+                target_unit TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                progress_pct FLOAT NOT NULL DEFAULT 0,
+                due_at DATETIME,
+                completed_at DATETIME,
+                source TEXT NOT NULL DEFAULT 'system',
+                metadata_json TEXT,
+                created_at DATETIME,
+                updated_at DATETIME,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            )
+            """
+        ))
+        conn.execute(text(
+            """
+            CREATE TABLE IF NOT EXISTS coaching_plan_adjustments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                cycle_anchor TEXT,
+                title TEXT NOT NULL,
+                rationale TEXT NOT NULL,
+                change_json TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'applied',
+                applied_at DATETIME,
+                undo_expires_at DATETIME NOT NULL,
+                undone_at DATETIME,
+                source TEXT NOT NULL DEFAULT 'plan_engine',
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            )
+            """
+        ))
+        conn.execute(text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_plan_tasks_user_cycle
+            ON coaching_plan_tasks (user_id, cycle_type, cycle_start)
+            """
+        ))
+        conn.execute(text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_plan_tasks_user_status_due
+            ON coaching_plan_tasks (user_id, status, due_at)
+            """
+        ))
+        conn.execute(text(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_plan_tasks_unique_metric_window
+            ON coaching_plan_tasks (user_id, cycle_type, cycle_start, target_metric, framework_name)
+            """
+        ))
+        conn.execute(text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_plan_adjustments_user_date
+            ON coaching_plan_adjustments (user_id, applied_at)
+            """
+        ))
+        conn.execute(text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_plan_adjustments_user_status
+            ON coaching_plan_adjustments (user_id, status, undo_expires_at)
             """
         ))
 

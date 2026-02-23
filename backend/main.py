@@ -22,6 +22,7 @@ from api.intake import router as intake_router
 from api.menu import router as menu_router
 from api.analysis import router as analysis_router
 from api.admin import router as admin_router
+from api.plan import router as plan_router
 from services.telemetry_context import clear_request_scope, start_request_scope
 from services.telemetry_service import classify_request_group, flush_request_scope
 
@@ -98,6 +99,7 @@ app.include_router(intake_router, prefix="/api")
 app.include_router(menu_router, prefix="/api")
 app.include_router(analysis_router, prefix="/api")
 app.include_router(admin_router, prefix="/api")
+app.include_router(plan_router, prefix="/api")
 
 @app.get("/api/health")
 def health_check():
