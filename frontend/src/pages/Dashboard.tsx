@@ -460,7 +460,6 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [targetDate, setTargetDate] = useState<string>(today());
   const [planSnapshot, setPlanSnapshot] = useState<DailyPlanSnapshot | null>(null);
-  const [planBusyTaskId, setPlanBusyTaskId] = useState<number | null>(null);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -492,17 +491,10 @@ export default function Dashboard() {
     }
   }, []);
 
-  const markTaskComplete = async (taskId: number) => {
-    setPlanBusyTaskId(taskId);
-    try {
-      await apiClient.post(`/api/plan/tasks/${taskId}/status`, { status: 'completed' });
-      const updated = await apiClient.get<DailyPlanSnapshot>('/api/plan/snapshot?cycle_type=daily').catch(() => null);
-      setPlanSnapshot(updated);
-    } catch {
-      // no-op
-    } finally {
-      setPlanBusyTaskId(null);
-    }
+  const goToCoachForTask = (task: DailyPlanTask) => {
+    const desc = task.description ? ` (${task.description})` : '';
+    // Pass the coaching check-in prompt via navigation state so Chat can pre-fill
+    navigate('/chat', { state: { chatFill: `Goal check-in: ${task.title}${desc}` } });
   };
 
   useEffect(() => {
@@ -683,9 +675,11 @@ export default function Dashboard() {
           {!allDoneToday && pendingTasks.length > 0 && (
             <div className="space-y-2">
               {pendingTasks.slice(0, 3).map((task) => (
-                <div
+                <button
                   key={task.id}
-                  className="flex items-center gap-3 rounded-lg border border-slate-700 bg-slate-900/50 px-3 py-2"
+                  type="button"
+                  onClick={() => goToCoachForTask(task)}
+                  className="w-full flex items-center gap-3 rounded-lg border border-slate-700 bg-slate-900/50 hover:bg-slate-800 px-3 py-2 text-left transition-colors group"
                 >
                   <div className="flex-1 min-w-0">
                     <p className="text-sm text-slate-100 font-medium truncate">{task.title}</p>
@@ -693,18 +687,11 @@ export default function Dashboard() {
                       <p className="text-[11px] text-cyan-400 mt-0.5">{task.framework_name}</p>
                     )}
                   </div>
-                  <div className="flex items-center gap-1.5 shrink-0">
+                  <div className="flex items-center gap-2 shrink-0">
                     <span className="text-xs text-slate-400">{Math.round(task.progress_pct)}%</span>
-                    <button
-                      type="button"
-                      onClick={() => markTaskComplete(task.id)}
-                      disabled={planBusyTaskId === task.id}
-                      className="px-2.5 py-1 text-xs rounded-md bg-emerald-700/80 hover:bg-emerald-600 text-white disabled:opacity-50 transition-colors"
-                    >
-                      {planBusyTaskId === task.id ? '...' : 'Done'}
-                    </button>
+                    <span className="text-xs text-slate-400 group-hover:text-emerald-400 transition-colors">Update →</span>
                   </div>
-                </div>
+                </button>
               ))}
               {pendingTasks.length > 3 && (
                 <button

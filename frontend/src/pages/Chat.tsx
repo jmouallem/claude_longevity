@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useLocation } from 'react-router-dom';
 import { useChat, type ChatVerbosity } from '../hooks/useChat';
 import ChatMessage from '../components/ChatMessage';
 import ChatInput from '../components/ChatInput';
@@ -59,15 +60,11 @@ function fileToDataUrl(file: File): Promise<string> {
 function GoalPanel({
   tasks,
   notifications,
-  onMarkComplete,
-  onDiscuss,
-  loadingTaskId,
+  onUpdate,
 }: {
   tasks: UpcomingTask[];
   notifications: PlanSnapshotLite['notifications'];
-  onMarkComplete: (id: number) => void;
-  onDiscuss: (taskTitle: string) => void;
-  loadingTaskId: number | null;
+  onUpdate: (task: UpcomingTask) => void;
 }) {
   const completed = tasks.filter((t) => t.status === 'completed').length;
   const total = tasks.length;
@@ -77,7 +74,7 @@ function GoalPanel({
       <div className="flex items-start justify-between gap-2">
         <div>
           <h3 className="text-sm font-semibold text-slate-100">Today's Goals</h3>
-          <p className="text-xs text-slate-400 mt-0.5">Complete these next actions to stay on plan.</p>
+          <p className="text-xs text-slate-400 mt-0.5">Tell the coach what you did to log progress.</p>
         </div>
         {total > 0 && (
           <span className={`text-xs px-2 py-0.5 rounded-full shrink-0 ${
@@ -121,23 +118,13 @@ function GoalPanel({
                 </div>
               </div>
               {task.status !== 'completed' && (
-                <div className="mt-2 flex items-center gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() => onMarkComplete(task.id)}
-                    disabled={loadingTaskId === task.id}
-                    className="px-2.5 py-1 text-xs rounded-md bg-emerald-600 hover:bg-emerald-500 text-white disabled:opacity-50"
-                  >
-                    {loadingTaskId === task.id ? 'Saving...' : 'Done'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onDiscuss(task.title)}
-                    className="px-2.5 py-1 text-xs rounded-md border border-slate-600 bg-slate-800 hover:bg-slate-700 text-slate-300"
-                  >
-                    Discuss
-                  </button>
-                </div>
+                <button
+                  type="button"
+                  onClick={() => onUpdate(task)}
+                  className="mt-2 px-2.5 py-1 text-xs rounded-md border border-slate-600 bg-slate-800 hover:bg-slate-700 text-slate-200 transition-colors"
+                >
+                  Update with Coach
+                </button>
               )}
             </div>
           ))}
@@ -175,13 +162,15 @@ const QUICK_PROMPTS = [
 ];
 
 export default function Chat() {
+  const location = useLocation();
   const { messages, loading, error, sendMessage, loadHistory } = useChat();
   const [selectedImage, setSelectedImage] = useState<File | null>(null);
   const [verbosity, setVerbosity] = useState<ChatVerbosity>('normal');
   const [planSnapshot, setPlanSnapshot] = useState<PlanSnapshotLite | null>(null);
-  const [planBusyTaskId, setPlanBusyTaskId] = useState<number | null>(null);
   const [mobileGoalsOpen, setMobileGoalsOpen] = useState(false);
-  const [chatFill, setChatFill] = useState<string | null>(null);
+  const [chatFill, setChatFill] = useState<string | null>(
+    (location.state as { chatFill?: string } | null)?.chatFill ?? null,
+  );
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const hasLoadedRef = useRef(false);
   const verbosityOptions: Array<{ key: ChatVerbosity; label: string; hover: string }> = [
@@ -199,20 +188,9 @@ export default function Chat() {
     }
   }, []);
 
-  const markTaskComplete = async (taskId: number) => {
-    setPlanBusyTaskId(taskId);
-    try {
-      await apiClient.post(`/api/plan/tasks/${taskId}/status`, { status: 'completed' });
-      await fetchPlanSnapshot();
-    } catch {
-      // no-op
-    } finally {
-      setPlanBusyTaskId(null);
-    }
-  };
-
-  const handleDiscuss = (taskTitle: string) => {
-    setChatFill(`Help me with this goal: ${taskTitle}`);
+  const handleUpdate = (task: UpcomingTask) => {
+    const desc = task.description ? ` (${task.description})` : '';
+    setChatFill(`Goal check-in: ${task.title}${desc}`);
     setMobileGoalsOpen(false);
   };
 
@@ -326,7 +304,8 @@ export default function Chat() {
                 {/* Top pending task highlight */}
                 {planSnapshot && planSnapshot.upcoming_tasks.filter(t => t.status !== 'completed').length > 0 && (
                   <div className="w-full rounded-xl border border-emerald-800/40 bg-emerald-950/20 p-3.5">
-                    <p className="text-xs text-emerald-400 font-medium mb-2">Top priority right now</p>
+                    <p className="text-xs text-emerald-400 font-medium mb-1">Top priority right now</p>
+                    <p className="text-[11px] text-slate-400 mb-2">Tap a goal to check in with your coach.</p>
                     {planSnapshot.upcoming_tasks
                       .filter(t => t.status !== 'completed')
                       .slice(0, 2)
@@ -334,10 +313,13 @@ export default function Chat() {
                         <button
                           key={task.id}
                           type="button"
-                          onClick={() => setChatFill(`Help me with this goal: ${task.title}`)}
-                          className="w-full text-left rounded-lg border border-slate-700 bg-slate-900/60 hover:bg-slate-800 px-3 py-2 mb-1.5 last:mb-0 transition-colors"
+                          onClick={() => handleUpdate(task)}
+                          className="w-full text-left rounded-lg border border-slate-700 bg-slate-900/60 hover:bg-slate-800 px-3 py-2 mb-1.5 last:mb-0 transition-colors group"
                         >
-                          <p className="text-sm text-slate-100 font-medium">{task.title}</p>
+                          <div className="flex items-center justify-between gap-2">
+                            <p className="text-sm text-slate-100 font-medium">{task.title}</p>
+                            <span className="text-[11px] text-slate-400 group-hover:text-emerald-400 shrink-0 transition-colors">Check in →</span>
+                          </div>
                           {task.description && <p className="text-xs text-slate-400 mt-0.5">{task.description}</p>}
                           {task.framework_name && <p className="text-[11px] text-cyan-300 mt-0.5">{task.framework_name}</p>}
                         </button>
@@ -377,9 +359,7 @@ export default function Chat() {
             <GoalPanel
               tasks={planSnapshot?.upcoming_tasks || []}
               notifications={planSnapshot?.notifications || []}
-              onMarkComplete={markTaskComplete}
-              onDiscuss={handleDiscuss}
-              loadingTaskId={planBusyTaskId}
+              onUpdate={handleUpdate}
             />
           </div>
         </div>
@@ -402,9 +382,7 @@ export default function Chat() {
               <GoalPanel
                 tasks={planSnapshot?.upcoming_tasks || []}
                 notifications={planSnapshot?.notifications || []}
-                onMarkComplete={markTaskComplete}
-                onDiscuss={handleDiscuss}
-                loadingTaskId={planBusyTaskId}
+                onUpdate={handleUpdate}
               />
             </div>
           </div>
