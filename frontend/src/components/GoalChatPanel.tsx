@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { Fragment, type ReactNode, useCallback, useEffect, useRef, useState } from 'react';
 import { useChat } from '../hooks/useChat';
 import type { ChatMessage } from '../hooks/useChat';
 
@@ -9,6 +9,134 @@ interface GoalChatPanelProps {
   taskDescription?: string;
   initialMessage?: string;
   onTaskUpdated?: () => void;
+}
+
+function renderInline(text: string): ReactNode[] {
+  const out: ReactNode[] = [];
+  const tokenRegex = /(\*\*[^*]+\*\*|`[^`]+`|\*[^*]+\*)/g;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null = tokenRegex.exec(text);
+
+  while (match) {
+    if (match.index > lastIndex) {
+      out.push(text.slice(lastIndex, match.index));
+    }
+
+    const token = match[0];
+    if (token.startsWith('**') && token.endsWith('**')) {
+      out.push(<strong key={`${match.index}-b`}>{token.slice(2, -2)}</strong>);
+    } else if (token.startsWith('`') && token.endsWith('`')) {
+      out.push(
+        <code
+          key={`${match.index}-c`}
+          className="px-1.5 py-0.5 rounded bg-slate-900/50 text-sky-200 text-[0.92em]"
+        >
+          {token.slice(1, -1)}
+        </code>
+      );
+    } else if (token.startsWith('*') && token.endsWith('*')) {
+      out.push(<em key={`${match.index}-i`}>{token.slice(1, -1)}</em>);
+    } else {
+      out.push(token);
+    }
+
+    lastIndex = match.index + token.length;
+    match = tokenRegex.exec(text);
+  }
+
+  if (lastIndex < text.length) {
+    out.push(text.slice(lastIndex));
+  }
+
+  return out;
+}
+
+function renderContent(content: string): ReactNode[] {
+  const blocks: ReactNode[] = [];
+  const lines = content.replace(/\r\n/g, '\n').split('\n');
+  let i = 0;
+
+  while (i < lines.length) {
+    const rawLine = lines[i];
+    const line = rawLine.trim();
+
+    if (!line) {
+      i += 1;
+      continue;
+    }
+
+    const headingMatch = line.match(/^(#{1,6})\s+(.+)$/);
+    if (headingMatch) {
+      const level = headingMatch[1].length;
+      const headingText = headingMatch[2];
+      const headingClass = level <= 2
+        ? 'text-base font-semibold text-slate-50'
+        : 'text-sm font-semibold text-slate-100';
+      blocks.push(
+        <p key={`h-${i}`} className={headingClass}>
+          {renderInline(headingText)}
+        </p>
+      );
+      i += 1;
+      continue;
+    }
+
+    if (/^[-*]\s+/.test(line)) {
+      const items: string[] = [];
+      while (i < lines.length && /^[-*]\s+/.test(lines[i].trim())) {
+        items.push(lines[i].trim().replace(/^[-*]\s+/, ''));
+        i += 1;
+      }
+      blocks.push(
+        <ul key={`ul-${i}`} className="list-disc pl-5 space-y-1.5 text-slate-100/95">
+          {items.map((item, idx) => (
+            <li key={`uli-${idx}`}>{renderInline(item)}</li>
+          ))}
+        </ul>
+      );
+      continue;
+    }
+
+    if (/^\d+\.\s+/.test(line)) {
+      const items: string[] = [];
+      while (i < lines.length && /^\d+\.\s+/.test(lines[i].trim())) {
+        items.push(lines[i].trim().replace(/^\d+\.\s+/, ''));
+        i += 1;
+      }
+      blocks.push(
+        <ol key={`ol-${i}`} className="list-decimal pl-5 space-y-1.5 text-slate-100/95">
+          {items.map((item, idx) => (
+            <li key={`oli-${idx}`}>{renderInline(item)}</li>
+          ))}
+        </ol>
+      );
+      continue;
+    }
+
+    const paragraphLines: string[] = [rawLine.trimEnd()];
+    i += 1;
+    while (i < lines.length) {
+      const next = lines[i].trim();
+      if (!next || /^(#{1,6})\s+/.test(next) || /^[-*]\s+/.test(next) || /^\d+\.\s+/.test(next)) {
+        break;
+      }
+      paragraphLines.push(lines[i].trimEnd());
+      i += 1;
+    }
+
+    blocks.push(
+      <p key={`p-${i}`} className="text-slate-100/95">
+        {paragraphLines.map((pLine, idx) => (
+          <Fragment key={`pl-${idx}`}>
+            {renderInline(pLine)}
+            {idx < paragraphLines.length - 1 && <br />}
+          </Fragment>
+        ))}
+      </p>
+    );
+  }
+
+  return blocks;
 }
 
 function MessageBubble({ message }: { message: ChatMessage }) {
@@ -22,12 +150,12 @@ function MessageBubble({ message }: { message: ChatMessage }) {
             : 'bg-slate-700 text-slate-100 rounded-bl-sm'
         }`}
       >
-        <p className="whitespace-pre-wrap leading-relaxed">
-          {message.content}
+        <div className="leading-relaxed break-words space-y-2">
+          {renderContent(message.content)}
           {message.isStreaming && (
             <span className="inline-block w-1.5 h-3.5 ml-0.5 bg-current animate-pulse rounded-sm" />
           )}
-        </p>
+        </div>
       </div>
     </div>
   );
