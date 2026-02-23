@@ -471,3 +471,8 @@
 - register -> API key/models setup -> intake completion -> framework selection -> plan snapshot -> task completion -> guided chat stream smoke check.
 5. Re-validated backend suite after onboarding regression addition:
 - `python -m pytest -q backend/tests` (pass, 18 tests)
+6. Added cross-sync regression coverage in `backend/tests/test_phase_g_chat_dashboard_sync.py`:
+- Chat-driven logging sync to dashboard totals and plan task progress.
+- Time inference/day-bucket consistency for user timezone boundaries (today vs previous local day).
+7. Re-validated backend suite after cross-sync regression addition:
+- `python -m pytest -q backend/tests` (pass, 20 tests)
