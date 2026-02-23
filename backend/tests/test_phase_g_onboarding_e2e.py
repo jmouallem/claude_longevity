@@ -97,7 +97,7 @@ def test_full_post_intake_onboarding_flow_with_guided_chat(monkeypatch):
 
     finish_body = _complete_intake_flow(client)
     next_step = finish_body.get("next_step") or {}
-    assert next_step.get("route") == "/plan?onboarding=1"
+    assert next_step.get("route") == "/goals?onboarding=1"
 
     education = client.get("/api/plan/framework-education")
     assert education.status_code == 200
