@@ -84,7 +84,10 @@ export default function ChatInput({
   const canSend = (text.trim().length > 0 || selectedImage !== null) && !disabled;
 
   return (
-    <div className="border-t border-slate-700 bg-slate-800 px-4 py-3">
+    <div
+      className="border-t border-slate-700 bg-slate-800 px-2 sm:px-4 py-2 sm:py-3"
+      style={{ paddingBottom: 'max(env(safe-area-inset-bottom), 0px)' }}
+    >
       {/* Image preview row */}
       {selectedImage && (
         <div className="mb-2 flex items-center gap-2">
@@ -112,7 +115,7 @@ export default function ChatInput({
         </div>
       )}
 
-      <div className="flex items-end gap-2">
+      <div className="flex items-end gap-1.5 sm:gap-2 w-full">
         {/* Image upload */}
         <ImageUpload
           onImageSelect={onSelectedImageChange}
@@ -130,7 +133,7 @@ export default function ChatInput({
           placeholder="Type your message..."
           rows={1}
           disabled={disabled}
-          className="flex-1 resize-none bg-slate-700 border border-slate-600 rounded-xl px-4 py-2.5 text-sm text-slate-100 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:border-transparent disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          className="flex-1 min-w-0 resize-none bg-slate-700 border border-slate-600 rounded-xl px-3 sm:px-4 py-2.5 text-sm text-slate-100 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:border-transparent disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
         />
 
         {/* Send button */}

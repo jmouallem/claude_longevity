@@ -231,7 +231,7 @@ export default function Chat() {
   const unreadPrompts = (planSnapshot?.notifications || []).filter((n) => !n.is_read).length;
 
   return (
-    <div className="flex flex-col h-[calc(100vh-3.5rem)]">
+    <div className="relative flex flex-col h-[calc(100vh-3.5rem)] overflow-hidden supports-[height:100dvh]:h-[calc(100dvh-3.5rem)]">
       <div className="px-4 py-2 border-b border-slate-700/70 bg-slate-900/50">
         <div className="max-w-7xl mx-auto flex items-center justify-center gap-2">
           <div className="inline-flex rounded-lg border border-slate-700 bg-slate-800/70 p-0.5">
@@ -259,7 +259,7 @@ export default function Chat() {
       <div className="flex-1 min-h-0">
         <div className="h-full max-w-7xl mx-auto px-4 py-4 grid grid-cols-1 lg:grid-cols-[1fr_320px] gap-4">
           {/* Messages area */}
-          <div className="min-h-0 overflow-y-auto">
+          <div className="min-h-0 overflow-y-auto pb-20 sm:pb-24">
             {messages.length === 0 && !loading ? (
               <div className="flex items-center justify-center h-full">
                 <div className="text-center max-w-md">
@@ -306,6 +306,31 @@ export default function Chat() {
         </div>
       </div>
 
+      {/* Mobile goals modal */}
+      {mobileGoalsOpen && (
+        <div className="lg:hidden fixed inset-0 z-40 bg-slate-950/70 px-3 pt-20 pb-4">
+          <div className="h-full rounded-xl border border-slate-700 bg-slate-900/95 shadow-2xl overflow-hidden">
+            <div className="flex items-center justify-end px-3 pt-3">
+              <button
+                type="button"
+                onClick={() => setMobileGoalsOpen(false)}
+                className="px-2.5 py-1 text-xs rounded-md border border-slate-600 bg-slate-800 text-slate-200 hover:bg-slate-700"
+              >
+                Close
+              </button>
+            </div>
+            <div className="h-[calc(100%-2.5rem)] px-3 pb-3">
+              <GoalPanel
+                tasks={planSnapshot?.upcoming_tasks || []}
+                notifications={planSnapshot?.notifications || []}
+                onMarkComplete={markTaskComplete}
+                loadingTaskId={planBusyTaskId}
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Mobile goal drawer */}
       <div className="lg:hidden px-4 pb-2">
         <button
@@ -319,16 +344,6 @@ export default function Chat() {
             {unreadPrompts > 0 ? ` | ${unreadPrompts} prompts` : ''}
           </span>
         </button>
-        {mobileGoalsOpen && (
-          <div className="mt-2 max-h-[42vh]">
-            <GoalPanel
-              tasks={planSnapshot?.upcoming_tasks || []}
-              notifications={planSnapshot?.notifications || []}
-              onMarkComplete={markTaskComplete}
-              loadingTaskId={planBusyTaskId}
-            />
-          </div>
-        )}
       </div>
 
       {/* Error banner */}

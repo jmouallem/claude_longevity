@@ -32,7 +32,7 @@ export default function VoiceButton({ onTranscript }: VoiceButtonProps) {
         type="button"
         onClick={handleClick}
         disabled={!isSupported}
-        className={`p-2 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+        className={`p-1.5 sm:p-2 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
           isListening
             ? 'text-red-400 bg-red-500/20 animate-pulse'
             : 'text-slate-400 hover:text-slate-200 hover:bg-slate-600'
