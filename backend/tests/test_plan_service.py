@@ -14,8 +14,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from db.database import Base  # noqa: E402
-from db.models import CoachingPlanAdjustment, CoachingPlanTask, User, UserSettings  # noqa: E402
-from services.coaching_plan_service import get_plan_snapshot, set_task_status, undo_adjustment  # noqa: E402
+from db.models import CoachingPlanAdjustment, CoachingPlanTask, HealthOptimizationFramework, User, UserSettings  # noqa: E402
+from services.coaching_plan_service import apply_framework_selection, get_plan_snapshot, set_task_status, undo_adjustment  # noqa: E402
 
 
 def _new_db():
@@ -120,3 +120,34 @@ def test_undo_adjustment_restores_targets():
     assert task.target_value == 40.0
     assert adj.status == "undone"
     assert adj.undone_at is not None
+
+
+def test_framework_selection_updates_active_flags_and_plan_tasks():
+    db = _new_db()
+    user = _new_user(db, "plan_framework_user")
+    get_plan_snapshot(db, user, cycle_type="daily")
+    db.commit()
+
+    frameworks = (
+        db.query(HealthOptimizationFramework)
+        .filter(HealthOptimizationFramework.user_id == user.id, HealthOptimizationFramework.framework_type == "dietary")
+        .order_by(HealthOptimizationFramework.id.asc())
+        .all()
+    )
+    assert len(frameworks) >= 2
+    selected_id = int(frameworks[1].id)
+
+    result = apply_framework_selection(db, user, selected_framework_ids=[selected_id])
+    db.commit()
+
+    assert result["selected_count"] == 1
+    assert result["changed"] >= 1
+    selected_row = db.query(HealthOptimizationFramework).filter(HealthOptimizationFramework.id == selected_id).first()
+    assert selected_row is not None
+    assert bool(selected_row.is_active) is True
+
+    snapshot = get_plan_snapshot(db, user, cycle_type="daily")
+    db.commit()
+    framework_tasks = [row for row in snapshot["tasks"] if row["domain"] == "framework"]
+    assert framework_tasks
+    assert all("Follow " in row["title"] for row in framework_tasks)

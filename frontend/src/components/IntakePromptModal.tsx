@@ -15,7 +15,7 @@ interface IntakeState {
 
 interface IntakePromptModalProps {
   onDismiss: () => void;
-  onCompleted: () => void;
+  onCompleted: (nextRoute?: string) => void;
 }
 
 export default function IntakePromptModal({ onDismiss, onCompleted }: IntakePromptModalProps) {
@@ -93,8 +93,8 @@ export default function IntakePromptModal({ onDismiss, onCompleted }: IntakeProm
     setSubmitting(true);
     setError('');
     try {
-      await apiClient.post('/api/intake/finish', {});
-      onCompleted();
+      const result = await apiClient.post<{ next_step?: { route?: string } }>('/api/intake/finish', {});
+      onCompleted(result.next_step?.route);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Failed to finish intake.');
     } finally {

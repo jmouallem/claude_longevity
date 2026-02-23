@@ -10,6 +10,7 @@ from auth.utils import get_current_user, require_non_admin
 from db.database import get_db
 from db.models import User
 from services.coaching_plan_service import (
+    apply_framework_selection,
     clear_plan_data,
     ensure_plan_seeded,
     get_plan_snapshot,
@@ -32,6 +33,10 @@ class PlanPreferenceUpdate(BaseModel):
 
 class TaskStatusUpdate(BaseModel):
     status: str  # pending | completed | skipped
+
+
+class FrameworkSelectionRequest(BaseModel):
+    selected_framework_ids: list[int] = []
 
 
 @router.get("/snapshot")
@@ -91,6 +96,24 @@ def seed_plan(
     db: Session = Depends(get_db),
 ):
     result = ensure_plan_seeded(db, user)
+    db.commit()
+    return {"status": "ok", **result}
+
+
+@router.post("/framework-selection")
+def update_framework_selection(
+    payload: FrameworkSelectionRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    try:
+        result = apply_framework_selection(
+            db,
+            user,
+            selected_framework_ids=payload.selected_framework_ids,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     db.commit()
     return {"status": "ok", **result}
 

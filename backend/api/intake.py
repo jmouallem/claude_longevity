@@ -216,4 +216,12 @@ def finish_intake(
     patch = finalize_session(session, settings, db=db)
     state = session_state(session, settings)
     db.commit()
-    return {"status": "completed", "applied_patch": patch, **state}
+    return {
+        "status": "completed",
+        "applied_patch": patch,
+        "next_step": {
+            "route": "/plan?onboarding=1",
+            "message": "Review frameworks, confirm targets, and start your first coaching task.",
+        },
+        **state,
+    }

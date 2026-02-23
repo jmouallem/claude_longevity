@@ -369,12 +369,13 @@ def ensure_plan_seeded(
     user: User,
     *,
     reference_day: date | None = None,
+    allow_auto_activate_defaults: bool = True,
 ) -> dict[str, Any]:
     settings = user.settings
     if not settings:
         return {"created": 0}
     ensure_plan_preferences(settings)
-    frameworks = activate_default_frameworks_if_none(db, user)
+    frameworks = activate_default_frameworks_if_none(db, user) if allow_auto_activate_defaults else _active_frameworks(db, user.id)
 
     day = reference_day or _today(user)
     windows = [_window_for("daily", day), _window_for("weekly", day), _window_for("monthly", day)]
@@ -382,6 +383,76 @@ def ensure_plan_seeded(
     for window in windows:
         created += _ensure_window_tasks(db, user, window, frameworks)
     return {"created": created}
+
+
+def _clear_pending_framework_tasks(
+    db: Session,
+    user_id: int,
+    *,
+    reference_day: date,
+) -> int:
+    return int(
+        db.query(CoachingPlanTask)
+        .filter(
+            CoachingPlanTask.user_id == user_id,
+            CoachingPlanTask.domain == "framework",
+            CoachingPlanTask.status == "pending",
+            CoachingPlanTask.cycle_end >= reference_day.isoformat(),
+        )
+        .delete(synchronize_session=False)
+        or 0
+    )
+
+
+def apply_framework_selection(
+    db: Session,
+    user: User,
+    *,
+    selected_framework_ids: list[int] | None,
+) -> dict[str, Any]:
+    ensure_default_frameworks(db, user.id)
+    all_rows = (
+        db.query(HealthOptimizationFramework)
+        .filter(HealthOptimizationFramework.user_id == user.id)
+        .all()
+    )
+    known_ids = {int(row.id) for row in all_rows}
+    selected_ids = {int(v) for v in (selected_framework_ids or []) if int(v) > 0}
+    unknown = sorted(selected_ids - known_ids)
+    if unknown:
+        raise ValueError(f"Unknown framework ids: {', '.join(str(v) for v in unknown)}")
+
+    changed = 0
+    activated = 0
+    deactivated = 0
+    for row in all_rows:
+        should_be_active = int(row.id) in selected_ids
+        if bool(row.is_active) != should_be_active:
+            row.is_active = should_be_active
+            changed += 1
+            if should_be_active:
+                activated += 1
+            else:
+                deactivated += 1
+        if should_be_active:
+            row.priority_score = max(int(row.priority_score or 0), 60)
+            if row.source == "seed":
+                row.source = "user"
+            if not row.rationale:
+                row.rationale = "Selected during intake handoff plan setup."
+
+    day = _today(user)
+    removed_framework_tasks = _clear_pending_framework_tasks(db, user.id, reference_day=day)
+    ensure_plan_seeded(db, user, reference_day=day, allow_auto_activate_defaults=False)
+    refresh_task_statuses(db, user, reference_day=day, create_notifications=False)
+
+    return {
+        "changed": changed,
+        "activated": activated,
+        "deactivated": deactivated,
+        "removed_framework_tasks": removed_framework_tasks,
+        "selected_count": len(selected_ids),
+    }
 
 
 def _collect_metric_values(db: Session, user: User, window: CycleWindow) -> dict[str, float | None]:

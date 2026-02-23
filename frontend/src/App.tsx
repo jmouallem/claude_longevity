@@ -103,9 +103,10 @@ function AuthenticatedLayout() {
       {showIntakePrompt && (
         <IntakePromptModal
           onDismiss={() => setShowIntakePrompt(false)}
-          onCompleted={() => {
+          onCompleted={(nextRoute) => {
             setShowIntakePrompt(false);
             window.dispatchEvent(new Event('intake:check'));
+            navigate(nextRoute || '/plan?onboarding=1');
           }}
         />
       )}

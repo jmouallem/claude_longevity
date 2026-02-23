@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { apiClient } from '../api/client';
 
 type CycleType = 'daily' | 'weekly' | 'monthly';
@@ -85,6 +86,18 @@ interface PlanSnapshot {
   adjustments: PlanAdjustment[];
 }
 
+interface FrameworkItem {
+  id: number;
+  framework_type: string;
+  framework_type_label: string;
+  classifier_label: string;
+  name: string;
+  priority_score: number;
+  is_active: boolean;
+  source: string;
+  rationale?: string | null;
+}
+
 interface FrameworkEducation {
   framework_types: Record<
     string,
@@ -95,6 +108,7 @@ interface FrameworkEducation {
       examples?: string[];
     }
   >;
+  grouped: Record<string, FrameworkItem[]>;
 }
 
 function percentage(value: number): string {
@@ -109,6 +123,8 @@ function statusPill(task: PlanTask) {
 }
 
 export default function Plan() {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const navigate = useNavigate();
   const [cycle, setCycle] = useState<CycleType>('daily');
   const [snapshot, setSnapshot] = useState<PlanSnapshot | null>(null);
   const [frameworkEducation, setFrameworkEducation] = useState<FrameworkEducation | null>(null);
@@ -119,6 +135,15 @@ export default function Plan() {
   const [visibilityMode, setVisibilityMode] = useState<VisibilityMode>('top3');
   const [maxVisible, setMaxVisible] = useState(3);
   const [why, setWhy] = useState('');
+  const [showOnboarding, setShowOnboarding] = useState(false);
+  const [onboardingStep, setOnboardingStep] = useState(1);
+  const [selectedFrameworkIds, setSelectedFrameworkIds] = useState<number[]>([]);
+  const [applyingFrameworks, setApplyingFrameworks] = useState(false);
+  const [cyclePreview, setCyclePreview] = useState<Record<CycleType, PlanSnapshot | null>>({
+    daily: null,
+    weekly: null,
+    monthly: null,
+  });
 
   const fetchSnapshot = useCallback(async (cycleType: CycleType) => {
     setLoading(true);
@@ -133,6 +158,11 @@ export default function Plan() {
       setVisibilityMode((data.preferences.visibility_mode || 'top3') as VisibilityMode);
       setMaxVisible(data.preferences.max_visible_tasks || 3);
       setWhy(data.preferences.coaching_why || '');
+      const activeIds = Object.values(frameworkData.grouped || {})
+        .flat()
+        .filter((item) => item.is_active)
+        .map((item) => item.id);
+      setSelectedFrameworkIds((prev) => (prev.length > 0 ? prev : activeIds));
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Failed to load plan.');
     } finally {
@@ -143,6 +173,18 @@ export default function Plan() {
   useEffect(() => {
     void fetchSnapshot(cycle);
   }, [cycle, fetchSnapshot]);
+
+  useEffect(() => {
+    if (!frameworkEducation) return;
+    const activeCount = Object.values(frameworkEducation.grouped || {})
+      .flat()
+      .filter((item) => item.is_active).length;
+    const shouldShow = searchParams.get('onboarding') === '1' || activeCount === 0;
+    setShowOnboarding(shouldShow);
+    if (shouldShow) {
+      setOnboardingStep(1);
+    }
+  }, [frameworkEducation, searchParams]);
 
   const updatePreference = async () => {
     setSaving(true);
@@ -193,9 +235,62 @@ export default function Plan() {
     }
   };
 
+  const closeOnboarding = () => {
+    setShowOnboarding(false);
+    if (searchParams.get('onboarding') === '1') {
+      const nextParams = new URLSearchParams(searchParams);
+      nextParams.delete('onboarding');
+      setSearchParams(nextParams, { replace: true });
+    }
+  };
+
+  const toggleFrameworkSelection = (id: number) => {
+    setSelectedFrameworkIds((prev) =>
+      prev.includes(id) ? prev.filter((itemId) => itemId !== id) : [...prev, id],
+    );
+  };
+
+  const applyFrameworkSelection = async () => {
+    setApplyingFrameworks(true);
+    setError('');
+    try {
+      await apiClient.post('/api/plan/framework-selection', {
+        selected_framework_ids: selectedFrameworkIds,
+      });
+      await fetchSnapshot(cycle);
+      setOnboardingStep(2);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Failed to apply framework selection.');
+    } finally {
+      setApplyingFrameworks(false);
+    }
+  };
+
+  const loadCyclePreview = useCallback(async () => {
+    try {
+      const [daily, weekly, monthly] = await Promise.all([
+        apiClient.get<PlanSnapshot>('/api/plan/snapshot?cycle_type=daily'),
+        apiClient.get<PlanSnapshot>('/api/plan/snapshot?cycle_type=weekly'),
+        apiClient.get<PlanSnapshot>('/api/plan/snapshot?cycle_type=monthly'),
+      ]);
+      setCyclePreview({ daily, weekly, monthly });
+    } catch {
+      // keep onboarding functional even if preview fetch fails
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!showOnboarding || onboardingStep !== 2) return;
+    void loadCyclePreview();
+  }, [showOnboarding, onboardingStep, loadCyclePreview]);
+
   const unreadNotifications = useMemo(
     () => (snapshot?.notifications || []).filter((n) => !n.is_read),
     [snapshot?.notifications],
+  );
+  const frameworkGroups = useMemo(
+    () => frameworkEducation?.grouped || {},
+    [frameworkEducation?.grouped],
   );
 
   if (loading && !snapshot) {
@@ -235,6 +330,181 @@ export default function Plan() {
           ))}
         </div>
       </div>
+
+      {showOnboarding && snapshot && frameworkEducation && (
+        <div className="rounded-xl border border-emerald-700/40 bg-emerald-950/10 p-4 space-y-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h2 className="text-base font-semibold text-slate-100">Post-Intake Plan Setup</h2>
+              <p className="text-xs text-slate-400 mt-1">
+                Step {onboardingStep} of 3: choose frameworks, confirm targets, then start execution.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={closeOnboarding}
+              className="px-2.5 py-1 text-xs rounded-md border border-slate-600 text-slate-300 hover:bg-slate-700"
+            >
+              Skip for now
+            </button>
+          </div>
+
+          {onboardingStep === 1 && (
+            <div className="space-y-3">
+              <p className="text-sm text-slate-300">
+                Select the strategies you want active now. You can change this later in Settings at any time.
+              </p>
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                {Object.entries(frameworkEducation.framework_types).map(([frameworkType, meta]) => {
+                  const items = frameworkGroups[frameworkType] || [];
+                  return (
+                    <div key={frameworkType} className="rounded-lg border border-slate-700 bg-slate-900/40 p-3 space-y-2">
+                      <div>
+                        <p className="text-sm font-medium text-slate-100">{meta.label}</p>
+                        <p className="text-xs text-slate-400">{meta.classifier_label}</p>
+                      </div>
+                      <details className="text-xs text-slate-400">
+                        <summary className="cursor-pointer">Framework description and examples</summary>
+                        <p className="mt-1">{meta.description || 'No description available.'}</p>
+                        {!!meta.examples?.length && (
+                          <p className="mt-1">Examples: {meta.examples.join(', ')}</p>
+                        )}
+                      </details>
+                      <div className="flex flex-wrap gap-2">
+                        {items.map((item) => {
+                          const selected = selectedFrameworkIds.includes(item.id);
+                          return (
+                            <button
+                              key={item.id}
+                              type="button"
+                              onClick={() => toggleFrameworkSelection(item.id)}
+                              className={[
+                                'px-2.5 py-1 text-xs rounded-md border transition-colors',
+                                selected
+                                  ? 'border-emerald-500 bg-emerald-600/20 text-emerald-200'
+                                  : 'border-slate-600 text-slate-300 hover:bg-slate-700',
+                              ].join(' ')}
+                            >
+                              {item.name}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <p className="text-xs text-slate-400">
+                  Selected strategies: {selectedFrameworkIds.length}
+                </p>
+                <button
+                  type="button"
+                  onClick={applyFrameworkSelection}
+                  disabled={applyingFrameworks}
+                  className="px-3 py-1.5 text-xs rounded-md bg-emerald-600 hover:bg-emerald-500 text-white disabled:opacity-50"
+                >
+                  {applyingFrameworks ? 'Applying...' : 'Apply Selection'}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {onboardingStep === 2 && (
+            <div className="space-y-3">
+              <p className="text-sm text-slate-300">
+                These are your plan targets. Daily, weekly, and rolling 30-day goals will auto-adjust based on progress.
+              </p>
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+                {([
+                  ['daily', 'Daily'],
+                  ['weekly', 'Weekly'],
+                  ['monthly', '30-Day'],
+                ] as Array<[CycleType, string]>).map(([key, label]) => {
+                  const preview = cyclePreview[key];
+                  const topTasks = (preview?.upcoming_tasks || []).slice(0, 3);
+                  return (
+                    <div key={key} className="rounded-lg border border-slate-700 bg-slate-900/40 p-3 space-y-2">
+                      <p className="text-sm font-medium text-slate-100">{label}</p>
+                      <p className="text-xs text-slate-400">
+                        {preview ? `${Math.round(preview.stats.completion_ratio * 100)}% completion` : 'Loading preview...'}
+                      </p>
+                      {topTasks.length === 0 ? (
+                        <p className="text-xs text-slate-500">No pending tasks in this window.</p>
+                      ) : (
+                        <ul className="text-xs text-slate-300 space-y-1">
+                          {topTasks.map((task) => (
+                            <li key={task.id}>- {task.title}</li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setOnboardingStep(1)}
+                  className="px-3 py-1.5 text-xs rounded-md border border-slate-600 text-slate-300 hover:bg-slate-700"
+                >
+                  Back
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setOnboardingStep(3)}
+                  className="px-3 py-1.5 text-xs rounded-md bg-emerald-600 hover:bg-emerald-500 text-white"
+                >
+                  Start Execution
+                </button>
+              </div>
+            </div>
+          )}
+
+          {onboardingStep === 3 && (
+            <div className="space-y-3">
+              <p className="text-sm text-slate-300">
+                Start with the next top goals now. Complete one, then move to the next.
+              </p>
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+                {(snapshot.upcoming_tasks || []).slice(0, 3).map((task) => (
+                  <div key={task.id} className="rounded-lg border border-slate-700 bg-slate-900/40 p-3 space-y-2">
+                    <p className="text-sm font-medium text-slate-100">{task.title}</p>
+                    {task.description && <p className="text-xs text-slate-400">{task.description}</p>}
+                    <button
+                      type="button"
+                      onClick={() => setTaskStatus(task.id, 'completed')}
+                      disabled={busyTaskId === task.id}
+                      className="px-2.5 py-1 text-xs rounded-md bg-emerald-600 hover:bg-emerald-500 text-white disabled:opacity-50"
+                    >
+                      {busyTaskId === task.id ? 'Saving...' : 'Mark Complete'}
+                    </button>
+                  </div>
+                ))}
+              </div>
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={closeOnboarding}
+                  className="px-3 py-1.5 text-xs rounded-md border border-slate-600 text-slate-300 hover:bg-slate-700"
+                >
+                  Stay on Plan
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    closeOnboarding();
+                    navigate('/chat');
+                  }}
+                  className="px-3 py-1.5 text-xs rounded-md bg-emerald-600 hover:bg-emerald-500 text-white"
+                >
+                  Go to Guided Chat
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {error && (
         <div className="text-sm text-rose-300 bg-rose-900/20 border border-rose-700/40 rounded-lg px-3 py-2">
