@@ -476,3 +476,8 @@
 - Time inference/day-bucket consistency for user timezone boundaries (today vs previous local day).
 7. Re-validated backend suite after cross-sync regression addition:
 - `python -m pytest -q backend/tests` (pass, 20 tests)
+8. Added Phase G load-probe regression in `backend/tests/test_phase_g_load_probe.py`:
+- Generates repeated chat and dashboard traffic.
+- Verifies telemetry/performance snapshot captures route-group counts and p95 values.
+9. Re-validated backend suite after load-probe regression addition:
+- `python -m pytest -q backend/tests` (pass, 21 tests)

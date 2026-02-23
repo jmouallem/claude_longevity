@@ -32,6 +32,7 @@ from db.models import (
     Notification,
 )
 from services.analysis_service import run_due_analyses_for_user_id
+from services.coaching_plan_service import get_plan_snapshot
 from services.specialists_config import get_enabled_specialist_ids, get_effective_specialists, parse_overrides
 from services.telemetry_context import (
     clear_ai_turn_scope,
@@ -140,6 +141,25 @@ MENU_CONFIRM_WORDS = {
     "do it",
     "save it",
     "add it",
+}
+LOW_SIGNAL_CHECKIN_PHRASES = {
+    "hi",
+    "hello",
+    "hey",
+    "morning",
+    "good morning",
+    "good afternoon",
+    "good evening",
+    "hello coach",
+    "hi coach",
+    "hey coach",
+    "check in",
+    "checking in",
+    "what now",
+    "whats next",
+    "what's next",
+    "start",
+    "start today",
 }
 _ANALYSIS_DISPATCH_LOCK: asyncio.Lock = asyncio.Lock()
 _ANALYSIS_LAST_DISPATCH_TS: dict[int, float] = {}
@@ -529,6 +549,96 @@ def _format_time_context(result: dict) -> str:
         lines.append(f"- Local time (24h): {local_time_24h}")
     if iso_local:
         lines.append(f"- ISO local: {iso_local}")
+    return "\n".join(lines)
+
+
+def _is_low_signal_checkin(message_text: str) -> bool:
+    normalized = " ".join(str(message_text or "").strip().lower().split())
+    if not normalized:
+        return False
+    compact = re.sub(r"[^\w\s']", "", normalized).strip()
+    if len(compact) > 48:
+        return False
+    return compact in LOW_SIGNAL_CHECKIN_PHRASES
+
+
+def _safe_daily_plan_snapshot(db: Session, user: User) -> dict[str, Any] | None:
+    try:
+        return get_plan_snapshot(db, user, cycle_type="daily")
+    except Exception as e:
+        logger.warning(f"Unable to load daily plan snapshot for proactive check-in: {e}")
+        return None
+
+
+def _format_target_label(task: dict[str, Any]) -> str:
+    value = task.get("target_value")
+    unit = str(task.get("target_unit") or "").strip()
+    if value is None:
+        return ""
+    try:
+        numeric = float(value)
+        if numeric.is_integer():
+            value_txt = str(int(numeric))
+        else:
+            value_txt = f"{numeric:.1f}".rstrip("0").rstrip(".")
+    except (TypeError, ValueError):
+        value_txt = str(value).strip()
+    if not value_txt:
+        return ""
+    return f"{value_txt}{(' ' + unit) if unit else ''}"
+
+
+def _first_action_prompt_from_task(task: dict[str, Any] | None) -> str:
+    if not task:
+        return "tell me the first thing you've had to eat or drink today, and I'll log it now."
+    metric = str(task.get("target_metric") or "").strip().lower()
+    if metric == "meals_logged":
+        return "log your next meal now (what you had + amount), and I'll record it immediately."
+    if metric == "hydration_ml":
+        return "log one water entry now (for example 250 ml / 8 oz), and I'll update hydration progress."
+    if metric == "exercise_minutes":
+        return "confirm today's workout type and minutes now so we lock in today's movement target."
+    if metric == "sleep_minutes":
+        return "share last night's sleep start/end (or total hours) now, and I'll update sleep progress."
+    if metric == "medication_adherence":
+        return "confirm whether you took your scheduled medications, and I'll mark the checklist now."
+    if metric == "supplement_adherence":
+        return "confirm whether you took your scheduled supplements, and I'll mark the checklist now."
+    return "confirm one task you can complete in the next 10 minutes, and I'll mark progress with you."
+
+
+def _compose_proactive_checkin_reply(snapshot: dict[str, Any] | None, user: User) -> str:
+    tasks = ((snapshot or {}).get("upcoming_tasks") or [])[:3]
+    stats = (snapshot or {}).get("stats") or {}
+    prefs = (snapshot or {}).get("preferences") or {}
+    why = str(prefs.get("coaching_why") or "").strip()
+
+    lines = ["Great check-in. We are in execution mode."]
+
+    if tasks:
+        lines.append("Today's top priorities:")
+        for idx, task in enumerate(tasks, start=1):
+            title = str(task.get("title") or f"Task {idx}").strip()
+            target = _format_target_label(task)
+            if target:
+                lines.append(f"{idx}. {title} (target: {target})")
+            else:
+                lines.append(f"{idx}. {title}")
+    else:
+        lines.append("No pending tasks are visible right now, so we'll start with one high-impact log and rebuild momentum.")
+
+    try:
+        completed = int(stats.get("completed") or 0)
+        total = int(stats.get("total") or 0)
+        if total > 0:
+            lines.append(f"Progress today: {completed}/{total} tasks completed.")
+    except (TypeError, ValueError):
+        pass
+
+    if why:
+        lines.append(f"Why this matters: {why}")
+
+    lines.append(f"Let's start now: {_first_action_prompt_from_task(tasks[0] if tasks else None)}")
     return "\n".join(lines)
 
 
@@ -2223,6 +2333,69 @@ async def process_chat(
     update_ai_turn_scope(specialist_id=specialist, intent_category=category)
     specialist_name = _resolve_specialist_name(overrides, specialist)
     utility_budget = UtilityCallBudget(category)
+    low_signal_checkin = _is_low_signal_checkin(message) and category in {"general_chat", "manual_override"}
+
+    if low_signal_checkin:
+        daily_plan_snapshot = _safe_daily_plan_snapshot(db, user)
+        proactive_reply = _compose_proactive_checkin_reply(daily_plan_snapshot, user)
+        first_token_ms = (time.perf_counter() - turn_started_perf) * 1000.0
+
+        user_msg = Message(
+            user_id=user.id,
+            role="user",
+            content=message,
+            has_image=bool(image_bytes),
+            created_at=message_received_utc,
+        )
+        db.add(user_msg)
+        db.commit()
+
+        assistant_msg = Message(
+            user_id=user.id,
+            role="assistant",
+            content=proactive_reply,
+            specialist_used=specialist,
+            model_used="rule_based_checkin",
+            tokens_in=0,
+            tokens_out=0,
+        )
+        db.add(assistant_msg)
+        db.commit()
+
+        mark_ai_first_token(first_token_ms)
+        yield {"type": "chunk", "text": proactive_reply}
+        yield {"type": "done", "specialist": specialist, "category": category}
+
+        total_turn_latency_ms = (time.perf_counter() - turn_started_perf) * 1000.0
+        turn_scope = consume_ai_turn_scope()
+        if turn_scope:
+            try:
+                persist_ai_turn_event(
+                    {
+                        "user_id": turn_scope.user_id,
+                        "message_id": assistant_msg.id,
+                        "specialist_id": turn_scope.specialist_id,
+                        "intent_category": turn_scope.intent_category,
+                        "first_token_latency_ms": turn_scope.first_token_latency_ms,
+                        "total_latency_ms": total_turn_latency_ms,
+                        "utility_calls": turn_scope.utility_calls,
+                        "reasoning_calls": turn_scope.reasoning_calls,
+                        "deep_calls": turn_scope.deep_calls,
+                        "utility_tokens_in": turn_scope.utility_tokens_in,
+                        "utility_tokens_out": turn_scope.utility_tokens_out,
+                        "reasoning_tokens_in": turn_scope.reasoning_tokens_in,
+                        "reasoning_tokens_out": turn_scope.reasoning_tokens_out,
+                        "deep_tokens_in": turn_scope.deep_tokens_in,
+                        "deep_tokens_out": turn_scope.deep_tokens_out,
+                        "failure_count": turn_scope.failure_count,
+                        "failures_json": json.dumps(turn_scope.failures, ensure_ascii=True),
+                    }
+                )
+            except Exception as e:
+                logger.warning(f"AI turn telemetry persistence failed: {e}")
+        else:
+            clear_ai_turn_scope()
+        return
 
     # 2b. Auto-log global feedback from user bug/enhancement messages under specialist.
     await _log_agent_feedback_if_needed(

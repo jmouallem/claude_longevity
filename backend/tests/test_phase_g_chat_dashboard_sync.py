@@ -172,3 +172,15 @@ def test_chat_time_inference_respects_user_timezone_day_buckets(monkeypatch):
     yesterday_payload = yesterday_resp.json()
     assert int(yesterday_payload["daily_totals"]["food"]["meal_count"]) == 1
     assert float(yesterday_payload["daily_totals"]["food"]["calories"]) == 105.0
+
+
+def test_low_signal_checkin_uses_proactive_plan_coaching():
+    client = TestClient(app)
+    _register_and_configure_user(client, timezone_name="America/Edmonton")
+
+    chat = client.post("/api/chat", data={"message": "hello"})
+    assert chat.status_code == 200
+    body = chat.text.lower()
+    assert "execution mode" in body
+    assert "today's top priorities" in body
+    assert "how can i assist" not in body
