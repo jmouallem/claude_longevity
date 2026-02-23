@@ -481,3 +481,44 @@
 - Verifies telemetry/performance snapshot captures route-group counts and p95 values.
 9. Re-validated backend suite after load-probe regression addition:
 - `python -m pytest -q backend/tests` (pass, 21 tests)
+10. Added proactive low-signal check-in coaching path:
+- `hello`/`check in` now returns active execution guidance (top priorities + immediate next action), not passive open-ended prompt.
+- Implemented in `backend/ai/orchestrator.py` with regression coverage in `backend/tests/test_phase_g_chat_dashboard_sync.py`.
+11. Re-validated backend suite after proactive check-in addition:
+- `python -m pytest -q backend/tests` (pass, 22 tests)
+
+## Fixed Items Register
+
+### P0 Fixed
+1. `backend/api/chat.py` now uses safe user loading in stream scope and handles missing user guard before streaming.
+2. Deterministic intent fallback added so classifier failure does not collapse all actionable logs into `general_chat`.
+3. Deterministic parse fallback added when utility extraction is unavailable/budget blocked.
+4. Write outcome context is injected so assistant does not silently imply successful persistence after failed writes.
+5. Checklist marking centralized/idempotent in one turn flow with merged extraction output reuse.
+6. Dashboard unified to aggregate endpoint/day basis aligned to user timezone (`/api/logs/dashboard`).
+7. Sleep/day filtering corrected for `target_date` semantics in logs endpoints.
+8. `GET /api/logs/checklist` made read-only; cleanup mutations removed from read path.
+9. Unique checklist item enforcement implemented (`idx_daily_checklist_unique_item`).
+10. Time parsing and inference handling expanded/normalized for common user time forms.
+11. Low-confidence time-inference confirmation flow persisted and enforced in orchestration context.
+
+### P1 Fixed
+12. Tool usage contract aligned with runtime orchestration/write-path confirmation semantics.
+13. Web search moved off event-loop blocking path (`asyncio.to_thread`) and circuit-breaker controls added.
+14. Provider/model validation hardened in settings APIs and model normalization flows.
+15. Structured med/supp parsing strengthened to prevent comma-dose fragmentation regressions.
+16. Proposal list GET path made side-effect free; combine moved to explicit write operation.
+17. Analysis run dedupe hardening added with unique window index and race-safe creation behavior.
+
+### P2 Fixed
+18. Context builder now uses bounded section budgets and cached stable blocks to reduce collision/token bloat.
+19. Date semantics consolidated across logs/dashboard/context/summary paths with timezone-aware helpers.
+20. Product naming and UI behavior converged on `Longevity Coach` identity.
+21. Cross-component regression suite now covers onboarding, sync, timezone boundary, security, and telemetry paths.
+
+### Additional Post-Review Fixes Completed
+22. Added Phase G load probe regression (`backend/tests/test_phase_g_load_probe.py`) validating telemetry snapshot population for chat/dashboard request groups.
+23. Added proactive coaching fast-path for low-signal check-ins in orchestrator (execution-oriented response with next action).
+24. Framework allocation UX standardized to 0-100 percent totals per framework type with normalize-to-100 support (`frontend/src/pages/Settings.tsx`).
+25. Added strategy insight popout: click framework strategy (for example HIIT) to see summary, goal-fit mapping, benefits, and tradeoffs.
+26. Seed framework metadata enhanced with explainability payloads (`summary`, `supports`, `watch_out_for`) and backfill for existing seed rows (`backend/services/health_framework_service.py`).
