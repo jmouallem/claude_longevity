@@ -64,6 +64,43 @@ function greetingFor(name: string): string {
   return name ? `${greeting}, ${name}.` : `${greeting}.`;
 }
 
+function formatGoalForPrompt(goal: UserGoal): string {
+  const targetPart =
+    goal.target_value != null && goal.target_unit
+      ? `target ${goal.target_value} ${goal.target_unit}`
+      : 'target not set';
+  const datePart = goal.target_date ? `by ${goal.target_date}` : 'date not set';
+  return `${goal.title} (${targetPart}, ${datePart})`;
+}
+
+function buildGoalKickoffPrompt(args: {
+  goals: UserGoal[];
+  isOnboarding: boolean;
+  displayName: string;
+}): string {
+  const { goals, isOnboarding, displayName } = args;
+  const namePart = displayName ? ` for ${displayName}` : '';
+  if (goals.length === 0) {
+    return [
+      `Goal-setting kickoff${namePart}:`,
+      'I want to define 1-3 measurable health goals with target values, deadlines, and why they matter.',
+      'Please guide me step-by-step and save each goal using the goal tools.',
+      'After we finalize goals, remind me to return to the Goals page to review todays timeline.',
+      isOnboarding ? 'I just completed intake, so use my profile context to propose smart starting goals.' : '',
+    ]
+      .filter(Boolean)
+      .join(' ');
+  }
+
+  const listedGoals = goals.slice(0, 5).map(formatGoalForPrompt).join('; ');
+  return [
+    `Goal-refinement kickoff${namePart}:`,
+    `Please review and refine my existing goals: ${listedGoals}.`,
+    'Help me keep only high-value goals, adjust targets/timelines where needed, and update any goal records.',
+    'After we finalize changes, remind me to return to the Goals page to review todays timeline.',
+  ].join(' ');
+}
+
 function GoalCard({ goal }: { goal: UserGoal }) {
   const pct = goal.progress_pct ?? 0;
   const color = GOAL_TYPE_COLORS[goal.goal_type] || 'text-emerald-400';
@@ -273,6 +310,22 @@ export default function Goals() {
   const hasAnyTasks = dailyTasks.length > 0;
   const isLoading = loadingGoals || loadingPlan;
 
+  const launchGoalSettingChat = useCallback(() => {
+    const prompt = buildGoalKickoffPrompt({
+      goals,
+      isOnboarding,
+      displayName,
+    });
+    navigate('/chat', {
+      state: {
+        chatFill: prompt,
+        autoSend: true,
+        goalSettingMode: true,
+        chatFillNonce: Date.now(),
+      },
+    });
+  }, [displayName, goals, isOnboarding, navigate]);
+
   return (
     <div className="min-h-screen bg-slate-900">
       <div className="max-w-2xl mx-auto px-4 py-6 space-y-6">
@@ -303,7 +356,15 @@ export default function Goals() {
         {!loadingGoals && (
           goals.length > 0 ? (
             <div className="space-y-2">
-              <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-500">Your Goals</h2>
+              <div className="flex items-center justify-between gap-2">
+                <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-500">Your Goals</h2>
+                <button
+                  onClick={launchGoalSettingChat}
+                  className="px-2.5 py-1 text-xs rounded-md border border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-slate-100 transition-colors"
+                >
+                  Refine with coach
+                </button>
+              </div>
               <div className="flex gap-3 overflow-x-auto pb-1 -mx-1 px-1 scrollbar-hide">
                 {goals.map((goal) => (
                   <GoalCard key={goal.id} goal={goal} />
@@ -319,7 +380,7 @@ export default function Goals() {
                     Tell your coach what you want to achieve and they'll build your personalized plan.
                   </p>
                   <button
-                    onClick={() => navigate('/chat')}
+                    onClick={launchGoalSettingChat}
                     className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium rounded-lg transition-colors"
                   >
                     Start goal-setting with coach →
@@ -329,7 +390,7 @@ export default function Goals() {
                 <>
                   <p className="text-slate-400 text-sm">No active goals yet.</p>
                   <button
-                    onClick={() => navigate('/chat')}
+                    onClick={launchGoalSettingChat}
                     className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium rounded-lg transition-colors"
                   >
                     Set goals with coach →

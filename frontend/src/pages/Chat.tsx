@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useLocation } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { useChat, type ChatVerbosity } from '../hooks/useChat';
 import ChatMessage from '../components/ChatMessage';
 import ChatInput from '../components/ChatInput';
@@ -31,6 +31,13 @@ interface PlanSnapshotLite {
     visibility_mode: 'top3' | 'all';
     max_visible_tasks: number;
   };
+}
+
+interface ChatNavigationState {
+  chatFill?: string;
+  autoSend?: boolean;
+  goalSettingMode?: boolean;
+  chatFillNonce?: string | number;
 }
 
 function dataUrlToFile(dataUrl: string, name: string, type: string): File | null {
@@ -162,17 +169,20 @@ const QUICK_PROMPTS = [
 ];
 
 export default function Chat() {
+  const navigate = useNavigate();
   const location = useLocation();
   const { messages, loading, error, sendMessage, loadHistory } = useChat();
   const [selectedImage, setSelectedImage] = useState<File | null>(null);
   const [verbosity, setVerbosity] = useState<ChatVerbosity>('normal');
   const [planSnapshot, setPlanSnapshot] = useState<PlanSnapshotLite | null>(null);
   const [mobileGoalsOpen, setMobileGoalsOpen] = useState(false);
-  const [chatFill, setChatFill] = useState<string | null>(
-    (location.state as { chatFill?: string } | null)?.chatFill ?? null,
-  );
+  const [chatFill, setChatFill] = useState<string | null>(null);
+  const [autoSendPending, setAutoSendPending] = useState(false);
+  const [goalSettingMode, setGoalSettingMode] = useState(false);
+  const [historyReady, setHistoryReady] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const hasLoadedRef = useRef(false);
+  const consumedFillKeyRef = useRef<string | number | null>(null);
   const verbosityOptions: Array<{ key: ChatVerbosity; label: string; hover: string }> = [
     { key: 'normal', label: 'Normal', hover: 'Balanced detail' },
     { key: 'summarized', label: 'Summarized', hover: 'Key points and actions' },
@@ -198,10 +208,49 @@ export default function Chat() {
   useEffect(() => {
     if (!hasLoadedRef.current) {
       hasLoadedRef.current = true;
-      loadHistory();
-      void fetchPlanSnapshot();
+      let active = true;
+      void (async () => {
+        try {
+          await Promise.all([loadHistory(), fetchPlanSnapshot()]);
+        } finally {
+          if (active) setHistoryReady(true);
+        }
+      })();
+      return () => {
+        active = false;
+      };
     }
   }, [fetchPlanSnapshot, loadHistory]);
+
+  useEffect(() => {
+    const navState = (location.state as ChatNavigationState | null) ?? null;
+    if (!navState?.chatFill) return;
+
+    const fillKey = navState.chatFillNonce ?? location.key;
+    if (consumedFillKeyRef.current === fillKey) return;
+    consumedFillKeyRef.current = fillKey;
+
+    setChatFill(navState.chatFill);
+    setGoalSettingMode(Boolean(navState.goalSettingMode));
+    setAutoSendPending(Boolean(navState.autoSend));
+
+    navigate(`${location.pathname}${location.search}`, { replace: true, state: null });
+  }, [location.key, location.pathname, location.search, location.state, navigate]);
+
+  useEffect(() => {
+    if (!historyReady || !autoSendPending || !chatFill) return;
+    if (messages.some((m) => m.isStreaming)) return;
+
+    const kickoff = chatFill.trim();
+    if (!kickoff) {
+      setAutoSendPending(false);
+      return;
+    }
+
+    sendMessage(kickoff, undefined, verbosity);
+    setChatFill(null);
+    setAutoSendPending(false);
+  }, [autoSendPending, chatFill, historyReady, messages, sendMessage, verbosity]);
 
   // Auto-scroll to bottom on new messages
   useEffect(() => {
@@ -284,6 +333,23 @@ export default function Chat() {
           </div>
         </div>
       </div>
+
+      {goalSettingMode && (
+        <div className="px-4 py-2 border-b border-emerald-700/40 bg-emerald-900/10">
+          <div className="max-w-7xl mx-auto flex items-center justify-between gap-2">
+            <p className="text-xs text-emerald-300">
+              Goal-setting session active. The coach will guide targets, dates, and priorities.
+            </p>
+            <button
+              type="button"
+              onClick={() => setGoalSettingMode(false)}
+              className="px-2 py-0.5 text-[11px] rounded border border-emerald-700/40 text-emerald-300 hover:bg-emerald-900/20"
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
 
       <div className="flex-1 min-h-0">
         <div className="h-full max-w-7xl mx-auto px-4 py-4 grid grid-cols-1 lg:grid-cols-[1fr_320px] gap-4">
@@ -417,7 +483,7 @@ export default function Chat() {
         selectedImage={selectedImage}
         onSelectedImageChange={handleSelectedImageChange}
         disabled={isStreaming}
-        fillText={chatFill}
+        fillText={autoSendPending ? null : chatFill}
         onFillConsumed={() => setChatFill(null)}
       />
     </div>
