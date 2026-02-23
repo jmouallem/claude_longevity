@@ -442,6 +442,7 @@ export default function Settings() {
   const [analysisMessage, setAnalysisMessage] = useState('');
   const [analysisRunType, setAnalysisRunType] = useState<'daily' | 'weekly' | 'monthly'>('daily');
   const [selectedRunDetail, setSelectedRunDetail] = useState<AnalysisRunRow | null>(null);
+  const [selectedProposalDetail, setSelectedProposalDetail] = useState<AnalysisProposalRow | null>(null);
 
   // Security state
   const [currentPassword, setCurrentPassword] = useState('');
@@ -2191,7 +2192,14 @@ export default function Settings() {
                     <div key={proposal.id} className="rounded-md border border-slate-700 bg-slate-900/35 px-2.5 py-2">
                       <div className="flex items-start justify-between gap-2">
                         <div className="min-w-0">
-                          <p className="text-xs text-slate-100 font-medium line-clamp-1">{proposal.title}</p>
+                          <button
+                            type="button"
+                            onClick={() => setSelectedProposalDetail(proposal)}
+                            className="text-left text-xs text-slate-100 font-medium line-clamp-1 hover:text-slate-200"
+                            title="View full proposal"
+                          >
+                            {proposal.title}
+                          </button>
                           <p className="text-[11px] text-slate-400 mt-0.5">
                             {proposal.proposal_kind} | run #{proposal.analysis_run_id}
                             {proposal.confidence != null ? ` | ${Math.round(proposal.confidence * 100)}%` : ''}
@@ -2208,7 +2216,14 @@ export default function Settings() {
                           {proposal.status}
                         </span>
                       </div>
-                      <p className="text-xs text-slate-300 mt-1 line-clamp-2">{proposal.rationale}</p>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedProposalDetail(proposal)}
+                        className="mt-1 w-full text-left text-xs text-slate-300 line-clamp-2 hover:text-slate-200"
+                        title="View full proposal rationale"
+                      >
+                        {proposal.rationale}
+                      </button>
                       {proposal.status === 'pending' && (
                         <div className="flex gap-1.5 mt-2">
                           <button
@@ -2462,6 +2477,68 @@ export default function Settings() {
             <pre className="mt-3 whitespace-pre-wrap break-words text-xs sm:text-sm leading-6 text-slate-200 font-sans">
               {selectedRunDetail.summary_markdown || 'No run summary text available.'}
             </pre>
+          </div>
+        </div>
+      )}
+
+      {selectedProposalDetail && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4"
+          onClick={() => setSelectedProposalDetail(null)}
+        >
+          <div
+            className="w-full max-w-2xl max-h-[85vh] overflow-y-auto rounded-xl border border-slate-700 bg-slate-900 p-4 sm:p-5"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h3 className="text-sm sm:text-base font-semibold text-slate-100">
+                  {selectedProposalDetail.title}
+                </h3>
+                <p className="text-xs text-slate-400 mt-1">
+                  {selectedProposalDetail.proposal_kind} | run #{selectedProposalDetail.analysis_run_id}
+                  {selectedProposalDetail.confidence != null ? ` | ${Math.round(selectedProposalDetail.confidence * 100)}%` : ''}
+                  {selectedProposalDetail.merge_count > 0 ? ` | merged +${selectedProposalDetail.merge_count}` : ''}
+                  {selectedProposalDetail.created_at ? ` | ${new Date(selectedProposalDetail.created_at).toLocaleString()}` : ''}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSelectedProposalDetail(null)}
+                className="px-2 py-1 text-xs text-slate-200 border border-slate-600 rounded-md hover:bg-slate-700"
+              >
+                Close
+              </button>
+            </div>
+
+            <pre className="mt-3 whitespace-pre-wrap break-words text-xs sm:text-sm leading-6 text-slate-200 font-sans">
+              {selectedProposalDetail.rationale || 'No proposal rationale text available.'}
+            </pre>
+
+            {selectedProposalDetail.status === 'pending' && (
+              <div className="mt-3 flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    void reviewAnalysisProposal(selectedProposalDetail.id, 'approve');
+                    setSelectedProposalDetail(null);
+                  }}
+                  className="px-3 py-1.5 text-xs bg-emerald-600 hover:bg-emerald-500 text-white rounded-md"
+                >
+                  Approve
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    void reviewAnalysisProposal(selectedProposalDetail.id, 'reject');
+                    setSelectedProposalDetail(null);
+                  }}
+                  className="px-3 py-1.5 text-xs bg-rose-600 hover:bg-rose-500 text-white rounded-md"
+                >
+                  Reject
+                </button>
+              </div>
+            )}
           </div>
         </div>
       )}

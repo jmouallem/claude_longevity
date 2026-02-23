@@ -28,8 +28,17 @@ from db.models import (
     User,
 )
 from config import settings
+from api.settings import (
+    _get_available_models,
+    _get_default_models,
+    _get_role_hints,
+    _normalize_models_for_provider,
+    _normalized_presets_for_provider,
+    _require_supported_provider,
+)
 from services.telemetry_service import build_performance_snapshot, count_request_events
 from services.user_reset_service import reset_user_data_for_user
+from utils.encryption import encrypt_api_key
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -77,6 +86,10 @@ class AdminUserRow(BaseModel):
     username: str
     display_name: str
     role: str
+    ai_provider: str
+    reasoning_model: Optional[str] = None
+    utility_model: Optional[str] = None
+    deep_thinking_model: Optional[str] = None
     has_api_key: bool
     passkey_count: int
     force_password_change: bool
@@ -90,6 +103,27 @@ class AdminUserListResponse(BaseModel):
 
 class AdminResetPasswordRequest(BaseModel):
     new_password: str = Field(min_length=8, max_length=256)
+
+
+class AdminUserAIConfigRequest(BaseModel):
+    ai_provider: str
+    api_key: Optional[str] = None
+    clear_api_key: bool = False
+    preset: Optional[str] = None  # budget | balanced | premium
+    reasoning_model: Optional[str] = None
+    utility_model: Optional[str] = None
+    deep_thinking_model: Optional[str] = None
+
+
+class AdminUserAIConfigResponse(BaseModel):
+    status: str
+    user_id: int
+    ai_provider: str
+    has_api_key: bool
+    reasoning_model: str
+    utility_model: str
+    deep_thinking_model: str
+    preset_applied: Optional[str] = None
 
 
 class AdminChangeOwnPasswordRequest(BaseModel):
@@ -264,6 +298,10 @@ def list_users(
                 username=u.username,
                 display_name=u.display_name,
                 role=u.role or "user",
+                ai_provider=(u.settings.ai_provider if u.settings else "anthropic"),
+                reasoning_model=(u.settings.reasoning_model if u.settings else None),
+                utility_model=(u.settings.utility_model if u.settings else None),
+                deep_thinking_model=(u.settings.deep_thinking_model if u.settings else None),
                 has_api_key=has_api_key,
                 passkey_count=int(passkey_count),
                 force_password_change=bool(u.force_password_change),
@@ -279,6 +317,120 @@ def list_users(
     )
     db.commit()
     return AdminUserListResponse(total=total, users=rows)
+
+
+@router.get("/model-options")
+def admin_model_options(
+    provider: str = "anthropic",
+    admin_user: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    normalized_provider = _require_supported_provider(provider)
+    available = _get_available_models()
+    defaults = _get_default_models()
+    role_hints = _get_role_hints()
+    models = available.get(normalized_provider, available.get("anthropic", {}))
+    provider_defaults = defaults.get(normalized_provider, defaults.get("anthropic", {}))
+    presets = _normalized_presets_for_provider(normalized_provider)
+    _audit(
+        db=db,
+        admin_user_id=admin_user.id,
+        action="admin.models.options",
+        details={"provider": normalized_provider},
+        success=True,
+    )
+    db.commit()
+    return {
+        "provider": normalized_provider,
+        "reasoning_models": models.get("reasoning", []),
+        "utility_models": models.get("utility", []),
+        "deep_thinking_models": models.get("deep_thinking", models.get("reasoning", [])),
+        "default_reasoning": provider_defaults.get("reasoning"),
+        "default_utility": provider_defaults.get("utility"),
+        "default_deep_thinking": provider_defaults.get("deep_thinking", provider_defaults.get("reasoning")),
+        "role_hints": role_hints,
+        "presets": presets,
+    }
+
+
+@router.put("/users/{target_user_id}/ai-config", response_model=AdminUserAIConfigResponse)
+def admin_set_user_ai_config(
+    target_user_id: int,
+    req: AdminUserAIConfigRequest,
+    admin_user: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    target = db.query(User).filter(User.id == target_user_id).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    if target.role == "admin":
+        raise HTTPException(status_code=400, detail="Admin accounts cannot be updated from this endpoint")
+    if not target.settings:
+        raise HTTPException(status_code=404, detail="User settings not found")
+
+    provider = _require_supported_provider(req.ai_provider)
+    target_settings = target.settings
+    target_settings.ai_provider = provider
+
+    if req.clear_api_key:
+        target_settings.api_key_encrypted = None
+    else:
+        maybe_key = (req.api_key or "").strip()
+        if maybe_key:
+            target_settings.api_key_encrypted = encrypt_api_key(maybe_key)
+
+    preset_applied: str | None = None
+    preset_name = (req.preset or "").strip().lower()
+    preset_cfg: dict | None = None
+    if preset_name:
+        presets = _normalized_presets_for_provider(provider)
+        if preset_name not in presets:
+            raise HTTPException(status_code=400, detail=f"Invalid preset '{req.preset}'. Use budget, balanced, or premium.")
+        preset_cfg = presets[preset_name]
+        preset_applied = preset_name
+
+    reasoning_input = req.reasoning_model or (str(preset_cfg.get("reasoning", "")).strip() if preset_cfg else None) or target_settings.reasoning_model
+    utility_input = req.utility_model or (str(preset_cfg.get("utility", "")).strip() if preset_cfg else None) or target_settings.utility_model
+    deep_input = req.deep_thinking_model or (str(preset_cfg.get("deep_thinking", "")).strip() if preset_cfg else None) or target_settings.deep_thinking_model
+
+    normalized_reasoning, normalized_utility, normalized_deep = _normalize_models_for_provider(
+        provider,
+        reasoning_input,
+        utility_input,
+        deep_input,
+    )
+    target_settings.reasoning_model = normalized_reasoning
+    target_settings.utility_model = normalized_utility
+    target_settings.deep_thinking_model = normalized_deep
+
+    _audit(
+        db=db,
+        admin_user_id=admin_user.id,
+        target_user_id=target.id,
+        action="admin.user.set_ai_config",
+        details={
+            "username": target.username,
+            "provider": provider,
+            "preset": preset_applied,
+            "api_key_set": bool((req.api_key or "").strip()) and not req.clear_api_key,
+            "api_key_cleared": bool(req.clear_api_key),
+            "reasoning_model": normalized_reasoning,
+            "utility_model": normalized_utility,
+            "deep_thinking_model": normalized_deep,
+        },
+        success=True,
+    )
+    db.commit()
+    return AdminUserAIConfigResponse(
+        status="ok",
+        user_id=target.id,
+        ai_provider=target_settings.ai_provider,
+        has_api_key=bool(target_settings.api_key_encrypted),
+        reasoning_model=target_settings.reasoning_model,
+        utility_model=target_settings.utility_model,
+        deep_thinking_model=target_settings.deep_thinking_model or target_settings.reasoning_model,
+        preset_applied=preset_applied,
+    )
 
 
 @router.post("/password/change")
