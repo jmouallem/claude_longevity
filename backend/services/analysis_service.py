@@ -26,6 +26,7 @@ from db.models import (
     ExerciseLog,
     FastingLog,
     FoodLog,
+    HealthOptimizationFramework,
     HydrationLog,
     Message,
     SleepLog,
@@ -33,7 +34,13 @@ from db.models import (
     User,
     VitalsLog,
 )
-from services.health_framework_service import active_frameworks_for_context, update_framework, upsert_framework
+from services.health_framework_service import (
+    active_frameworks_for_context,
+    delete_framework,
+    normalize_framework_name,
+    update_framework,
+    upsert_framework,
+)
 from utils.datetime_utils import end_of_day, start_of_day, today_for_tz, sleep_log_overlaps_window
 from utils.encryption import decrypt_api_key
 from utils.med_utils import parse_structured_list
@@ -79,7 +86,7 @@ Rules:
 - If nothing is relevant, return empty arrays and low confidence."""
 
 REASONING_SYNTHESIS_PROMPT = """You are a longitudinal health analytics assistant.
-Analyze the supplied user metrics and produce adaptation proposals that require user approval.
+Analyze the supplied user metrics and produce adaptation proposals.
 
 Return JSON only:
 {
@@ -130,7 +137,6 @@ Return JSON only:
   "confidence": 0.0
 }
 Rules:
-- Proposals are suggestions only and require user approval.
 - Keep outputs concise and specific."""
 
 
@@ -929,6 +935,28 @@ async def run_longitudinal_analysis(
         combine_similar_pending_proposals(db, user.id)
 
         db.commit()
+        if bool(getattr(app_settings, "ANALYSIS_AUTO_APPLY_PROPOSALS", False)):
+            pending_rows = (
+                db.query(AnalysisProposal)
+                .filter(
+                    AnalysisProposal.user_id == user.id,
+                    AnalysisProposal.analysis_run_id == run.id,
+                    AnalysisProposal.status == "pending",
+                )
+                .order_by(AnalysisProposal.id.asc())
+                .all()
+            )
+            for proposal in pending_rows:
+                try:
+                    review_proposal(
+                        db=db,
+                        user=user,
+                        proposal_id=int(proposal.id),
+                        action="apply",
+                        note="Auto-applied by adaptation engine",
+                    )
+                except Exception as exc:
+                    logger.warning("Auto-apply failed for proposal %s (run %s): %s", proposal.id, run.id, exc)
         db.refresh(run)
         return run
 
@@ -1081,6 +1109,21 @@ def _apply_framework_proposal(
 
     applied = 0
     errors: list[str] = []
+    undo_operations: list[dict[str, Any]] = []
+
+    def _snapshot_framework(row: HealthOptimizationFramework) -> dict[str, Any]:
+        metadata = _safe_json_loads(row.metadata_json or "{}", fallback={})
+        return {
+            "framework_id": int(row.id),
+            "framework_type": str(row.framework_type),
+            "name": str(row.name),
+            "priority_score": int(row.priority_score or 0),
+            "is_active": bool(row.is_active),
+            "source": str(row.source or "adaptive"),
+            "rationale": str(row.rationale or ""),
+            "metadata": metadata if isinstance(metadata, dict) else {},
+        }
+
     for idx, op in enumerate(operations):
         if not isinstance(op, dict):
             errors.append(f"Operation {idx} is not an object")
@@ -1093,6 +1136,15 @@ def _apply_framework_proposal(
         try:
             if op_kind == "update":
                 framework_id = int(op.get("framework_id"))
+                before = (
+                    db.query(HealthOptimizationFramework)
+                    .filter(HealthOptimizationFramework.user_id == user.id, HealthOptimizationFramework.id == framework_id)
+                    .first()
+                )
+                if not before:
+                    errors.append(f"Operation {idx}: framework_id {framework_id} not found")
+                    continue
+                undo_operations.append({"op": "restore", "snapshot": _snapshot_framework(before)})
                 update_framework(
                     db=db,
                     user_id=user.id,
@@ -1107,11 +1159,27 @@ def _apply_framework_proposal(
                     commit=False,
                 )
             else:
-                upsert_framework(
+                framework_type = str(op.get("framework_type", ""))
+                framework_name = str(op.get("name", ""))
+                before = None
+                if framework_name.strip():
+                    normalized_name = normalize_framework_name(framework_name)
+                    if normalized_name:
+                        before = (
+                            db.query(HealthOptimizationFramework)
+                            .filter(
+                                HealthOptimizationFramework.user_id == user.id,
+                                HealthOptimizationFramework.normalized_name == normalized_name,
+                            )
+                            .first()
+                        )
+                if before:
+                    undo_operations.append({"op": "restore", "snapshot": _snapshot_framework(before)})
+                row, _ = upsert_framework(
                     db=db,
                     user_id=user.id,
-                    framework_type=str(op.get("framework_type", "")),
-                    name=str(op.get("name", "")),
+                    framework_type=framework_type,
+                    name=framework_name,
                     priority_score=op.get("priority_score"),
                     is_active=op.get("is_active"),
                     source="adaptive",
@@ -1119,9 +1187,90 @@ def _apply_framework_proposal(
                     metadata={"applied_by": "analysis_proposal"},
                     commit=False,
                 )
+                if not before:
+                    undo_operations.append({"op": "delete", "framework_id": int(row.id)})
             applied += 1
         except Exception as exc:
             errors.append(f"Operation {idx}: {exc}")
+
+    return {"applied": applied, "errors": errors, "undo_operations": undo_operations}
+
+
+def _undo_framework_proposal(
+    db: Session,
+    user: User,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    undo_operations = payload.get("_undo_operations")
+    if not isinstance(undo_operations, list) or not undo_operations:
+        return {"applied": 0, "errors": ["No undo operations available for this proposal"]}
+
+    applied = 0
+    errors: list[str] = []
+    for idx, op in enumerate(reversed(undo_operations)):
+        if not isinstance(op, dict):
+            errors.append(f"Undo operation {idx} is not an object")
+            continue
+        op_kind = str(op.get("op", "")).strip().lower()
+        try:
+            if op_kind == "delete":
+                framework_id = int(op.get("framework_id"))
+                try:
+                    delete_framework(
+                        db=db,
+                        user_id=user.id,
+                        framework_id=framework_id,
+                        allow_seed_delete=True,
+                        commit=False,
+                    )
+                    applied += 1
+                except Exception:
+                    errors.append(f"Undo operation {idx}: framework_id {framework_id} was not found")
+            elif op_kind == "restore":
+                snapshot = op.get("snapshot")
+                if not isinstance(snapshot, dict):
+                    errors.append(f"Undo operation {idx}: missing snapshot")
+                    continue
+                framework_id = int(snapshot.get("framework_id", 0) or 0)
+                existing = (
+                    db.query(HealthOptimizationFramework)
+                    .filter(HealthOptimizationFramework.user_id == user.id, HealthOptimizationFramework.id == framework_id)
+                    .first()
+                    if framework_id > 0
+                    else None
+                )
+                if existing:
+                    update_framework(
+                        db=db,
+                        user_id=user.id,
+                        framework_id=framework_id,
+                        framework_type=snapshot.get("framework_type"),
+                        name=snapshot.get("name"),
+                        priority_score=snapshot.get("priority_score"),
+                        is_active=snapshot.get("is_active"),
+                        source=snapshot.get("source"),
+                        rationale=snapshot.get("rationale"),
+                        metadata=snapshot.get("metadata") if isinstance(snapshot.get("metadata"), dict) else {},
+                        commit=False,
+                    )
+                else:
+                    upsert_framework(
+                        db=db,
+                        user_id=user.id,
+                        framework_type=str(snapshot.get("framework_type", "")),
+                        name=str(snapshot.get("name", "")),
+                        priority_score=snapshot.get("priority_score"),
+                        is_active=snapshot.get("is_active"),
+                        source=snapshot.get("source"),
+                        rationale=snapshot.get("rationale"),
+                        metadata=snapshot.get("metadata") if isinstance(snapshot.get("metadata"), dict) else {},
+                        commit=False,
+                    )
+                applied += 1
+            else:
+                errors.append(f"Undo operation {idx}: unsupported op '{op_kind}'")
+        except Exception as exc:
+            errors.append(f"Undo operation {idx}: {exc}")
 
     return {"applied": applied, "errors": errors}
 
@@ -1142,14 +1291,14 @@ def review_proposal(
         raise ValueError("Proposal not found")
 
     action_norm = action.strip().lower()
-    if action_norm not in {"approve", "reject", "apply"}:
-        raise ValueError("Action must be approve, reject, or apply")
+    if action_norm not in {"approve", "reject", "apply", "undo"}:
+        raise ValueError("Action must be approve, reject, apply, or undo")
     apply_note: str | None = None
     if action_norm == "approve":
         proposal.status = "approved"
     elif action_norm == "reject":
         proposal.status = "rejected"
-    else:
+    elif action_norm == "apply":
         proposal.status = "applied"
         proposal.applied_at = datetime.now(timezone.utc)
         payload = _safe_json_loads(proposal.proposal_json or "{}", fallback={})
@@ -1157,9 +1306,25 @@ def review_proposal(
             apply_result = _apply_framework_proposal(db, user, payload)
             if apply_result["errors"]:
                 apply_note = "; ".join(apply_result["errors"])
+            undo_ops = apply_result.get("undo_operations")
+            if isinstance(undo_ops, list):
+                payload["_undo_operations"] = undo_ops
+                proposal.proposal_json = _json_dump(payload)
             if apply_result["applied"] <= 0:
                 proposal.status = "approved"
                 proposal.applied_at = None
+        proposal.requires_approval = False
+    else:
+        if proposal.status not in {"approved", "applied"}:
+            raise ValueError("Only approved/applied proposals can be undone")
+        payload = _safe_json_loads(proposal.proposal_json or "{}", fallback={})
+        if proposal.status == "applied" and isinstance(payload, dict) and str(payload.get("target", "")).strip().lower() == "framework":
+            undo_result = _undo_framework_proposal(db, user, payload)
+            if undo_result["errors"]:
+                apply_note = "; ".join(undo_result["errors"])
+        proposal.status = "rejected"
+        proposal.applied_at = None
+        proposal.requires_approval = False
 
     if proposal.status not in PROPOSAL_STATUSES:
         proposal.status = "pending"

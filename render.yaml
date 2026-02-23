@@ -34,3 +34,7 @@ services:
         value: lax
       - key: CORS_ORIGINS
         value: '["https://*.onrender.com"]'
+      - key: ANALYSIS_MAX_CATCHUP_WINDOWS_CHAT
+        value: "1"
+      - key: ANALYSIS_AUTO_APPLY_PROPOSALS
+        value: "true"

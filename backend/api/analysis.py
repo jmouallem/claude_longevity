@@ -56,7 +56,7 @@ class RunRequest(BaseModel):
 
 
 class ProposalReviewRequest(BaseModel):
-    action: str  # approve | reject | apply
+    action: str  # approve | reject | apply | undo
     note: Optional[str] = None
 
 

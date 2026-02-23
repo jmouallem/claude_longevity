@@ -58,6 +58,7 @@ Production startup security gates:
 | `ANALYSIS_MONTHLY_DAY_LOCAL` | `1` | No | Monthly analysis day of month. |
 | `ANALYSIS_MAX_CATCHUP_WINDOWS` | `6` | No | Max backlog windows processed per run type for manual/due analysis. |
 | `ANALYSIS_MAX_CATCHUP_WINDOWS_CHAT` | `1` | No | Max backlog windows processed per run type when trigger is chat autorun. |
+| `ANALYSIS_AUTO_APPLY_PROPOSALS` | `false` | No | Auto-apply new adaptation proposals (supports later undo). |
 | `ANALYSIS_AUTORUN_DEBOUNCE_SECONDS` | `300` | No | Debounce to prevent duplicate autoruns. |
 | `UTILITY_CALL_BUDGET_LOG_TURN` | `6` | No | Max utility-model calls for logging turns. |
 | `UTILITY_CALL_BUDGET_NONLOG_TURN` | `4` | No | Max utility-model calls for non-logging turns. |

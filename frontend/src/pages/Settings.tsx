@@ -632,11 +632,11 @@ export default function Settings() {
     await downloadAnalysisCsv('/api/analysis/proposals/export.csv', 'analysis-proposals');
   };
 
-  const reviewAnalysisProposal = async (proposalId: number, action: 'approve' | 'reject') => {
+  const reviewAnalysisProposal = async (proposalId: number, action: 'approve' | 'reject' | 'undo') => {
     setAnalysisMessage('');
     try {
       await apiClient.post(`/api/analysis/proposals/${proposalId}/review`, { action });
-      setAnalysisMessage(`Proposal ${action}d.`);
+      setAnalysisMessage(action === 'undo' ? 'Proposal undone.' : `Proposal ${action}d.`);
       await fetchAnalysis();
     } catch (e: unknown) {
       setAnalysisMessage(e instanceof Error ? e.message : `Failed to ${action} proposal.`);
@@ -2296,6 +2296,16 @@ export default function Settings() {
                           </button>
                         </div>
                       )}
+                      {(proposal.status === 'approved' || proposal.status === 'applied') && (
+                        <div className="flex gap-1.5 mt-2">
+                          <button
+                            onClick={() => reviewAnalysisProposal(proposal.id, 'undo')}
+                            className="px-2 py-1 text-[11px] bg-slate-700 hover:bg-slate-600 text-slate-100 rounded-md border border-slate-600"
+                          >
+                            Undo
+                          </button>
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -2592,6 +2602,20 @@ export default function Settings() {
                   className="px-3 py-1.5 text-xs bg-rose-600 hover:bg-rose-500 text-white rounded-md"
                 >
                   Reject
+                </button>
+              </div>
+            )}
+            {(selectedProposalDetail.status === 'approved' || selectedProposalDetail.status === 'applied') && (
+              <div className="mt-3 flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    void reviewAnalysisProposal(selectedProposalDetail.id, 'undo');
+                    setSelectedProposalDetail(null);
+                  }}
+                  className="px-3 py-1.5 text-xs bg-slate-700 hover:bg-slate-600 text-slate-100 rounded-md border border-slate-600"
+                >
+                  Undo
                 </button>
               </div>
             )}
