@@ -41,6 +41,7 @@ class User(Base):
     )
     coaching_plan_tasks = relationship("CoachingPlanTask", back_populates="user", cascade="all, delete-orphan")
     coaching_plan_adjustments = relationship("CoachingPlanAdjustment", back_populates="user", cascade="all, delete-orphan")
+    goals = relationship("UserGoal", back_populates="user", cascade="all, delete-orphan")
     admin_actions = relationship(
         "AdminAuditLog",
         back_populates="admin_user",
@@ -503,6 +504,7 @@ class CoachingPlanTask(Base):
     target_unit = Column(Text)
     status = Column(Text, nullable=False, default="pending")  # pending | completed | missed | skipped
     progress_pct = Column(Float, nullable=False, default=0.0)
+    time_of_day = Column(Text, default="anytime")  # morning | afternoon | evening | anytime
     due_at = Column(DateTime)
     completed_at = Column(DateTime)
     source = Column(Text, nullable=False, default="system")  # intake | user | adaptive | system
@@ -511,6 +513,29 @@ class CoachingPlanTask(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     user = relationship("User", back_populates="coaching_plan_tasks")
+
+
+class UserGoal(Base):
+    __tablename__ = "user_goals"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    title = Column(Text, nullable=False)
+    description = Column(Text)
+    goal_type = Column(Text, default="custom")  # weight_loss|cardiovascular|fitness|metabolic|energy|sleep|habit|custom
+    target_value = Column(Float)
+    target_unit = Column(Text)
+    baseline_value = Column(Float)
+    current_value = Column(Float)
+    target_date = Column(Text)  # "2025-06-01" ISO, nullable
+    status = Column(Text, default="active")  # active|paused|completed|abandoned
+    priority = Column(Integer, default=3)  # 1=highest, 5=lowest
+    why = Column(Text)
+    created_by = Column(Text, default="coach")  # coach|user
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    user = relationship("User", back_populates="goals")
 
 
 class CoachingPlanAdjustment(Base):

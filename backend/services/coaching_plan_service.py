@@ -29,6 +29,18 @@ CYCLE_TYPES = {"daily", "weekly", "monthly"}
 VISIBILITY_MODES = {"top3", "all"}
 ADJUSTABLE_METRICS = {"meals_logged", "hydration_ml", "exercise_minutes", "sleep_minutes"}
 
+_TIME_OF_DAY: dict[str, str] = {
+    "medication": "morning",
+    "supplement": "morning",
+    "sleep": "morning",
+    "exercise": "afternoon",
+    "vitals": "evening",
+    "nutrition": "anytime",
+    "hydration": "anytime",
+    "general": "anytime",
+    "framework": "anytime",
+}
+
 
 @dataclass(frozen=True)
 class CycleWindow:
@@ -332,6 +344,7 @@ def _task_template_rows(user: User, window: CycleWindow, frameworks: list[Health
         row["cycle_end"] = window.end.isoformat()
         row["status"] = "pending"
         row["progress_pct"] = 0.0
+        row["time_of_day"] = _TIME_OF_DAY.get(str(row.get("domain") or "general"), "anytime")
         row["due_at"] = due_at
         row["source"] = "system"
         row["framework_type"] = row.get("framework_type") or ""
@@ -850,6 +863,7 @@ def _task_to_dict(task: CoachingPlanTask) -> dict[str, Any]:
         "target_unit": task.target_unit,
         "status": task.status,
         "progress_pct": float(task.progress_pct or 0.0),
+        "time_of_day": task.time_of_day or "anytime",
         "due_at": task.due_at.isoformat() if task.due_at else None,
         "completed_at": task.completed_at.isoformat() if task.completed_at else None,
         "source": task.source,

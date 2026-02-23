@@ -143,7 +143,10 @@ function renderContent(content: string): ReactNode[] {
 
 function formatTimestamp(isoString: string): string {
   try {
-    const date = new Date(isoString);
+    // Legacy chat rows may store UTC timestamps without an offset.
+    // Treat bare ISO values as UTC so desktop/mobile render consistently.
+    const normalized = /(?:Z|[+-]\d{2}:\d{2})$/.test(isoString) ? isoString : `${isoString}Z`;
+    const date = new Date(normalized);
     return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   } catch {
     return '';

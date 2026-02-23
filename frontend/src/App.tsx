@@ -14,6 +14,7 @@ import Specialists from './pages/Specialists';
 import Feedback from './pages/Feedback';
 import Menu from './pages/Menu';
 import Plan from './pages/Plan';
+import Goals from './pages/Goals';
 import AdminStats from './pages/AdminStats';
 import AdminUsers from './pages/AdminUsers';
 import AdminSecurity from './pages/AdminSecurity';
@@ -91,6 +92,7 @@ function AuthenticatedLayout() {
     <div className="min-h-screen bg-slate-900">
       <Navbar />
       <Routes>
+        <Route path="goals" element={<Goals />} />
         <Route path="chat" element={<Chat />} />
         <Route path="dashboard" element={<Dashboard />} />
         <Route path="history" element={<History />} />
@@ -99,7 +101,7 @@ function AuthenticatedLayout() {
         <Route path="feedback" element={<Feedback />} />
         <Route path="settings" element={<Settings />} />
         <Route path="specialists" element={<Specialists />} />
-        <Route path="*" element={<Navigate to="/chat" replace />} />
+        <Route path="*" element={<Navigate to="/goals" replace />} />
       </Routes>
       {showIntakePrompt && (
         <IntakePromptModal
@@ -107,7 +109,7 @@ function AuthenticatedLayout() {
           onCompleted={(nextRoute) => {
             setShowIntakePrompt(false);
             window.dispatchEvent(new Event('intake:check'));
-            navigate(nextRoute || '/plan?onboarding=1');
+            navigate(nextRoute || '/goals?onboarding=1');
           }}
         />
       )}
@@ -144,7 +146,7 @@ export default function App() {
         <Route element={<ProtectedRoute />}>
           <Route path="/*" element={<AuthenticatedLayout />} />
         </Route>
-        <Route path="/" element={<Navigate to="/chat" replace />} />
+        <Route path="/" element={<Navigate to="/goals" replace />} />
       </Routes>
 
       {pendingUpdate && (

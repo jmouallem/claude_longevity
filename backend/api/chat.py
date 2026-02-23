@@ -1,5 +1,6 @@
 import json
 import time
+from datetime import timezone, datetime
 
 from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -16,6 +17,16 @@ from config import settings
 from services.rate_limit_service import RateLimitRule, enforce_rate_limit
 
 router = APIRouter(prefix="/chat", tags=["chat"], dependencies=[Depends(require_non_admin)])
+
+
+def _to_utc_iso(value: datetime | None) -> str | None:
+    if not value:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    else:
+        value = value.astimezone(timezone.utc)
+    return value.isoformat()
 
 
 @router.post("")
@@ -120,7 +131,7 @@ def get_chat_history(
             "specialist_used": m.specialist_used,
             "model_used": m.model_used,
             "has_image": m.has_image,
-            "created_at": m.created_at.isoformat() if m.created_at else None,
+            "created_at": _to_utc_iso(m.created_at),
         }
         for m in reversed(messages)
     ]

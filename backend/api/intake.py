@@ -220,8 +220,8 @@ def finish_intake(
         "status": "completed",
         "applied_patch": patch,
         "next_step": {
-            "route": "/plan?onboarding=1",
-            "message": "Review frameworks, confirm targets, and start your first coaching task.",
+            "route": "/goals?onboarding=1",
+            "message": "Let's set your health goals and build your personalized plan.",
         },
         **state,
     }

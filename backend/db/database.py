@@ -133,6 +133,10 @@ def run_startup_migrations() -> None:
         if "meal_template_id" not in food_log_columns:
             alter_statements.append("ALTER TABLE food_log ADD COLUMN meal_template_id INTEGER")
 
+    plan_task_columns = _table_columns("coaching_plan_tasks")
+    if plan_task_columns and "time_of_day" not in plan_task_columns:
+        alter_statements.append("ALTER TABLE coaching_plan_tasks ADD COLUMN time_of_day TEXT DEFAULT 'anytime'")
+
     with engine.begin() as conn:
         for stmt in alter_statements:
             conn.execute(text(stmt))
@@ -654,5 +658,35 @@ def run_startup_migrations() -> None:
             """
             CREATE INDEX IF NOT EXISTS idx_rate_limit_audit_user
             ON rate_limit_audit_events (user_id, created_at)
+            """
+        ))
+
+        # User goals — structured first-class goal tracking.
+        conn.execute(text(
+            """
+            CREATE TABLE IF NOT EXISTS user_goals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL REFERENCES users(id),
+                title TEXT NOT NULL,
+                description TEXT,
+                goal_type TEXT DEFAULT 'custom',
+                target_value REAL,
+                target_unit TEXT,
+                baseline_value REAL,
+                current_value REAL,
+                target_date TEXT,
+                status TEXT DEFAULT 'active',
+                priority INTEGER DEFAULT 3,
+                why TEXT,
+                created_by TEXT DEFAULT 'coach',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        ))
+        conn.execute(text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_user_goals_user
+            ON user_goals (user_id, status)
             """
         ))

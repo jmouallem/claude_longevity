@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from db.models import (
     User, FoodLog, HydrationLog, VitalsLog, ExerciseLog,
-    SupplementLog, FastingLog, SleepLog, Summary, Message, HealthOptimizationFramework,
+    SupplementLog, FastingLog, SleepLog, Summary, Message, HealthOptimizationFramework, UserGoal,
 )
 from services.health_framework_service import FRAMEWORK_TYPES, active_frameworks_for_context, ensure_default_frameworks
 from services.specialists_config import get_specialist_prompt, get_system_prompt, parse_overrides
@@ -65,7 +65,7 @@ def _format_hydration(ml_value: float, unit: str) -> str:
     return f"{ml_value:.0f} ml"
 
 
-def format_user_profile(settings) -> str:
+def format_user_profile(settings, db: Session | None = None, user_id: int | None = None) -> str:
     """Format user settings into a readable profile section."""
     if not settings:
         return "No profile configured yet."
@@ -95,18 +95,58 @@ def format_user_profile(settings) -> str:
             lines.append(f"- Medical conditions: {', '.join(conditions)}")
         except (json.JSONDecodeError, TypeError):
             lines.append(f"- Medical conditions: {settings.medical_conditions}")
-    if settings.health_goals:
-        try:
-            goals = json.loads(settings.health_goals)
-            lines.append(f"- Health goals: {', '.join(goals)}")
-        except (json.JSONDecodeError, TypeError):
-            lines.append(f"- Health goals: {settings.health_goals}")
     if settings.dietary_preferences:
         try:
             prefs = json.loads(settings.dietary_preferences)
             lines.append(f"- Dietary preferences: {', '.join(prefs)}")
         except (json.JSONDecodeError, TypeError):
             lines.append(f"- Dietary preferences: {settings.dietary_preferences}")
+
+    # Structured goals from UserGoal records (preferred over flat health_goals text).
+    if db is not None and user_id is not None:
+        active_goals = (
+            db.query(UserGoal)
+            .filter(UserGoal.user_id == user_id, UserGoal.status == "active")
+            .order_by(UserGoal.priority.asc(), UserGoal.created_at.asc())
+            .all()
+        )
+        if active_goals:
+            priority_labels = {1: "HIGH", 2: "HIGH", 3: "MED", 4: "LOW", 5: "LOW"}
+            goal_lines = ["- Active Goals:"]
+            for i, g in enumerate(active_goals, 1):
+                plabel = priority_labels.get(int(g.priority or 3), "MED")
+                parts = [f"  {i}. [{plabel}] {g.title}"]
+                if g.target_value is not None and g.target_unit:
+                    current_str = f"{g.current_value} {g.target_unit}" if g.current_value is not None else "baseline not set"
+                    target_str = f"{g.target_value} {g.target_unit}"
+                    if g.baseline_value is not None and g.target_value != g.baseline_value:
+                        span = g.target_value - g.baseline_value
+                        done = (g.current_value or g.baseline_value) - g.baseline_value
+                        pct = int(max(0, min(100, (done / span) * 100)))
+                        parts[0] += f" — {current_str} → {target_str} ({pct}% to goal)"
+                    else:
+                        parts[0] += f" — target: {target_str}, current: {current_str}"
+                if g.target_date:
+                    parts[0] += f" by {g.target_date}"
+                goal_lines.append(parts[0])
+                if g.why:
+                    goal_lines.append(f"     Why: {g.why}")
+            lines.extend(goal_lines)
+        else:
+            # Fall back to flat health_goals text.
+            if settings.health_goals:
+                try:
+                    goals = json.loads(settings.health_goals)
+                    lines.append(f"- Health goals: {', '.join(goals)}")
+                except (json.JSONDecodeError, TypeError):
+                    lines.append(f"- Health goals: {settings.health_goals}")
+    else:
+        if settings.health_goals:
+            try:
+                goals = json.loads(settings.health_goals)
+                lines.append(f"- Health goals: {', '.join(goals)}")
+            except (json.JSONDecodeError, TypeError):
+                lines.append(f"- Health goals: {settings.health_goals}")
 
     return "\n".join(lines) if lines else "Profile not yet configured."
 
@@ -202,7 +242,13 @@ def _stable_cache_key(db: Session, user: User, specialist: str) -> tuple:
         .scalar()
     )
     framework_stamp = framework_stamp_row.isoformat() if framework_stamp_row else "none"
-    return (user.id, specialist, settings_stamp, specialist_stamp, framework_stamp)
+    goal_stamp_row = (
+        db.query(func.max(UserGoal.updated_at))
+        .filter(UserGoal.user_id == user.id)
+        .scalar()
+    )
+    goal_stamp = goal_stamp_row.isoformat() if goal_stamp_row else "none"
+    return (user.id, specialist, settings_stamp, specialist_stamp, framework_stamp, goal_stamp)
 
 
 def _build_stable_context_block(db: Session, user: User, specialist: str, overrides: dict, budget: dict[str, int]) -> str:
@@ -223,7 +269,7 @@ def _build_stable_context_block(db: Session, user: User, specialist: str, overri
             identity_lines.append(f"- Username: {username}")
         blocks.append("## User Identity\n" + "\n".join(identity_lines))
 
-    profile = format_user_profile(user.settings)
+    profile = format_user_profile(user.settings, db=db, user_id=user.id)
     blocks.append(_clip_block(f"## Current User Profile\n{profile}", budget["max_profile"]))
 
     framework_text = format_active_frameworks(db, user)

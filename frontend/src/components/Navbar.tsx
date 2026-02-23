@@ -4,9 +4,10 @@ import { useAuthStore } from '../stores/authStore';
 import { APP_NAME } from '../constants/branding';
 
 const primaryNavLinks = [
+  { to: '/goals', label: 'Goals' },
   { to: '/chat', label: 'Chat' },
-  { to: '/plan', label: 'Plan' },
   { to: '/dashboard', label: 'Dashboard' },
+  { to: '/plan', label: 'Plan' },
   { to: '/history', label: 'History' },
   { to: '/menu', label: 'Menu' },
   { to: '/specialists', label: 'Specialists' },
@@ -29,7 +30,7 @@ export default function Navbar() {
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex items-center justify-between h-14">
           {/* Logo */}
-            <Link to="/chat" className="flex items-center gap-2 shrink-0">
+            <Link to="/goals" className="flex items-center gap-2 shrink-0">
             <span className="text-emerald-500 font-bold text-lg">{APP_NAME}</span>
             </Link>
 
