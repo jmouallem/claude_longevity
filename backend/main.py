@@ -3,7 +3,9 @@ import time
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from config import settings
 from db.database import engine, Base, run_startup_migrations
@@ -31,6 +33,7 @@ run_startup_migrations()
 ensure_admin_account()
 
 app = FastAPI(title=settings.APP_NAME, version="1.0.0")
+static_dir = Path(__file__).parent / "static"
 
 # CORS
 app.add_middleware(
@@ -101,8 +104,24 @@ def health_check():
     return {"status": "ok", "app": settings.APP_NAME}
 
 
+@app.exception_handler(StarletteHTTPException)
+async def spa_fallback_404(request: Request, exc: StarletteHTTPException):
+    if (
+        exc.status_code == 404
+        and request.method.upper() == "GET"
+        and static_dir.exists()
+        and not request.url.path.startswith("/api")
+    ):
+        # Preserve normal 404s for explicit asset/file paths.
+        leaf = request.url.path.rsplit("/", 1)[-1]
+        if "." not in leaf:
+            index_file = static_dir / "index.html"
+            if index_file.exists():
+                return FileResponse(index_file)
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
+
 # Serve frontend static files (in production)
 # Keep this after API routes so "/api/*" is not shadowed by static routing.
-static_dir = Path(__file__).parent / "static"
 if static_dir.exists():
     app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="static")
