@@ -590,6 +590,48 @@ export default function Settings() {
     }
   };
 
+  const downloadAnalysisCsv = async (path: string, filenamePrefix: string) => {
+    setAnalysisMessage('');
+    setAnalysisLoading(true);
+    try {
+      const response = await fetch(path, {
+        method: 'GET',
+        credentials: 'include',
+      });
+      if (response.status === 401) {
+        window.location.href = '/login';
+        return;
+      }
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(body.detail || `Request failed: ${response.status}`);
+      }
+      const blob = await response.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      const stamp = new Date().toISOString().slice(0, 10);
+      anchor.href = objectUrl;
+      anchor.download = `${filenamePrefix}-${stamp}.csv`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      document.body.removeChild(anchor);
+      URL.revokeObjectURL(objectUrl);
+      setAnalysisMessage(`Exported ${filenamePrefix} CSV.`);
+    } catch (e: unknown) {
+      setAnalysisMessage(e instanceof Error ? e.message : 'Failed to export CSV.');
+    } finally {
+      setAnalysisLoading(false);
+    }
+  };
+
+  const exportAnalysisRunsCsv = async () => {
+    await downloadAnalysisCsv('/api/analysis/runs/export.csv', 'analysis-runs');
+  };
+
+  const exportAnalysisProposalsCsv = async () => {
+    await downloadAnalysisCsv('/api/analysis/proposals/export.csv', 'analysis-proposals');
+  };
+
   const reviewAnalysisProposal = async (proposalId: number, action: 'approve' | 'reject') => {
     setAnalysisMessage('');
     try {
@@ -2120,6 +2162,20 @@ export default function Settings() {
                 className="px-2.5 py-1.5 bg-rose-700 hover:bg-rose-600 disabled:opacity-60 text-white text-xs rounded-md"
               >
                 Clear Runs
+              </button>
+              <button
+                onClick={exportAnalysisRunsCsv}
+                disabled={analysisLoading}
+                className="px-2.5 py-1.5 bg-slate-700 hover:bg-slate-600 disabled:opacity-60 text-slate-100 text-xs rounded-md border border-slate-600"
+              >
+                Export Runs CSV
+              </button>
+              <button
+                onClick={exportAnalysisProposalsCsv}
+                disabled={analysisLoading}
+                className="px-2.5 py-1.5 bg-slate-700 hover:bg-slate-600 disabled:opacity-60 text-slate-100 text-xs rounded-md border border-slate-600"
+              >
+                Export Proposals CSV
               </button>
             </div>
 

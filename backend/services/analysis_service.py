@@ -961,7 +961,13 @@ async def run_due_analyses(db: Session, user: User, trigger: str = "chat") -> li
         reference_day = reference_day - timedelta(days=1)
 
     runs: list[AnalysisRun] = []
-    max_windows = max(1, int(getattr(app_settings, "ANALYSIS_MAX_CATCHUP_WINDOWS", 6)))
+    is_chat_trigger = str(trigger or "").strip().lower().startswith("chat")
+    configured_max = (
+        int(getattr(app_settings, "ANALYSIS_MAX_CATCHUP_WINDOWS_CHAT", 1))
+        if is_chat_trigger
+        else int(getattr(app_settings, "ANALYSIS_MAX_CATCHUP_WINDOWS", 6))
+    )
+    max_windows = max(1, min(configured_max, 60))
     weekly_weekday = max(0, min(int(app_settings.ANALYSIS_WEEKLY_WEEKDAY_LOCAL), 6))
     monthly_day = max(1, min(int(app_settings.ANALYSIS_MONTHLY_DAY_LOCAL), 31))
 
