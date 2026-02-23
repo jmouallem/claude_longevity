@@ -20,6 +20,7 @@ import AdminSecurity from './pages/AdminSecurity';
 import AdminFeedback from './pages/AdminFeedback';
 import { apiClient } from './api/client';
 import { useAuthStore } from './stores/authStore';
+import { PWA_UPDATE_EVENT, type PwaUpdateDetail } from './pwa';
 
 interface IntakePromptStatus {
   should_prompt: boolean;
@@ -115,14 +116,60 @@ function AuthenticatedLayout() {
 }
 
 export default function App() {
+  const [pendingUpdate, setPendingUpdate] = useState<ServiceWorkerRegistration | null>(null);
+
+  useEffect(() => {
+    const handlePwaUpdate = (event: Event) => {
+      const detail = (event as CustomEvent<PwaUpdateDetail>).detail;
+      if (!detail?.registration) return;
+      setPendingUpdate((prev) => prev ?? detail.registration);
+    };
+
+    window.addEventListener(PWA_UPDATE_EVENT, handlePwaUpdate);
+    return () => {
+      window.removeEventListener(PWA_UPDATE_EVENT, handlePwaUpdate);
+    };
+  }, []);
+
+  const applyUpdate = () => {
+    pendingUpdate?.waiting?.postMessage({ type: 'SKIP_WAITING' });
+    window.location.reload();
+  };
+
   return (
-    <Routes>
-      <Route path="/login" element={<Login />} />
-      <Route path="/register" element={<Register />} />
-      <Route element={<ProtectedRoute />}>
-        <Route path="/*" element={<AuthenticatedLayout />} />
-      </Route>
-      <Route path="/" element={<Navigate to="/chat" replace />} />
-    </Routes>
+    <>
+      <Routes>
+        <Route path="/login" element={<Login />} />
+        <Route path="/register" element={<Register />} />
+        <Route element={<ProtectedRoute />}>
+          <Route path="/*" element={<AuthenticatedLayout />} />
+        </Route>
+        <Route path="/" element={<Navigate to="/chat" replace />} />
+      </Routes>
+
+      {pendingUpdate && (
+        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[90] w-[calc(100%-1.5rem)] max-w-md rounded-lg border border-emerald-500/40 bg-slate-900/95 px-3 py-2 shadow-xl">
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-xs text-slate-200">Update available. Reload to get the latest version.</p>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setPendingUpdate(null)}
+                className="px-2 py-1 text-xs rounded-md border border-slate-600 text-slate-300 hover:bg-slate-800"
+              >
+                Later
+              </button>
+              <button
+                type="button"
+                onClick={applyUpdate}
+                className="px-2.5 py-1 text-xs rounded-md bg-emerald-600 text-white hover:bg-emerald-500"
+              >
+                Reload
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 }
