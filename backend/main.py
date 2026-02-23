@@ -96,12 +96,13 @@ app.include_router(menu_router, prefix="/api")
 app.include_router(analysis_router, prefix="/api")
 app.include_router(admin_router, prefix="/api")
 
-# Serve frontend static files (in production)
-static_dir = Path(__file__).parent / "static"
-if static_dir.exists():
-    app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="static")
-
-
 @app.get("/api/health")
 def health_check():
     return {"status": "ok", "app": settings.APP_NAME}
+
+
+# Serve frontend static files (in production)
+# Keep this after API routes so "/api/*" is not shadowed by static routing.
+static_dir = Path(__file__).parent / "static"
+if static_dir.exists():
+    app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="static")
