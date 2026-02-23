@@ -13,6 +13,7 @@ from services.coaching_plan_service import (
     apply_framework_selection,
     clear_plan_data,
     ensure_plan_seeded,
+    get_daily_rolling_snapshot,
     get_plan_snapshot,
     mark_notification_read,
     set_plan_preferences,
@@ -46,6 +47,17 @@ def plan_snapshot(
     db: Session = Depends(get_db),
 ):
     payload = get_plan_snapshot(db, user, cycle_type=cycle_type)
+    db.commit()
+    return payload
+
+
+@router.get("/snapshot/rolling")
+def plan_snapshot_rolling(
+    days: int = 5,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    payload = get_daily_rolling_snapshot(db, user, days=days)
     db.commit()
     return payload
 

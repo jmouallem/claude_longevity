@@ -30,6 +30,7 @@ from db.models import (
     FastingLog,
     SleepLog,
     Notification,
+    UserGoal,
 )
 from services.analysis_service import run_due_analyses_for_user_id
 from services.coaching_plan_service import get_plan_snapshot
@@ -346,6 +347,50 @@ Rules:
 - Valid timing values: morning, evening, with breakfast, with lunch, with dinner, bedtime, twice daily, as needed, or empty string.
 - If user provides a correction, return the corrected full entry.
 - matched_medications and matched_supplements must only include names that exactly match provided current lists.
+"""
+
+GOAL_SYNC_EXTRACT_PROMPT = """Extract goal create/update actions from a coaching chat turn.
+
+Return ONLY valid JSON:
+{
+  "action": "none|create|update|create_or_update",
+  "create_goals": [
+    {
+      "title": "string",
+      "description": "string",
+      "goal_type": "weight_loss|cardiovascular|fitness|metabolic|energy|sleep|habit|custom",
+      "target_value": 0,
+      "target_unit": "string",
+      "baseline_value": 0,
+      "target_date": "YYYY-MM-DD",
+      "priority": 1,
+      "why": "string"
+    }
+  ],
+  "update_goals": [
+    {
+      "goal_id": 0,
+      "title_match": "existing goal title fragment",
+      "title": "optional new title",
+      "description": "optional",
+      "goal_type": "optional",
+      "target_value": 0,
+      "target_unit": "optional",
+      "baseline_value": 0,
+      "current_value": 0,
+      "target_date": "YYYY-MM-DD",
+      "priority": 1,
+      "status": "active|paused|completed|abandoned",
+      "why": "optional"
+    }
+  ]
+}
+
+Rules:
+- If the message is only kickoff/planning text (e.g., starts with "Goal-setting kickoff:"), return action "none".
+- Only create/update when the user explicitly confirms goals or asks to change/refine goals.
+- Never invent goals not grounded in the user message.
+- Keep create_goals/update_goals empty when unsure.
 """
 
 from utils.med_utils import (
@@ -1984,6 +2029,310 @@ def _has_explicit_taking_intent(text: str) -> bool:
     return any(marker in t for marker in taking_markers)
 
 
+def _normalize_text_key(value: str | None) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+
+
+def _looks_like_goal_turn(message_text: str) -> bool:
+    t = " ".join(str(message_text or "").strip().lower().split())
+    if not t:
+        return False
+    goal_terms = (
+        "goal-setting kickoff:",
+        "goal-refinement kickoff:",
+        "goal",
+        "goals",
+        "target",
+        "deadline",
+        "timeline",
+        "refine",
+        "adjust",
+        "by ",
+        "workout",
+        "hiit",
+        "strength",
+    )
+    return any(term in t for term in goal_terms)
+
+
+def _goal_save_intent(message_text: str) -> bool:
+    t = " ".join(str(message_text or "").strip().lower().split())
+    signals = (
+        "sounds good",
+        "go ahead",
+        "save",
+        "finalize",
+        "lock it in",
+        "yes",
+        "update to",
+        "i want to target",
+    )
+    return any(signal in t for signal in signals)
+
+
+def _response_claims_goal_saved(text: str) -> bool:
+    t = " ".join(str(text or "").strip().lower().split())
+    save_terms = ("saved", "save these goals", "i'll save", "let me save", "now save", "go ahead and save")
+    if not any(term in t for term in save_terms):
+        return False
+    return "goal" in t
+
+
+def _resolve_goal_for_update(
+    existing_goals: list[UserGoal],
+    goal_id: int | None = None,
+    title_match: str | None = None,
+) -> UserGoal | None:
+    if goal_id:
+        for row in existing_goals:
+            if int(row.id) == int(goal_id):
+                return row
+
+    match_key = _normalize_text_key(title_match)
+    if not match_key:
+        return None
+    for row in existing_goals:
+        title_key = _normalize_text_key(row.title)
+        if match_key and title_key and (match_key in title_key or title_key in match_key):
+            return row
+    return None
+
+
+def _goal_sync_followup_text(goal_sync: dict[str, Any], assistant_response: str) -> str | None:
+    created_titles = [str(x).strip() for x in (goal_sync.get("created_titles") or []) if str(x).strip()]
+    updated_titles = [str(x).strip() for x in (goal_sync.get("updated_titles") or []) if str(x).strip()]
+    created = int(goal_sync.get("created") or 0)
+    updated = int(goal_sync.get("updated") or 0)
+
+    if created or updated:
+        lines: list[str] = []
+        if created_titles:
+            lines.append(f"Saved goals: {', '.join(created_titles)}.")
+        elif created:
+            lines.append(f"Saved {created} new goal(s).")
+        if updated_titles:
+            lines.append(f"Updated goals: {', '.join(updated_titles)}.")
+        elif updated:
+            lines.append(f"Updated {updated} existing goal(s).")
+        lines.append("Return to the Goals page to review your 5-day timeline and start check-ins.")
+        return "\n".join(lines)
+
+    if goal_sync.get("goal_context") and _response_claims_goal_saved(assistant_response):
+        return (
+            "I have not persisted goal changes yet. Confirm the exact target(s) and timeline(s), "
+            "and I will save them before we move on."
+        )
+    return None
+
+
+async def _apply_goal_updates(
+    db: Session,
+    provider,
+    user: User,
+    message_text: str,
+    reference_utc: datetime | None = None,
+    utility_budget: UtilityCallBudget | None = None,
+) -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "goal_context": False,
+        "save_intent": False,
+        "attempted": False,
+        "created": 0,
+        "updated": 0,
+        "created_titles": [],
+        "updated_titles": [],
+    }
+
+    if not _looks_like_goal_turn(message_text):
+        return summary
+    summary["goal_context"] = True
+    summary["save_intent"] = _goal_save_intent(message_text)
+
+    if utility_budget and not utility_budget.can_call("goal_sync_extract"):
+        return summary
+
+    existing_goals = (
+        db.query(UserGoal)
+        .filter(UserGoal.user_id == user.id, UserGoal.status == "active")
+        .order_by(UserGoal.priority.asc(), UserGoal.created_at.asc())
+        .all()
+    )
+    existing_payload = [
+        {
+            "goal_id": int(row.id),
+            "title": row.title,
+            "goal_type": row.goal_type,
+            "target_value": row.target_value,
+            "target_unit": row.target_unit,
+            "target_date": row.target_date,
+            "priority": row.priority,
+        }
+        for row in existing_goals
+    ]
+    recent_messages = (
+        db.query(Message)
+        .filter(Message.user_id == user.id)
+        .order_by(Message.created_at.desc(), Message.id.desc())
+        .limit(6)
+        .all()
+    )
+    recent_context_payload: list[dict[str, str]] = []
+    for row in reversed(recent_messages):
+        role = str(row.role or "").strip().lower()
+        if role not in {"assistant", "user"}:
+            continue
+        content = str(row.content or "").strip()
+        if not content:
+            continue
+        recent_context_payload.append({"role": role, "content": content[:1200]})
+
+    try:
+        result = await provider.chat(
+            messages=[
+                {
+                    "role": "user",
+                    "content": (
+                        f"Current goals JSON:\n{json.dumps(existing_payload, ensure_ascii=True)}\n\n"
+                        f"Recent conversation JSON:\n{json.dumps(recent_context_payload, ensure_ascii=True)}\n\n"
+                        f"User message:\n{message_text}"
+                    ),
+                }
+            ],
+            model=provider.get_utility_model(),
+            system=GOAL_SYNC_EXTRACT_PROMPT,
+            stream=False,
+        )
+        track_usage_from_result(
+            db=db,
+            user_id=user.id,
+            result=result,
+            model_used=provider.get_utility_model(),
+            operation="goal_sync_extract",
+            usage_type="utility",
+        )
+        parsed = _extract_json_payload(result.get("content"))
+    except Exception as e:
+        record_ai_failure("utility", "goal_sync_extract", str(e))
+        logger.warning(f"Goal sync extraction failed: {e}")
+        return summary
+
+    summary["attempted"] = True
+    action = str(parsed.get("action") or "none").strip().lower()
+    if action not in {"create", "update", "create_or_update"}:
+        return summary
+
+    tool_ctx = ToolContext(db=db, user=user, specialist_id="orchestrator", reference_utc=reference_utc)
+    valid_goal_types = {"weight_loss", "cardiovascular", "fitness", "metabolic", "energy", "sleep", "habit", "custom"}
+    valid_statuses = {"active", "paused", "completed", "abandoned"}
+
+    def _to_float(value: Any) -> float | None:
+        if value is None or value == "":
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _to_int(value: Any) -> int | None:
+        if value is None or value == "":
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    create_rows = parsed.get("create_goals", [])
+    if isinstance(create_rows, list) and action in {"create", "create_or_update"}:
+        for item in create_rows[:3]:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title") or "").strip()
+            if not title:
+                continue
+            duplicate = _resolve_goal_for_update(existing_goals, title_match=title)
+            if duplicate:
+                continue
+
+            payload: dict[str, Any] = {"title": title}
+            goal_type = str(item.get("goal_type") or "custom").strip().lower()
+            payload["goal_type"] = goal_type if goal_type in valid_goal_types else "custom"
+            for key in ("description", "target_unit", "target_date", "why"):
+                value = item.get(key)
+                if value is not None and str(value).strip():
+                    payload[key] = str(value).strip()
+            target_value = _to_float(item.get("target_value"))
+            baseline_value = _to_float(item.get("baseline_value"))
+            if target_value is not None:
+                payload["target_value"] = target_value
+            if baseline_value is not None:
+                payload["baseline_value"] = baseline_value
+            priority = _to_int(item.get("priority"))
+            if priority is not None:
+                payload["priority"] = max(1, min(priority, 5))
+
+            try:
+                out = tool_registry.execute("create_goal", payload, tool_ctx)
+                row = (out or {}).get("goal") if isinstance(out, dict) else None
+                if isinstance(row, dict):
+                    summary["created"] = int(summary["created"] or 0) + 1
+                    summary["created_titles"].append(str(row.get("title") or title))
+            except Exception as e:
+                logger.warning(f"Goal create tool failed for '{title}': {e}")
+
+    update_rows = parsed.get("update_goals", [])
+    if isinstance(update_rows, list) and action in {"update", "create_or_update"}:
+        refreshed_goals = (
+            db.query(UserGoal)
+            .filter(UserGoal.user_id == user.id, UserGoal.status == "active")
+            .order_by(UserGoal.priority.asc(), UserGoal.created_at.asc())
+            .all()
+        )
+        for item in update_rows[:5]:
+            if not isinstance(item, dict):
+                continue
+            goal_id = _to_int(item.get("goal_id"))
+            title_match = str(item.get("title_match") or item.get("title") or "").strip() or None
+            match = _resolve_goal_for_update(refreshed_goals, goal_id=goal_id, title_match=title_match)
+            if not match:
+                continue
+
+            payload: dict[str, Any] = {"goal_id": int(match.id)}
+            for key in ("title", "description", "target_unit", "target_date", "why"):
+                if key in item and item.get(key) is not None:
+                    value = str(item.get(key)).strip()
+                    payload[key] = value if value else None
+            if "goal_type" in item and item.get("goal_type") is not None:
+                goal_type = str(item.get("goal_type")).strip().lower()
+                payload["goal_type"] = goal_type if goal_type in valid_goal_types else "custom"
+            if "status" in item and item.get("status") is not None:
+                status = str(item.get("status")).strip().lower()
+                if status in valid_statuses:
+                    payload["status"] = status
+
+            for key in ("target_value", "baseline_value", "current_value"):
+                if key in item:
+                    value = _to_float(item.get(key))
+                    if value is not None:
+                        payload[key] = value
+            if "priority" in item:
+                priority = _to_int(item.get("priority"))
+                if priority is not None:
+                    payload["priority"] = max(1, min(priority, 5))
+
+            if len(payload) <= 1:
+                continue
+            try:
+                out = tool_registry.execute("update_goal", payload, tool_ctx)
+                row = (out or {}).get("goal") if isinstance(out, dict) else None
+                if isinstance(row, dict):
+                    summary["updated"] = int(summary["updated"] or 0) + 1
+                    summary["updated_titles"].append(str(row.get("title") or match.title))
+            except Exception as e:
+                logger.warning(f"Goal update tool failed for goal_id={match.id}: {e}")
+
+    return summary
+
+
 async def _apply_profile_updates(
     db: Session,
     provider,
@@ -2545,7 +2894,31 @@ async def process_chat(
     except Exception as e:
         logger.warning(f"Checklist sync from chat failed: {e}")
 
-    # 3d. Optional live web search for supported specialists/questions.
+    # 3d. Goal sync: persist structured goal create/update actions when the
+    # user confirms goal-setting or refinement details in chat.
+    goal_sync_result: dict[str, Any] = {
+        "goal_context": False,
+        "save_intent": False,
+        "attempted": False,
+        "created": 0,
+        "updated": 0,
+        "created_titles": [],
+        "updated_titles": [],
+    }
+    try:
+        goal_sync_result = await _apply_goal_updates(
+            db=db,
+            provider=provider,
+            user=user,
+            message_text=message,
+            reference_utc=message_received_utc,
+            utility_budget=utility_budget,
+        )
+        db.commit()
+    except Exception as e:
+        logger.warning(f"Goal sync from chat failed: {e}")
+
+    # 3e. Optional live web search for supported specialists/questions.
     web_results: list[dict] = []
     if _should_use_web_search(message, category, specialist):
         try:
@@ -2560,7 +2933,7 @@ async def process_chat(
         except Exception as e:
             logger.warning(f"web_search tool failed: {e}")
 
-    # 3e. Provide authoritative current time/date context when asked.
+    # 3f. Provide authoritative current time/date context when asked.
     time_context = ""
     if _should_include_time_context(message):
         try:
@@ -2584,7 +2957,7 @@ async def process_chat(
     time_inference_context = _build_time_inference_context(parsed_log_data)
     pending_time_confirmation_context = str(time_confirmation_gate.get("context", "") or "")
 
-    # 3f. Trigger due longitudinal analysis windows in background with debounce/lock.
+    # 3g. Trigger due longitudinal analysis windows in background with debounce/lock.
     await _dispatch_due_analysis_if_allowed(user.id)
 
     # 4. Build context
@@ -2603,6 +2976,12 @@ async def process_chat(
         system_context = f"{system_context}\n\n{pending_time_confirmation_context}"
     if verbosity_context:
         system_context = f"{system_context}\n\n{verbosity_context}"
+    if int(goal_sync_result.get("created") or 0) > 0 or int(goal_sync_result.get("updated") or 0) > 0:
+        system_context = (
+            f"{system_context}\n\n"
+            f"[Goal sync completed this turn: created={int(goal_sync_result.get('created') or 0)}, "
+            f"updated={int(goal_sync_result.get('updated') or 0)}. Acknowledge changes succinctly.]"
+        )
 
     # 5. Get recent messages for conversation history
     recent = get_recent_messages(db, user, limit=20)
@@ -2675,6 +3054,12 @@ async def process_chat(
         followup_line = _followup_line_from_hint(menu_followup_hint)
         if followup_line and not _response_already_has_followup(full_response, menu_followup_hint):
             append_text = f"\n\n{followup_line}" if full_response else followup_line
+            full_response += append_text
+            yield {"type": "chunk", "text": append_text}
+
+        goal_followup = _goal_sync_followup_text(goal_sync_result, full_response)
+        if goal_followup:
+            append_text = f"\n\n{goal_followup}" if full_response else goal_followup
             full_response += append_text
             yield {"type": "chunk", "text": append_text}
 

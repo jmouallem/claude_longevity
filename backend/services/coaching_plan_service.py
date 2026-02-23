@@ -992,15 +992,19 @@ def get_plan_snapshot(
     user: User,
     *,
     cycle_type: str = "daily",
+    reference_day: date | None = None,
+    create_notifications: bool = True,
+    allow_adjustments: bool = True,
 ) -> dict[str, Any]:
     ct = str(cycle_type or "daily").strip().lower()
     if ct not in CYCLE_TYPES:
         ct = "daily"
 
-    day = _today(user)
+    day = reference_day or _today(user)
     ensure_plan_seeded(db, user, reference_day=day)
-    refresh_task_statuses(db, user, reference_day=day, create_notifications=True)
-    maybe_apply_weekly_adjustment(db, user, reference_day=day)
+    refresh_task_statuses(db, user, reference_day=day, create_notifications=create_notifications)
+    if allow_adjustments:
+        maybe_apply_weekly_adjustment(db, user, reference_day=day)
     # Refresh once more after potential target changes.
     refresh_task_statuses(db, user, reference_day=day, create_notifications=False)
 
@@ -1067,6 +1071,62 @@ def get_plan_snapshot(
         "upcoming_tasks": [_task_to_dict(row) for row in upcoming],
         "notifications": [_notification_to_dict(row) for row in notifications],
         "adjustments": [_adjustment_to_dict(row) for row in adjustments],
+    }
+
+
+def get_daily_rolling_snapshot(
+    db: Session,
+    user: User,
+    *,
+    days: int = 5,
+) -> dict[str, Any]:
+    window_days = max(1, min(int(days or 5), 14))
+    start_day = _today(user)
+    day_payloads: list[dict[str, Any]] = []
+    for offset in range(window_days):
+        anchor = start_day + timedelta(days=offset)
+        snapshot = get_plan_snapshot(
+            db=db,
+            user=user,
+            cycle_type="daily",
+            reference_day=anchor,
+            create_notifications=False,
+            allow_adjustments=False,
+        )
+        day_payloads.append(snapshot)
+
+    weekly = get_plan_snapshot(
+        db=db,
+        user=user,
+        cycle_type="weekly",
+        reference_day=start_day,
+        create_notifications=False,
+        allow_adjustments=False,
+    )
+    monthly = get_plan_snapshot(
+        db=db,
+        user=user,
+        cycle_type="monthly",
+        reference_day=start_day,
+        create_notifications=False,
+        allow_adjustments=False,
+    )
+
+    return {
+        "timezone": _tz_name(user),
+        "start_date": start_day.isoformat(),
+        "window_days": window_days,
+        "days": day_payloads,
+        "weekly": {
+            "cycle": weekly.get("cycle", {}),
+            "stats": weekly.get("stats", {}),
+            "upcoming_tasks": weekly.get("upcoming_tasks", []),
+        },
+        "monthly": {
+            "cycle": monthly.get("cycle", {}),
+            "stats": monthly.get("stats", {}),
+            "upcoming_tasks": monthly.get("upcoming_tasks", []),
+        },
     }
 
 
