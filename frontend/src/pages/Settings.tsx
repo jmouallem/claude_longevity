@@ -988,6 +988,13 @@ export default function Settings() {
   }, [fetchProfile]);
 
   useEffect(() => {
+    // New users without a configured provider key should land on API Key setup first.
+    if (profileLoaded && !hasKey && tab !== 'apikey') {
+      setTab('apikey');
+    }
+  }, [profileLoaded, hasKey, tab]);
+
+  useEffect(() => {
     fetchPasskeyStatus();
   }, [fetchPasskeyStatus]);
 

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Routes, Route, Navigate } from 'react-router-dom';
+import { Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import ProtectedRoute from './components/ProtectedRoute';
 import Navbar from './components/Navbar';
 import AdminNavbar from './components/AdminNavbar';
@@ -22,21 +22,34 @@ import { useAuthStore } from './stores/authStore';
 
 interface IntakePromptStatus {
   should_prompt: boolean;
+  has_api_key?: boolean;
+  models_ready?: boolean;
+  reason?: string;
 }
 
 // Layout with Navbar for authenticated pages
 function AuthenticatedLayout() {
   const user = useAuthStore((state) => state.user);
   const [showIntakePrompt, setShowIntakePrompt] = useState(false);
+  const location = useLocation();
+  const navigate = useNavigate();
 
   const checkIntakePrompt = useCallback(async () => {
     try {
       const status = await apiClient.get<IntakePromptStatus>('/api/intake/prompt-status');
       setShowIntakePrompt(Boolean(status.should_prompt));
+      const missingSetup =
+        status.reason === 'missing_api_key' ||
+        status.reason === 'missing_models' ||
+        status.has_api_key === false ||
+        status.models_ready === false;
+      if (missingSetup && !location.pathname.startsWith('/settings')) {
+        navigate('/settings', { replace: true });
+      }
     } catch {
       // Ignore prompt failures so normal navigation still works.
     }
-  }, []);
+  }, [location.pathname, navigate]);
 
   useEffect(() => {
     if (user?.role === 'admin') {
