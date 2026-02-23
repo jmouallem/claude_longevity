@@ -467,3 +467,7 @@
 - `python -m compileall backend` (pass)
 - `python -m pytest -q backend/tests` (pass, 13 tests)
 - `npm run build` in `frontend/` (pass)
+4. Added end-to-end onboarding regression in `backend/tests/test_phase_g_onboarding_e2e.py` covering:
+- register -> API key/models setup -> intake completion -> framework selection -> plan snapshot -> task completion -> guided chat stream smoke check.
+5. Re-validated backend suite after onboarding regression addition:
+- `python -m pytest -q backend/tests` (pass, 18 tests)
