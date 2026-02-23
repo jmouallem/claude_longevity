@@ -42,32 +42,129 @@ FRAMEWORK_TYPES: dict[str, dict[str, Any]] = {
     },
 }
 
+FRAMEWORK_STRATEGY_DETAILS: dict[str, dict[str, Any]] = {
+    "keto": {
+        "summary": "Lower-carb, higher-fat pattern that can improve appetite control and glycemic stability.",
+        "supports": ["weight loss", "blood sugar", "metabolic health", "triglycerides"],
+        "watch_out_for": ["high LDL response", "strict adherence burden"],
+    },
+    "dash": {
+        "summary": "Blood-pressure focused pattern emphasizing produce, potassium, fiber, and lower sodium.",
+        "supports": ["lower blood pressure", "heart health", "weight management"],
+        "watch_out_for": ["sodium tracking consistency"],
+    },
+    "mediterranean": {
+        "summary": "Whole-food pattern centered on vegetables, legumes, fish, olive oil, and moderate portions.",
+        "supports": ["heart health", "longevity", "weight management", "inflammation"],
+        "watch_out_for": ["portion drift from calorie-dense fats"],
+    },
+    "carnivore": {
+        "summary": "Animal-food dominant pattern sometimes used for elimination and satiety experiments.",
+        "supports": ["elimination trial", "satiety", "protein adequacy"],
+        "watch_out_for": ["fiber reduction", "micronutrient diversity"],
+    },
+    "low fodmap": {
+        "summary": "Structured elimination/reintroduction plan for GI sensitivity symptoms.",
+        "supports": ["bloating reduction", "GI symptom control", "food sensitivity mapping"],
+        "watch_out_for": ["temporary approach requiring reintroduction phase"],
+    },
+    "hiit": {
+        "summary": "Short, high-intensity intervals designed to improve fitness and metabolic capacity quickly.",
+        "supports": ["cardio fitness", "fat loss", "insulin sensitivity", "time-efficient training"],
+        "watch_out_for": ["recovery load", "joint stress when deconditioned"],
+    },
+    "zone 2": {
+        "summary": "Steady aerobic work at conversational pace to build mitochondrial and endurance capacity.",
+        "supports": ["endurance", "heart health", "fat oxidation", "recovery-friendly conditioning"],
+        "watch_out_for": ["progress may feel slow without consistency"],
+    },
+    "strength progression": {
+        "summary": "Progressive overload approach to gradually build strength and preserve lean mass.",
+        "supports": ["muscle gain", "metabolic health", "healthy aging", "bone health"],
+        "watch_out_for": ["technique quality and recovery planning"],
+    },
+    "5x5": {
+        "summary": "Simple barbell progression with five sets of five reps on core lifts.",
+        "supports": ["strength gain", "training structure", "muscle retention"],
+        "watch_out_for": ["load management for beginners or mobility limits"],
+    },
+    "crossfit": {
+        "summary": "Mixed-modality high-intensity training combining strength, gymnastics, and conditioning.",
+        "supports": ["overall fitness", "work capacity", "motivation through variety"],
+        "watch_out_for": ["injury risk without form scaling and coaching"],
+    },
+    "intermittent fasting": {
+        "summary": "Alternating eating and fasting windows to simplify intake timing and appetite control.",
+        "supports": ["weight loss", "insulin sensitivity", "meal structure"],
+        "watch_out_for": ["sleep disruption or overeating after long fasts"],
+    },
+    "time restricted eating": {
+        "summary": "Consistent daily eating window aligned to circadian rhythm and routine.",
+        "supports": ["metabolic health", "digestive regularity", "habit consistency"],
+        "watch_out_for": ["undereating if window is too short"],
+    },
+    "carb cycling": {
+        "summary": "Strategic variation of carbohydrate intake around training and recovery demands.",
+        "supports": ["training performance", "body composition", "energy management"],
+        "watch_out_for": ["complexity and tracking burden"],
+    },
+    "micronutrient density focus": {
+        "summary": "Prioritizes nutrient-rich foods and coverage of key vitamins/minerals.",
+        "supports": ["energy", "recovery", "immune support", "long-term resilience"],
+        "watch_out_for": ["requires dietary variety and consistency"],
+    },
+    "longevity supplement stack": {
+        "summary": "Structured supplement routine aligned to long-term health and risk profile.",
+        "supports": ["routine consistency", "targeted nutrient support", "stack organization"],
+        "watch_out_for": ["interaction risk and over-supplementation"],
+    },
+    "mitochondrial support": {
+        "summary": "Focuses on habits/supplements that support cellular energy pathways.",
+        "supports": ["energy", "fatigue management", "recovery quality"],
+        "watch_out_for": ["benefits depend on sleep, nutrition, and adherence"],
+    },
+    "dr rhonda patrick": {
+        "summary": "Evidence-heavy approach emphasizing micronutrients, sauna/exercise, and biomarker awareness.",
+        "supports": ["nutrient optimization", "longevity habits", "evidence-based choices"],
+        "watch_out_for": ["can be data-dense for beginners"],
+    },
+    "dr mindy pelz": {
+        "summary": "Fasting-forward framework with cycle-based timing and metabolic flexibility themes.",
+        "supports": ["fasting structure", "metabolic timing", "habit routine"],
+        "watch_out_for": ["may need adaptation for schedule and medication timing"],
+    },
+    "peter attia": {
+        "summary": "Performance medicine style framework focused on prevention, training zones, and biomarkers.",
+        "supports": ["cardio longevity", "strength and VO2 goals", "risk-reduction planning"],
+        "watch_out_for": ["high structure and tracking burden"],
+    },
+    "andrew huberman": {
+        "summary": "Protocol-driven behavior framework around light, sleep, stress regulation, and routines.",
+        "supports": ["sleep quality", "focus", "behavior consistency"],
+        "watch_out_for": ["too many protocols can reduce adherence"],
+    },
+}
+
+
+def _strategy_detail_for_name(name: str) -> dict[str, Any]:
+    key = re.sub(r"[^a-z0-9]+", " ", str(name or "").strip().lower())
+    key = " ".join(key.split())
+    detail = FRAMEWORK_STRATEGY_DETAILS.get(key)
+    return detail if isinstance(detail, dict) else {}
+
+
 DEFAULT_FRAMEWORK_SEEDS: list[dict[str, Any]] = [
-    # Dietary Framework
-    {"framework_type": "dietary", "name": "Keto", "priority_score": 60, "is_active": False, "source": "seed", "rationale": "Seed strategy example. Activate when relevant."},
-    {"framework_type": "dietary", "name": "DASH", "priority_score": 60, "is_active": False, "source": "seed", "rationale": "Seed strategy example. Activate when relevant."},
-    {"framework_type": "dietary", "name": "Mediterranean", "priority_score": 60, "is_active": False, "source": "seed", "rationale": "Seed strategy example. Activate when relevant."},
-    {"framework_type": "dietary", "name": "Carnivore", "priority_score": 60, "is_active": False, "source": "seed", "rationale": "Seed strategy example. Activate when relevant."},
-    {"framework_type": "dietary", "name": "Low-FODMAP", "priority_score": 60, "is_active": False, "source": "seed", "rationale": "Seed strategy example. Activate when relevant."},
-    # Training Framework
-    {"framework_type": "training", "name": "HIIT", "priority_score": 60, "is_active": False, "source": "seed", "rationale": "Seed strategy example. Activate when relevant."},
-    {"framework_type": "training", "name": "Zone 2", "priority_score": 60, "is_active": False, "source": "seed", "rationale": "Seed strategy example. Activate when relevant."},
-    {"framework_type": "training", "name": "Strength Progression", "priority_score": 60, "is_active": False, "source": "seed", "rationale": "Seed strategy example. Activate when relevant."},
-    {"framework_type": "training", "name": "5x5", "priority_score": 60, "is_active": False, "source": "seed", "rationale": "Seed strategy example. Activate when relevant."},
-    {"framework_type": "training", "name": "CrossFit", "priority_score": 60, "is_active": False, "source": "seed", "rationale": "Seed strategy example. Activate when relevant."},
-    # Metabolic Timing Framework
-    {"framework_type": "metabolic_timing", "name": "Intermittent Fasting", "priority_score": 60, "is_active": False, "source": "seed", "rationale": "Seed strategy example. Activate when relevant."},
-    {"framework_type": "metabolic_timing", "name": "Time-Restricted Eating", "priority_score": 60, "is_active": False, "source": "seed", "rationale": "Seed strategy example. Activate when relevant."},
-    {"framework_type": "metabolic_timing", "name": "Carb Cycling", "priority_score": 60, "is_active": False, "source": "seed", "rationale": "Seed strategy example. Activate when relevant."},
-    # Supplement / Micronutrient Framework
-    {"framework_type": "micronutrient", "name": "Micronutrient Density Focus", "priority_score": 60, "is_active": False, "source": "seed", "rationale": "Seed strategy example. Activate when relevant."},
-    {"framework_type": "micronutrient", "name": "Longevity Supplement Stack", "priority_score": 60, "is_active": False, "source": "seed", "rationale": "Seed strategy example. Activate when relevant."},
-    {"framework_type": "micronutrient", "name": "Mitochondrial Support", "priority_score": 60, "is_active": False, "source": "seed", "rationale": "Seed strategy example. Activate when relevant."},
-    # Thought Leader / Evidence Framework
-    {"framework_type": "expert_derived", "name": "Dr. Rhonda Patrick", "priority_score": 60, "is_active": False, "source": "seed", "rationale": "Seed strategy example. Activate when relevant."},
-    {"framework_type": "expert_derived", "name": "Dr. Mindy Pelz", "priority_score": 60, "is_active": False, "source": "seed", "rationale": "Seed strategy example. Activate when relevant."},
-    {"framework_type": "expert_derived", "name": "Peter Attia", "priority_score": 60, "is_active": False, "source": "seed", "rationale": "Seed strategy example. Activate when relevant."},
-    {"framework_type": "expert_derived", "name": "Andrew Huberman", "priority_score": 60, "is_active": False, "source": "seed", "rationale": "Seed strategy example. Activate when relevant."},
+    {
+        "framework_type": str(framework_type),
+        "name": str(example_name),
+        "priority_score": 60,
+        "is_active": False,
+        "source": "seed",
+        "rationale": "Seed strategy example. Activate when relevant.",
+        "metadata": _strategy_detail_for_name(str(example_name)),
+    }
+    for framework_type, meta in FRAMEWORK_TYPES.items()
+    for example_name in (meta.get("examples") or [])
 ]
 
 FRAMEWORK_TYPE_SET = set(FRAMEWORK_TYPES.keys())
@@ -268,6 +365,26 @@ def ensure_default_frameworks(db: Session, user_id: int) -> list[HealthOptimizat
         db.flush()
         existing = list_frameworks_for_user(db, user_id)
 
+    seed_by_normalized_name = {
+        normalize_framework_name(str(seed.get("name") or "")): seed
+        for seed in DEFAULT_FRAMEWORK_SEEDS
+    }
+    backfilled_existing = False
+    for row in existing:
+        seed = seed_by_normalized_name.get(str(row.normalized_name or ""))
+        if not seed:
+            continue
+        if not row.rationale and seed.get("rationale"):
+            row.rationale = str(seed.get("rationale") or "").strip() or None
+            backfilled_existing = True
+        existing_meta = _safe_json_loads(row.metadata_json)
+        if not isinstance(existing_meta, dict) or not existing_meta:
+            row.metadata_json = json.dumps(seed.get("metadata") or {}, ensure_ascii=True)
+            backfilled_existing = True
+    if backfilled_existing:
+        db.flush()
+        existing = list_frameworks_for_user(db, user_id)
+
     existing_names = {row.normalized_name for row in existing}
 
     for seed in DEFAULT_FRAMEWORK_SEEDS:
@@ -283,7 +400,7 @@ def ensure_default_frameworks(db: Session, user_id: int) -> list[HealthOptimizat
             is_active=bool(seed["is_active"]),
             source=str(seed.get("source", "seed")),
             rationale=str(seed.get("rationale") or ""),
-            metadata={},
+            metadata=seed.get("metadata") if isinstance(seed.get("metadata"), dict) else {},
             commit=False,
         )
         existing_names.add(seed_name)

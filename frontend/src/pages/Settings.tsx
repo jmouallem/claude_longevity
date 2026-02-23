@@ -369,6 +369,7 @@ export default function Settings() {
   const [newFrameworkDrafts, setNewFrameworkDrafts] = useState<
     Record<string, { name: string; priority_score: number; is_active: boolean }>
   >({});
+  const [selectedFrameworkInsight, setSelectedFrameworkInsight] = useState<FrameworkItem | null>(null);
 
   // Models state
   const [reasoningModel, setReasoningModel] = useState('');
@@ -742,6 +743,20 @@ export default function Settings() {
     return '?';
   };
   const findModelById = (options: ModelOption[], modelId: string) => options.find((m) => m.id === modelId);
+  const clampPercent = (value: number) => Math.max(0, Math.min(100, Math.round(value)));
+  const normalizeMatch = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+
+  const matchGoalTerm = (goal: string, term: string) => {
+    const g = normalizeMatch(goal);
+    const t = normalizeMatch(term);
+    return Boolean(g && t && (g.includes(t) || t.includes(g)));
+  };
+
+  const parseStrategyTerms = (item: FrameworkItem, key: 'supports' | 'watch_out_for'): string[] => {
+    const raw = item.metadata?.[key];
+    if (!Array.isArray(raw)) return [];
+    return raw.map((v) => String(v || '').trim()).filter(Boolean);
+  };
 
   // Parse stored string into tags (handles both JSON arrays and comma-separated)
   const parseToTags = (val: string | null): string[] => {
@@ -932,7 +947,7 @@ export default function Settings() {
     }
   }, []);
 
-  const fetchFrameworks = useCallback(async () => {
+  const fetchFrameworks = useCallback(async (): Promise<FrameworkResponse | null> => {
     setFrameworkLoading(true);
     setFrameworkMessage('');
     try {
@@ -947,12 +962,81 @@ export default function Settings() {
         });
         return next;
       });
+      return data;
     } catch (e: unknown) {
       setFrameworkMessage(e instanceof Error ? e.message : 'Failed to load framework settings.');
+      return null;
     } finally {
       setFrameworkLoading(false);
     }
   }, []);
+
+  const buildNormalizedAllocationMap = (
+    activeItems: FrameworkItem[],
+    preferredScores: Record<number, number> = {},
+  ): Map<number, number> => {
+    const out = new Map<number, number>();
+    if (activeItems.length === 0) return out;
+    if (activeItems.length === 1) {
+      out.set(activeItems[0].id, 100);
+      return out;
+    }
+
+    const baseScores = activeItems.map((item) => {
+      const override = preferredScores[item.id];
+      const raw = Number.isFinite(override) ? Number(override) : Number(item.priority_score || 0);
+      return Math.max(0, clampPercent(raw));
+    });
+    const totalBase = baseScores.reduce((sum, value) => sum + value, 0);
+
+    if (totalBase <= 0) {
+      const even = Math.floor(100 / activeItems.length);
+      let remainder = 100 - even * activeItems.length;
+      activeItems.forEach((item) => {
+        const value = even + (remainder > 0 ? 1 : 0);
+        if (remainder > 0) remainder -= 1;
+        out.set(item.id, value);
+      });
+      return out;
+    }
+
+    const rawAllocations = baseScores.map((score) => (score / totalBase) * 100);
+    const floors = rawAllocations.map((value) => Math.floor(value));
+    let remainder = 100 - floors.reduce((sum, value) => sum + value, 0);
+    const rankedFractions = rawAllocations
+      .map((value, index) => ({ index, fraction: value - floors[index], score: baseScores[index] }))
+      .sort((a, b) => (b.fraction - a.fraction) || (b.score - a.score) || (a.index - b.index));
+    let rankIndex = 0;
+    while (remainder > 0 && rankedFractions.length > 0) {
+      const pick = rankedFractions[rankIndex % rankedFractions.length];
+      floors[pick.index] += 1;
+      remainder -= 1;
+      rankIndex += 1;
+    }
+    activeItems.forEach((item, index) => out.set(item.id, floors[index]));
+    return out;
+  };
+
+  const persistFrameworkAllocationMap = async (
+    frameworkType: string,
+    snapshot: FrameworkResponse | null,
+    preferredScores: Record<number, number> = {},
+  ) => {
+    const source = snapshot || frameworkData;
+    const activeItems = (source?.grouped?.[frameworkType] || []).filter((item) => item.is_active);
+    if (activeItems.length === 0) return;
+    const allocationMap = buildNormalizedAllocationMap(activeItems, preferredScores);
+
+    const changed = activeItems
+      .map((item) => ({ id: item.id, next: allocationMap.get(item.id) ?? item.priority_score, current: item.priority_score }))
+      .filter((row) => row.next !== row.current);
+    if (changed.length === 0) return;
+    await Promise.all(
+      changed.map((row) =>
+        apiClient.put(`/api/settings/frameworks/${row.id}`, { priority_score: clampPercent(row.next) }),
+      ),
+    );
+  };
 
   const patchFrameworkItem = async (
     frameworkId: number,
@@ -970,6 +1054,66 @@ export default function Settings() {
     }
   };
 
+  const updateFrameworkAllocation = async (frameworkType: string, frameworkId: number, nextValue: number) => {
+    const source = frameworkData;
+    if (!source) return;
+    const items = source.grouped?.[frameworkType] || [];
+    const target = items.find((item) => item.id === frameworkId);
+    if (!target) return;
+    const clamped = clampPercent(nextValue);
+    if (!target.is_active) {
+      await patchFrameworkItem(frameworkId, { priority_score: clamped });
+      return;
+    }
+
+    const preferred: Record<number, number> = {};
+    items
+      .filter((item) => item.is_active)
+      .forEach((item) => {
+        preferred[item.id] = item.id === frameworkId ? clamped : clampPercent(item.priority_score || 0);
+      });
+
+    setFrameworkSaving(true);
+    setFrameworkMessage('');
+    try {
+      await persistFrameworkAllocationMap(frameworkType, source, preferred);
+      await fetchFrameworks();
+    } catch (e: unknown) {
+      setFrameworkMessage(e instanceof Error ? e.message : 'Failed to update framework allocation.');
+    } finally {
+      setFrameworkSaving(false);
+    }
+  };
+
+  const toggleFrameworkActive = async (frameworkType: string, item: FrameworkItem, nextActive: boolean) => {
+    setFrameworkSaving(true);
+    setFrameworkMessage('');
+    try {
+      await apiClient.put(`/api/settings/frameworks/${item.id}`, { is_active: nextActive });
+      const refreshed = await fetchFrameworks();
+      await persistFrameworkAllocationMap(frameworkType, refreshed);
+      await fetchFrameworks();
+    } catch (e: unknown) {
+      setFrameworkMessage(e instanceof Error ? e.message : 'Failed to update framework item.');
+    } finally {
+      setFrameworkSaving(false);
+    }
+  };
+
+  const normalizeFrameworkTypeTo100 = async (frameworkType: string) => {
+    setFrameworkSaving(true);
+    setFrameworkMessage('');
+    try {
+      await persistFrameworkAllocationMap(frameworkType, frameworkData);
+      await fetchFrameworks();
+      showToast('Active strategies normalized to 100%.', 'success');
+    } catch (e: unknown) {
+      setFrameworkMessage(e instanceof Error ? e.message : 'Failed to normalize framework allocations.');
+    } finally {
+      setFrameworkSaving(false);
+    }
+  };
+
   const createFrameworkItem = async (frameworkType: string) => {
     const draft = newFrameworkDrafts[frameworkType] || { name: '', priority_score: 60, is_active: true };
     if (!draft.name.trim()) {
@@ -979,7 +1123,7 @@ export default function Settings() {
     setFrameworkSaving(true);
     setFrameworkMessage('');
     try {
-      await apiClient.post('/api/settings/frameworks', {
+      const response = await apiClient.post<{ item?: FrameworkItem }>('/api/settings/frameworks', {
         framework_type: frameworkType,
         name: draft.name.trim(),
         priority_score: Number.isFinite(draft.priority_score) ? draft.priority_score : 60,
@@ -990,7 +1134,13 @@ export default function Settings() {
         ...prev,
         [frameworkType]: { name: '', priority_score: 60, is_active: true },
       }));
-      await fetchFrameworks();
+      const refreshed = await fetchFrameworks();
+      if (Boolean(draft.is_active) && response?.item?.id) {
+        await persistFrameworkAllocationMap(frameworkType, refreshed, {
+          [response.item.id]: clampPercent(draft.priority_score),
+        });
+        await fetchFrameworks();
+      }
       showToast('Framework item added.', 'success');
     } catch (e: unknown) {
       setFrameworkMessage(e instanceof Error ? e.message : 'Failed to add framework item.');
@@ -1680,7 +1830,7 @@ export default function Settings() {
             <div>
               <h2 className="text-lg font-semibold text-slate-100">Health Optimization Framework</h2>
               <p className="text-sm text-slate-400 mt-1">
-                Strategy priorities that guide agent recommendations. You can keep multiple strategies active in each category.
+                Strategy priorities that guide agent recommendations. Active strategies are normalized to a 100% allocation per category.
               </p>
             </div>
             <button
@@ -1731,21 +1881,43 @@ export default function Settings() {
                     ) : (
                       <div className="space-y-2">
                         {(() => {
-                          const activeCount = items.filter((item) => item.is_active).length;
+                          const activeItems = items.filter((item) => item.is_active);
+                          const activeCount = activeItems.length;
                           if (activeCount === 0) {
                             return null;
                           }
+                          const activeScoreTotal = activeItems.reduce(
+                            (sum, item) => sum + clampPercent(item.priority_score || 0),
+                            0,
+                          );
                           return (
-                            <p className="text-xs text-slate-500">
-                              Active allocation is weighted by score across {activeCount} active strateg{activeCount === 1 ? 'y' : 'ies'}.
-                            </p>
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <p className="text-xs text-slate-500">
+                                Active allocation totals <span className="text-slate-300 font-medium">{activeScoreTotal}/100</span> across {activeCount} active strateg{activeCount === 1 ? 'y' : 'ies'}.
+                              </p>
+                              {activeScoreTotal !== 100 && (
+                                <button
+                                  onClick={() => normalizeFrameworkTypeTo100(typeKey)}
+                                  disabled={frameworkSaving}
+                                  className="text-[11px] px-2 py-1 rounded-md border border-cyan-700/70 text-cyan-300 hover:bg-cyan-900/20 disabled:opacity-60"
+                                >
+                                  Normalize to 100
+                                </button>
+                              )}
+                            </div>
                           );
                         })()}
                         {items.map((item) => (
                           <div key={item.id} className="rounded-lg border border-slate-700 bg-slate-800/80 px-3 py-2">
                             <div className="flex flex-wrap items-center justify-between gap-2">
                               <div>
-                                <p className="text-sm text-slate-100">{item.name}</p>
+                                <button
+                                  onClick={() => setSelectedFrameworkInsight(item)}
+                                  className="text-sm text-slate-100 hover:text-cyan-300 transition-colors text-left"
+                                  title="View strategy details and goal fit"
+                                >
+                                  {item.name}
+                                </button>
                                 <p className="text-xs text-slate-500">
                                   Source: {item.source}
                                   {item.rationale ? ` - ${item.rationale}` : ''}
@@ -1769,26 +1941,27 @@ export default function Settings() {
                                 <input
                                   type="checkbox"
                                   checked={item.is_active}
-                                  onChange={(e) => patchFrameworkItem(item.id, { is_active: e.target.checked })}
+                                  onChange={(e) => toggleFrameworkActive(typeKey, item, e.target.checked)}
                                   disabled={frameworkSaving}
                                   className="accent-emerald-500"
                                 />
                                 Active
                               </label>
                               <label className="text-xs text-slate-400">
-                                Score
+                                Allocation %
                                 <input
+                                  key={`framework-score-${item.id}-${item.priority_score}`}
                                   type="number"
                                   min={0}
                                   max={100}
-                                  defaultValue={item.priority_score}
+                                  defaultValue={clampPercent(item.priority_score || 0)}
                                   onBlur={(e) => {
                                     const parsed = Number(e.target.value);
                                     if (!Number.isFinite(parsed)) return;
-                                    const clamped = Math.max(0, Math.min(100, Math.round(parsed)));
+                                    const clamped = clampPercent(parsed);
                                     e.target.value = String(clamped);
                                     if (clamped !== item.priority_score) {
-                                      patchFrameworkItem(item.id, { priority_score: clamped });
+                                      updateFrameworkAllocation(typeKey, item.id, clamped);
                                     }
                                   }}
                                   className="ml-2 w-20 bg-slate-700 border border-slate-600 rounded px-2 py-1 text-xs text-slate-100 focus:outline-none focus:border-emerald-500"
@@ -1832,6 +2005,7 @@ export default function Settings() {
                             }));
                           }}
                           className="w-24 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-100 focus:outline-none focus:border-emerald-500"
+                          title="Allocation percentage (0-100)"
                         />
                         <label className="inline-flex items-center gap-2 text-xs text-slate-300 px-2">
                           <input
@@ -2507,6 +2681,90 @@ export default function Settings() {
             >
               {resetDataSaving ? 'Resetting...' : 'Reset My Data'}
             </button>
+          </div>
+        </div>
+      )}
+
+      {selectedFrameworkInsight && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4"
+          onClick={() => setSelectedFrameworkInsight(null)}
+        >
+          <div
+            className="w-full max-w-2xl max-h-[85vh] overflow-y-auto rounded-xl border border-slate-700 bg-slate-900 p-4 sm:p-5"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {(() => {
+              const summary = String(selectedFrameworkInsight.metadata?.summary || '').trim()
+                || 'No strategy summary yet. Add details in framework metadata for richer guidance.';
+              const supports = parseStrategyTerms(selectedFrameworkInsight, 'supports');
+              const watchOutFor = parseStrategyTerms(selectedFrameworkInsight, 'watch_out_for');
+              const matchedGoals = supports.filter((term) =>
+                healthGoalsTags.some((goal) => matchGoalTerm(goal, term)),
+              );
+              const unmatchedGoals = healthGoalsTags.filter((goal) =>
+                !matchedGoals.some((term) => matchGoalTerm(goal, term)),
+              );
+              return (
+                <>
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <h3 className="text-sm sm:text-base font-semibold text-slate-100">
+                        {selectedFrameworkInsight.name}
+                      </h3>
+                      <p className="text-xs text-slate-400 mt-1">
+                        {selectedFrameworkInsight.framework_type_label} | {selectedFrameworkInsight.classifier_label}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedFrameworkInsight(null)}
+                      className="px-2 py-1 text-xs text-slate-200 border border-slate-600 rounded-md hover:bg-slate-700"
+                    >
+                      Close
+                    </button>
+                  </div>
+
+                  <p className="mt-3 text-sm text-slate-200">{summary}</p>
+
+                  <div className="mt-4 space-y-3">
+                    <div className="rounded-lg border border-slate-700 bg-slate-800/60 p-3">
+                      <p className="text-xs font-medium text-emerald-300">How this supports your goals</p>
+                      {matchedGoals.length > 0 ? (
+                        <ul className="mt-2 text-xs text-slate-300 space-y-1 list-disc pl-4">
+                          {matchedGoals.map((term) => (
+                            <li key={`goal-match-${term}`}>{term}</li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <p className="mt-2 text-xs text-slate-400">
+                          No direct match found against your current Health Goals yet.
+                        </p>
+                      )}
+                      {unmatchedGoals.length > 0 && (
+                        <p className="mt-2 text-[11px] text-slate-500">
+                          Goals not directly covered: {unmatchedGoals.join(', ')}
+                        </p>
+                      )}
+                    </div>
+
+                    {supports.length > 0 && (
+                      <div className="rounded-lg border border-slate-700 bg-slate-800/60 p-3">
+                        <p className="text-xs font-medium text-cyan-300">Typical benefits</p>
+                        <p className="mt-2 text-xs text-slate-300">{supports.join(', ')}</p>
+                      </div>
+                    )}
+
+                    {watchOutFor.length > 0 && (
+                      <div className="rounded-lg border border-amber-700/50 bg-amber-950/20 p-3">
+                        <p className="text-xs font-medium text-amber-300">Tradeoffs to watch</p>
+                        <p className="mt-2 text-xs text-slate-300">{watchOutFor.join(', ')}</p>
+                      </div>
+                    )}
+                  </div>
+                </>
+              );
+            })()}
           </div>
         </div>
       )}
