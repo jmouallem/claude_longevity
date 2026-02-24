@@ -200,7 +200,7 @@ export default function Chat() {
 
   const handleUpdate = (task: UpcomingTask) => {
     const desc = task.description ? ` (${task.description})` : '';
-    setChatFill(`Goal check-in: ${task.title}${desc}`);
+    setChatFill(`Goal check-in: ${task.title}${desc} [task_id=${task.id}]`);
     setMobileGoalsOpen(false);
   };
 

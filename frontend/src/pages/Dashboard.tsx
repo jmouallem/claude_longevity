@@ -494,7 +494,7 @@ export default function Dashboard() {
   const goToCoachForTask = (task: DailyPlanTask) => {
     const desc = task.description ? ` (${task.description})` : '';
     // Pass the coaching check-in prompt via navigation state so Chat can pre-fill
-    navigate('/chat', { state: { chatFill: `Goal check-in: ${task.title}${desc}` } });
+    navigate('/chat', { state: { chatFill: `Goal check-in: ${task.title}${desc} [task_id=${task.id}]` } });
   };
 
   useEffect(() => {

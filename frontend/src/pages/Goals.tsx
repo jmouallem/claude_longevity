@@ -494,7 +494,7 @@ export default function Goals() {
     const dateLabel = task.cycle_start ? formatDateLabel(task.cycle_start) : 'today';
     setChatTask(task);
     setChatInitialMessage(
-      `Goal check-in for ${dateLabel}: ${task.title}${task.description ? ` (${task.description})` : ''}`
+      `Goal check-in for ${dateLabel}: ${task.title}${task.description ? ` (${task.description})` : ''} [task_id=${task.id}]`
     );
     setChatOpen(true);
   }, []);

@@ -23,6 +23,7 @@ from db.models import (
     SupplementLog,
     VitalsLog,
 )
+from services.coaching_plan_service import refresh_task_statuses, set_task_status
 from services.health_framework_service import (
     delete_framework,
     serialize_framework,
@@ -149,6 +150,14 @@ def _get_user_timezone(ctx: ToolContext) -> ZoneInfo:
         return ZoneInfo(tz_name)
     except ZoneInfoNotFoundError:
         return ZoneInfo("UTC")
+
+
+def _refresh_tasks_after_write(ctx: ToolContext) -> None:
+    """Refresh plan task statuses after a health-data write so metric-based goals auto-complete."""
+    now = _context_now_utc(ctx)
+    user_tz = _get_user_timezone(ctx)
+    local_day = now.astimezone(user_tz).date()
+    refresh_task_statuses(ctx.db, ctx.user, reference_day=local_day, create_notifications=False)
 
 
 def _context_now_utc(ctx: ToolContext) -> datetime:
@@ -503,6 +512,7 @@ def _tool_checklist_mark_taken(args: dict[str, Any], ctx: ToolContext) -> dict[s
         ctx.db.execute(stmt)
         updated.append(name)
 
+    _refresh_tasks_after_write(ctx)
     return {"item_type": item_type, "target_date": target_date, "updated_items": updated, "completed": completed}
 
 
@@ -531,6 +541,7 @@ def _tool_vitals_log_write(args: dict[str, Any], ctx: ToolContext) -> dict[str, 
         ctx.user.settings.current_weight_kg = payload["weight_kg"]
 
     ctx.db.flush()
+    _refresh_tasks_after_write(ctx)
     return {"vitals_log_id": row.id}
 
 
@@ -549,6 +560,7 @@ def _tool_exercise_log_write(args: dict[str, Any], ctx: ToolContext) -> dict[str
     )
     ctx.db.add(row)
     ctx.db.flush()
+    _refresh_tasks_after_write(ctx)
     return {"exercise_log_id": row.id}
 
 
@@ -619,6 +631,7 @@ def _tool_food_log_write(args: dict[str, Any], ctx: ToolContext) -> dict[str, An
         )
         ctx.db.add(row)
         ctx.db.flush()
+        _refresh_tasks_after_write(ctx)
         return {"food_log_id": row.id, "used_template": True, "meal_template_id": resolved_template.id}
 
     row = FoodLog(
@@ -636,6 +649,7 @@ def _tool_food_log_write(args: dict[str, Any], ctx: ToolContext) -> dict[str, An
     )
     ctx.db.add(row)
     ctx.db.flush()
+    _refresh_tasks_after_write(ctx)
     return {"food_log_id": row.id, "used_template": False}
 
 
@@ -652,6 +666,7 @@ def _tool_hydration_log_write(args: dict[str, Any], ctx: ToolContext) -> dict[st
     )
     ctx.db.add(row)
     ctx.db.flush()
+    _refresh_tasks_after_write(ctx)
     return {"hydration_log_id": row.id}
 
 
@@ -677,6 +692,7 @@ def _tool_supplement_log_write(args: dict[str, Any], ctx: ToolContext) -> dict[s
     )
     ctx.db.add(row)
     ctx.db.flush()
+    _refresh_tasks_after_write(ctx)
     return {"supplement_log_id": row.id}
 
 
@@ -690,8 +706,17 @@ def _tool_sleep_log_write(args: dict[str, Any], ctx: ToolContext) -> dict[str, A
     if action not in {"auto", "start", "end"}:
         raise ToolExecutionError("`action` must be auto, start, or end")
 
+    raw_sleep_start = str(args.get("sleep_start") or "").strip()
+    raw_sleep_end = str(args.get("sleep_end") or "").strip()
+    has_explicit_pair = bool(raw_sleep_start and raw_sleep_end)
+
     start_dt = _resolve_local_datetime(ctx, args.get("sleep_start"), now)
     end_dt = _resolve_local_datetime(ctx, args.get("sleep_end"), now)
+
+    # Defensive canonicalization: if both start/end are supplied in one turn,
+    # persist a complete sleep interval (end flow), even if action was "start".
+    if has_explicit_pair and action in {"auto", "start", "end"}:
+        action = "end"
 
     if action == "auto":
         if args.get("sleep_start") and not args.get("sleep_end"):
@@ -737,6 +762,7 @@ def _tool_sleep_log_write(args: dict[str, Any], ctx: ToolContext) -> dict[str, A
         )
         ctx.db.add(row)
         ctx.db.flush()
+        _refresh_tasks_after_write(ctx)
         return {"status": "created", "sleep_log_id": row.id, "duration_minutes": row.duration_minutes}
 
     # action == "end"
@@ -753,7 +779,7 @@ def _tool_sleep_log_write(args: dict[str, Any], ctx: ToolContext) -> dict[str, A
 
     # If no active session exists but both start/end are provided in one turn,
     # persist a complete sleep event so downstream plan progress can update.
-    if not active and args.get("sleep_start") and args.get("sleep_end"):
+    if not active and has_explicit_pair:
         if end_dt < start_dt:
             end_dt = end_dt + timedelta(days=1)
         computed_minutes = int((end_dt - start_dt).total_seconds() / 60)
@@ -768,6 +794,7 @@ def _tool_sleep_log_write(args: dict[str, Any], ctx: ToolContext) -> dict[str, A
         )
         ctx.db.add(row)
         ctx.db.flush()
+        _refresh_tasks_after_write(ctx)
         return {
             "status": "created",
             "sleep_log_id": row.id,
@@ -787,6 +814,7 @@ def _tool_sleep_log_write(args: dict[str, Any], ctx: ToolContext) -> dict[str, A
         )
         ctx.db.add(row)
         ctx.db.flush()
+        _refresh_tasks_after_write(ctx)
         return {"status": "created", "sleep_log_id": row.id, "sleep_end": row.sleep_end.isoformat() if row.sleep_end else None}
 
     if end_dt < active.sleep_start:
@@ -799,6 +827,7 @@ def _tool_sleep_log_write(args: dict[str, Any], ctx: ToolContext) -> dict[str, A
     if notes:
         active.notes = notes
     ctx.db.flush()
+    _refresh_tasks_after_write(ctx)
     return {
         "status": "ended",
         "sleep_log_id": active.id,
@@ -1325,6 +1354,15 @@ def _tool_framework_sync_from_profile(_: dict[str, Any], ctx: ToolContext) -> di
     return {"count": len(rows), "items": [serialize_framework(row) for row in rows]}
 
 
+def _tool_plan_task_update_status(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
+    task_id = int(args["task_id"])
+    status = str(args.get("status", "")).strip().lower()
+    if status not in {"completed", "skipped", "pending"}:
+        raise ToolExecutionError("`status` must be completed, skipped, or pending")
+    row = set_task_status(ctx.db, ctx.user, task_id=task_id, status=status)
+    return {"task_id": row.id, "status": row.status}
+
+
 def register_write_tools(registry: ToolRegistry) -> None:
     registry.register(
         ToolSpec(
@@ -1586,4 +1624,14 @@ def register_write_tools(registry: ToolRegistry) -> None:
             tags=("notification", "write"),
         ),
         _tool_notification_mark_read,
+    )
+    registry.register(
+        ToolSpec(
+            name="plan_task_update_status",
+            description="Mark a plan task as completed, skipped, or pending by task_id.",
+            required_fields=("task_id", "status"),
+            read_only=False,
+            tags=("plan", "write"),
+        ),
+        _tool_plan_task_update_status,
     )

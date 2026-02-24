@@ -857,7 +857,9 @@ def _normalize_sleep_payload(message_text: str, payload: dict[str, Any] | None) 
         action = "end"
     elif has_start_cue and not has_end_cue:
         action = "start"
-    elif has_start_cue and has_end_cue and action == "auto":
+    elif has_start_cue and has_end_cue:
+        # When both bed + wake cues are present, treat this as a complete sleep
+        # interval check-in (end action), regardless of model-proposed action.
         action = "end"
     payload["action"] = action
 
@@ -888,10 +890,24 @@ def _normalize_sleep_payload(message_text: str, payload: dict[str, Any] | None) 
             else:
                 sleep_end = time_tokens[0]
 
+    if (
+        not has_start_cue
+        and not has_end_cue
+        and len(time_tokens) >= 2
+        and (not sleep_start or not sleep_end)
+    ):
+        sleep_start = sleep_start or time_tokens[0]
+        sleep_end = sleep_end or time_tokens[1]
+
     if sleep_start:
         payload["sleep_start"] = sleep_start
     if sleep_end:
         payload["sleep_end"] = sleep_end
+
+    if sleep_start and sleep_end:
+        # Defensive canonicalization: complete intervals should be persisted via
+        # "end" path so duration and goal progress update in one turn.
+        payload["action"] = "end"
 
     if payload.get("duration_minutes") in (None, "", 0):
         derived_duration = _duration_from_sleep_tokens(

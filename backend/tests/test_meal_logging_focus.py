@@ -80,6 +80,18 @@ def test_sleep_payload_normalization_does_not_set_end_to_bedtime():
     assert end_value.startswith("6:00")
 
 
+def test_sleep_payload_normalization_forces_end_action_when_interval_provided():
+    payload = _normalize_sleep_payload(
+        "I went to bed at 10:30pm and woke up at 6:00 am",
+        {"action": "start", "sleep_start": None, "sleep_end": None, "duration_minutes": None},
+    )
+    assert payload is not None
+    assert str(payload.get("action") or "").strip().lower() == "end"
+    assert str(payload.get("sleep_start") or "").lower().startswith("10:30")
+    assert str(payload.get("sleep_end") or "").lower().startswith("6:00")
+    assert int(payload.get("duration_minutes") or 0) >= 450
+
+
 def test_sleep_logging_detector_handles_direct_sleep_log_message():
     assert _looks_like_sleep_logging_message("I went to bed at 10:30pm and woke up at 6:00 am")
     assert _looks_like_sleep_logging_message("slept for 7.5 hours")
