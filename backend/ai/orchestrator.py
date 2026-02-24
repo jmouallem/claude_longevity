@@ -208,6 +208,29 @@ SLEEP_END_CUES = (
     "got up",
     "morning",
 )
+FASTING_START_CUES = (
+    "start fasting",
+    "starting fast",
+    "begin fast",
+    "began fasting",
+    "began fast",
+    "fast starts",
+    "fast start",
+    "last meal",
+    "stopped eating",
+)
+FASTING_END_CUES = (
+    "end fasting",
+    "ended fasting",
+    "end fast",
+    "ended fast",
+    "broke my fast",
+    "break fast",
+    "first meal",
+    "ate at",
+    "ate my first meal",
+    "first food",
+)
 GI_SYMPTOM_KEYWORDS = {
     "bloating": {"bloating", "bloated"},
     "gas": {"gas", "gassy", "flatulence"},
@@ -1621,6 +1644,125 @@ def _looks_like_sleep_logging_message(message_text: str) -> bool:
     if any(marker in text for marker in (" hours of sleep", " hrs of sleep", " slept for ")):
         return True
     return False
+
+
+def _looks_like_fasting_logging_message(message_text: str) -> bool:
+    text = _normalize_whitespace(message_text)
+    if not text:
+        return False
+    if "?" in text:
+        return False
+    has_start_cue = any(cue in text for cue in FASTING_START_CUES)
+    has_end_cue = any(cue in text for cue in FASTING_END_CUES)
+    if has_start_cue or has_end_cue:
+        return True
+    if "fasting window" in text or "i fasted" in text:
+        return True
+    time_tokens = _extract_clock_time_tokens(message_text)
+    if len(time_tokens) >= 2 and ("last meal" in text or "first meal" in text):
+        return True
+    if len(time_tokens) >= 2 and "fast" in text and any(marker in text for marker in (" to ", "-", " until ", " till ")):
+        return True
+    return False
+
+
+def _assistant_recently_requested_fasting_details(db: Session, user: User, reference_utc: datetime) -> bool:
+    last = _last_assistant_message(db, user)
+    if not last or not last.content:
+        return False
+    created_at = last.created_at
+    if created_at is not None:
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        else:
+            created_at = created_at.astimezone(timezone.utc)
+        if (reference_utc - created_at) > timedelta(minutes=30):
+            return False
+    text = _normalize_whitespace(last.content)
+    request_cues = (
+        "what time was your last meal",
+        "what time was your first meal",
+        "last meal time",
+        "first meal time",
+        "when did your fast start",
+        "when did your fast end",
+        "what was your fasting window",
+        "share your fasting window",
+        "log your fasting window",
+    )
+    return any(cue in text for cue in request_cues)
+
+
+def _looks_like_fasting_followup_answer(message_text: str) -> bool:
+    text = _normalize_whitespace(message_text)
+    if not text:
+        return False
+    if "?" in text:
+        return False
+    if text in MENU_CONFIRM_WORDS or text in TIME_CONFIRM_ACK_TERMS or text in TIME_CONFIRM_REJECT_TERMS:
+        return False
+    time_tokens = _extract_clock_time_tokens(message_text)
+    if len(time_tokens) >= 2:
+        return True
+    if "last meal" in text or "first meal" in text:
+        return True
+    return False
+
+
+def _normalize_fasting_payload(message_text: str, payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return payload
+    text = _normalize_whitespace(message_text)
+    if not text:
+        return payload
+    time_tokens = _extract_clock_time_tokens(message_text)
+    action = str(payload.get("action", "")).strip().lower()
+    if action not in {"start", "end"}:
+        action = "start"
+
+    has_start_cue = any(cue in text for cue in FASTING_START_CUES)
+    has_end_cue = any(cue in text for cue in FASTING_END_CUES)
+    has_window_cue = "fasting window" in text or "i fasted" in text
+
+    if has_end_cue and not has_start_cue:
+        action = "end"
+    elif has_start_cue and not has_end_cue:
+        action = "start"
+    elif has_start_cue and has_end_cue:
+        action = "end"
+    elif has_window_cue and len(time_tokens) >= 2:
+        action = "end"
+
+    fast_start = str(payload.get("fast_start") or "").strip() or None
+    fast_end = str(payload.get("fast_end") or "").strip() or None
+
+    if len(time_tokens) >= 2 and ("last meal" in text and "first meal" in text):
+        if not fast_start:
+            fast_start = time_tokens[0]
+        if not fast_end:
+            fast_end = time_tokens[1]
+        action = "end"
+    elif len(time_tokens) >= 2 and has_window_cue:
+        if not fast_start:
+            fast_start = time_tokens[0]
+        if not fast_end:
+            fast_end = time_tokens[1]
+        action = "end"
+    elif action == "start":
+        if not fast_start and time_tokens:
+            fast_start = time_tokens[0]
+    elif action == "end":
+        if not fast_end and time_tokens:
+            fast_end = time_tokens[-1]
+        if len(time_tokens) >= 2 and not fast_start and ("last meal" in text or "from " in text):
+            fast_start = time_tokens[0]
+
+    payload["action"] = action
+    if fast_start:
+        payload["fast_start"] = fast_start
+    if fast_end:
+        payload["fast_end"] = fast_end
+    return payload
 
 
 def _assistant_recently_requested_food_details(db: Session, user: User, reference_utc: datetime) -> bool:
@@ -3266,6 +3408,14 @@ async def process_chat(
     )
     force_sleep_logging = explicit_sleep_signal or contextual_sleep_signal
 
+    explicit_fasting_signal = _looks_like_fasting_logging_message(message)
+    contextual_fasting_signal = (
+        category in {"general_chat", "ask_nutrition"}
+        and _assistant_recently_requested_fasting_details(db, user, message_received_utc)
+        and _looks_like_fasting_followup_answer(message)
+    )
+    force_fasting_logging = explicit_fasting_signal or contextual_fasting_signal
+
     log_categories: list[str] = []
     if category.startswith("log_"):
         log_categories.append(category)
@@ -3273,6 +3423,8 @@ async def process_chat(
         log_categories.insert(0, "log_food")
     if force_sleep_logging and "log_sleep" not in log_categories:
         log_categories.insert(0, "log_sleep")
+    if force_fasting_logging and "log_fasting" not in log_categories:
+        log_categories.insert(0, "log_fasting")
 
     if log_categories and not menu_command_only and not bool(time_confirmation_gate.get("skip_log_parse")):
         user_profile = ""
@@ -3295,6 +3447,8 @@ async def process_chat(
 
             if log_category == "log_sleep":
                 parsed_one = _normalize_sleep_payload(message, parsed_one)
+            if log_category == "log_fasting":
+                parsed_one = _normalize_fasting_payload(message, parsed_one)
 
             if log_category == "log_food" and food_low_confidence:
                 if not isinstance(parsed_one, dict):

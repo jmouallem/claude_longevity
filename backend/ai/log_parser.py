@@ -341,13 +341,29 @@ def _deterministic_supplement_parse(message: str) -> dict | None:
 
 def _deterministic_fasting_parse(message: str) -> dict:
     lowered = message.lower()
+    time_tokens = _extract_time_tokens(message)
+    has_last_first_meal = "last meal" in lowered and "first meal" in lowered and len(time_tokens) >= 2
     action = "start"
-    if any(k in lowered for k in ("end fast", "broke my fast", "break fast", "finished fast", "stop fast")):
+    if has_last_first_meal or any(
+        k in lowered for k in ("end fast", "broke my fast", "break fast", "finished fast", "stop fast", "first meal")
+    ):
         action = "end"
+    fast_start = None
+    fast_end = None
+    if has_last_first_meal:
+        fast_start, fast_end = time_tokens[0], time_tokens[1]
+    elif action == "start":
+        fast_start = _extract_time_token(message)
+    else:
+        if len(time_tokens) >= 2 and ("from" in lowered and ("to" in lowered or "until" in lowered or "till" in lowered)):
+            fast_start, fast_end = time_tokens[0], time_tokens[1]
+        else:
+            fast_end = _extract_time_token(message)
+
     return {
         "action": action,
-        "fast_start": _extract_time_token(message) if action == "start" else None,
-        "fast_end": _extract_time_token(message) if action == "end" else None,
+        "fast_start": fast_start,
+        "fast_end": fast_end,
         "fast_type": None,
         "notes": "Deterministic fallback parse",
     }

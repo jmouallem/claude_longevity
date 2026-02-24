@@ -916,18 +916,47 @@ def _tool_fasting_manage(args: dict[str, Any], ctx: ToolContext) -> dict[str, An
         ctx.db.flush()
         return {"status": "started", "fasting_log_id": row.id, "fast_start": row.fast_start.isoformat()}
 
+    explicit_start = args.get("fast_start") is not None and str(args.get("fast_start")).strip() != ""
+    explicit_end = args.get("fast_end") is not None and str(args.get("fast_end")).strip() != ""
+    start_dt = _resolve_local_datetime(ctx, args.get("fast_start"), now) if explicit_start else None
+    end_dt = _resolve_local_datetime(ctx, args.get("fast_end"), now) if explicit_end else now
+
     active = (
         ctx.db.query(FastingLog)
         .filter(FastingLog.user_id == ctx.user.id, FastingLog.fast_end.is_(None))
         .order_by(FastingLog.fast_start.desc())
         .first()
     )
-    if not active:
-        return {"status": "no_active_fast"}
-    active.fast_end = _resolve_local_datetime(ctx, args.get("fast_end"), now)
-    start = active.fast_start if active.fast_start.tzinfo else active.fast_start.replace(tzinfo=timezone.utc)
-    active.duration_minutes = int((active.fast_end - start).total_seconds() / 60)
-    return {"status": "ended", "fasting_log_id": active.id, "duration_minutes": active.duration_minutes}
+    if active:
+        if start_dt is not None:
+            active.fast_start = start_dt
+        active.fast_end = end_dt
+        start = active.fast_start if active.fast_start.tzinfo else active.fast_start.replace(tzinfo=timezone.utc)
+        if active.fast_end < start:
+            active.fast_end = active.fast_end + timedelta(days=1)
+        active.duration_minutes = int((active.fast_end - start).total_seconds() / 60)
+        _refresh_tasks_after_write(ctx)
+        return {"status": "ended", "fasting_log_id": active.id, "duration_minutes": active.duration_minutes}
+
+    # Support direct fasting interval logs (e.g., "last meal 8pm, first meal 10am")
+    # even when no active fast is open.
+    if explicit_start and explicit_end and start_dt is not None:
+        if end_dt < start_dt:
+            end_dt = end_dt + timedelta(days=1)
+        row = FastingLog(
+            user_id=ctx.user.id,
+            fast_start=start_dt,
+            fast_end=end_dt,
+            duration_minutes=int((end_dt - start_dt).total_seconds() / 60),
+            fast_type=str(args.get("fast_type", "")).strip() or None,
+            notes=str(args.get("notes", "")).strip() or None,
+        )
+        ctx.db.add(row)
+        ctx.db.flush()
+        _refresh_tasks_after_write(ctx)
+        return {"status": "created", "fasting_log_id": row.id, "duration_minutes": row.duration_minutes}
+
+    return {"status": "no_active_fast"}
 
 
 def _tool_exercise_plan_upsert(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
