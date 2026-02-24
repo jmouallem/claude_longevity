@@ -18,6 +18,7 @@ from db.models import (
     Notification,
     SleepLog,
     User,
+    UserGoal,
     UserSettings,
 )
 from services.health_framework_service import FRAMEWORK_TYPES, ensure_default_frameworks
@@ -185,12 +186,190 @@ def _target_defaults(user: User) -> dict[str, float]:
     }
 
 
-def _task_template_rows(user: User, window: CycleWindow, frameworks: list[HealthOptimizationFramework]) -> list[dict[str, Any]]:
+def _framework_weight_pct(frameworks: list[HealthOptimizationFramework], framework_type: str) -> dict[int, int]:
+    active = [row for row in frameworks if row.framework_type == framework_type and bool(row.is_active)]
+    if not active:
+        return {}
+    total = sum(max(int(row.priority_score or 0), 0) for row in active)
+    if total <= 0:
+        base = 100 // len(active)
+        extra = 100 - (base * len(active))
+        return {int(row.id): base + (1 if idx < extra else 0) for idx, row in enumerate(active)}
+
+    raw = [(row, (max(int(row.priority_score or 0), 0) / total) * 100.0) for row in active]
+    floors: dict[int, int] = {int(row.id): int(pct) for row, pct in raw}
+    assigned = sum(floors.values())
+    remainder = max(100 - assigned, 0)
+    ranked = sorted(raw, key=lambda x: (x[1] - int(x[1])), reverse=True)
+    for idx in range(remainder):
+        row = ranked[idx % len(ranked)][0]
+        floors[int(row.id)] += 1
+    return floors
+
+
+def _training_goal_aliases_for_strategy(name: str) -> tuple[str, ...]:
+    key = str(name or "").strip().lower()
+    aliases: tuple[str, ...] = (key,)
+    if "hiit" in key:
+        aliases = ("hiit", "high intensity", "high-intensity")
+    elif "strength" in key:
+        aliases = ("strength", "strength training", "weights", "weight training", "resistance")
+    elif "zone" in key and "2" in key:
+        aliases = ("zone 2", "zone2")
+    elif "crossfit" in key:
+        aliases = ("crossfit",)
+    elif "5x5" in key:
+        aliases = ("5x5",)
+    return aliases
+
+
+def _extract_training_goal_counts(
+    db: Session,
+    user: User,
+    training_rows: list[HealthOptimizationFramework],
+) -> dict[int, int]:
+    if not training_rows:
+        return {}
+    rows = (
+        db.query(UserGoal)
+        .filter(UserGoal.user_id == user.id, UserGoal.status == "active")
+        .order_by(UserGoal.updated_at.desc(), UserGoal.created_at.desc(), UserGoal.id.desc())
+        .all()
+    )
+    if not rows:
+        return {}
+
+    text_parts: list[str] = []
+    for goal in rows[:20]:
+        for value in (goal.title, goal.description, goal.why):
+            if value and str(value).strip():
+                text_parts.append(str(value).strip().lower())
+    corpus = " ".join(text_parts)
+    if not corpus:
+        return {}
+
+    out: dict[int, int] = {}
+    for row in training_rows:
+        aliases = _training_goal_aliases_for_strategy(row.name)
+        count = 0
+        for alias in aliases:
+            pattern_a = re.compile(
+                rf"(\d+)\s*(?:x|times?|sessions?|workouts?)?\s*(?:of\s+)?{re.escape(alias)}",
+                flags=re.IGNORECASE,
+            )
+            pattern_b = re.compile(
+                rf"{re.escape(alias)}(?:\s+training)?[^0-9]{{0,16}}(\d+)\s*(?:x|times?|sessions?|workouts?)",
+                flags=re.IGNORECASE,
+            )
+            matches_a = [int(m.group(1)) for m in pattern_a.finditer(corpus)]
+            matches_b = [int(m.group(1)) for m in pattern_b.finditer(corpus)]
+            if matches_a:
+                count = max(count, max(matches_a))
+            if matches_b:
+                count = max(count, max(matches_b))
+        if count > 0:
+            out[int(row.id)] = max(0, min(count, 7))
+    return out
+
+
+def _distribute_training_sessions(
+    training_rows: list[HealthOptimizationFramework],
+    *,
+    weekly_sessions_target: int,
+    explicit_counts: dict[int, int],
+) -> dict[int, int]:
+    if not training_rows:
+        return {}
+    sessions = max(0, min(int(weekly_sessions_target), 7))
+    if sessions == 0:
+        return {}
+
+    explicit_total = sum(max(int(v), 0) for v in explicit_counts.values())
+    if explicit_total > 0:
+        normalized: dict[int, int] = {}
+        for row in training_rows:
+            normalized[int(row.id)] = max(int(explicit_counts.get(int(row.id), 0)), 0)
+        if explicit_total <= sessions:
+            remaining = sessions - explicit_total
+            if remaining > 0:
+                weights = _framework_weight_pct(training_rows, "training")
+                ranked = sorted(training_rows, key=lambda r: (weights.get(int(r.id), 0), int(r.priority_score or 0)), reverse=True)
+                idx = 0
+                while remaining > 0 and ranked:
+                    target = ranked[idx % len(ranked)]
+                    normalized[int(target.id)] += 1
+                    remaining -= 1
+                    idx += 1
+            return normalized
+
+        scale = sessions / float(explicit_total)
+        scaled_raw = [(int(row.id), max(float(explicit_counts.get(int(row.id), 0)), 0.0) * scale) for row in training_rows]
+        base = {rid: int(val) for rid, val in scaled_raw}
+        assigned = sum(base.values())
+        remainder = max(sessions - assigned, 0)
+        ranked = sorted(scaled_raw, key=lambda x: (x[1] - int(x[1])), reverse=True)
+        for idx in range(remainder):
+            rid = ranked[idx % len(ranked)][0]
+            base[rid] += 1
+        return base
+
+    weights = _framework_weight_pct(training_rows, "training")
+    raw = [(int(row.id), (weights.get(int(row.id), 0) / 100.0) * sessions) for row in training_rows]
+    base = {rid: int(val) for rid, val in raw}
+    assigned = sum(base.values())
+    remainder = max(sessions - assigned, 0)
+    ranked = sorted(raw, key=lambda x: (x[1] - int(x[1])), reverse=True)
+    for idx in range(remainder):
+        rid = ranked[idx % len(ranked)][0]
+        base[rid] += 1
+    return base
+
+
+def _weekly_training_schedule(
+    training_rows: list[HealthOptimizationFramework],
+    counts: dict[int, int],
+) -> list[int | None]:
+    schedule: list[int | None] = [None] * 7
+    remaining = {int(row.id): max(int(counts.get(int(row.id), 0)), 0) for row in training_rows}
+    total = min(sum(remaining.values()), 7)
+    last: int | None = None
+    for day_idx in range(total):
+        candidates = [rid for rid, cnt in remaining.items() if cnt > 0]
+        if not candidates:
+            break
+        candidates.sort(
+            key=lambda rid: (
+                remaining[rid],
+                0 if rid != last else -1,
+                rid,
+            ),
+            reverse=True,
+        )
+        pick = candidates[0]
+        if len(candidates) > 1 and pick == last:
+            pick = candidates[1]
+        schedule[day_idx] = pick
+        remaining[pick] -= 1
+        last = pick
+    return schedule
+
+
+def _task_template_rows(
+    db: Session,
+    user: User,
+    window: CycleWindow,
+    frameworks: list[HealthOptimizationFramework],
+) -> list[dict[str, Any]]:
     defaults = _target_defaults(user)
     due_at = end_of_day(window.end, _tz_name(user))
     meds = parse_structured_list(user.settings.medications if user.settings else None)
     supps = parse_structured_list(user.settings.supplements if user.settings else None)
-    top_frameworks = sorted(frameworks, key=lambda r: int(r.priority_score or 0), reverse=True)[:3]
+    active_frameworks = [row for row in frameworks if bool(row.is_active)]
+    by_type: dict[str, list[HealthOptimizationFramework]] = {}
+    for row in active_frameworks:
+        by_type.setdefault(str(row.framework_type), []).append(row)
+    for key in by_type:
+        by_type[key].sort(key=lambda r: (int(r.priority_score or 0), r.updated_at or datetime.min), reverse=True)
 
     rows: list[dict[str, Any]] = []
     if window.cycle_type == "daily":
@@ -323,7 +502,12 @@ def _task_template_rows(user: User, window: CycleWindow, frameworks: list[Health
             ]
         )
 
-    for framework in top_frameworks:
+    non_training_types = [t for t in FRAMEWORK_TYPES.keys() if t != "training"]
+    for framework_type in non_training_types:
+        selected = by_type.get(framework_type, [])
+        if not selected:
+            continue
+        framework = selected[0]
         rows.append(
             {
                 "target_metric": "manual_check",
@@ -333,6 +517,51 @@ def _task_template_rows(user: User, window: CycleWindow, frameworks: list[Health
                 "framework_type": framework.framework_type,
                 "framework_name": framework.name,
                 "priority_score": max(60, min(int(framework.priority_score or 60), 95)),
+                "target_value": 1.0,
+                "target_unit": "check",
+            }
+        )
+
+    training_rows = by_type.get("training", [])
+    if training_rows and window.cycle_type == "daily":
+        explicit_counts = _extract_training_goal_counts(db, user, training_rows)
+        session_target = int(round(defaults.get("exercise_sessions", 4.0)))
+        distributed = _distribute_training_sessions(
+            training_rows,
+            weekly_sessions_target=session_target,
+            explicit_counts=explicit_counts,
+        )
+        schedule = _weekly_training_schedule(training_rows, distributed)
+        weekday_idx = max(0, min(window.start.weekday(), 6))
+        selected_id = schedule[weekday_idx]
+        if selected_id is not None:
+            selected = next((row for row in training_rows if int(row.id) == int(selected_id)), None)
+            if selected:
+                rows.append(
+                    {
+                        "target_metric": "manual_check",
+                        "title": f"Follow {selected.name} today",
+                        "description": "Use your active Training Framework strategy in decisions.",
+                        "domain": "framework",
+                        "framework_type": selected.framework_type,
+                        "framework_name": selected.name,
+                        "priority_score": max(60, min(int(selected.priority_score or 60), 95)),
+                        "target_value": 1.0,
+                        "target_unit": "check",
+                    }
+                )
+    elif training_rows:
+        # Weekly/monthly views keep one representative training strategy.
+        selected = training_rows[0]
+        rows.append(
+            {
+                "target_metric": "manual_check",
+                "title": f"Follow {selected.name} today",
+                "description": "Use your active Training Framework strategy in decisions.",
+                "domain": "framework",
+                "framework_type": selected.framework_type,
+                "framework_name": selected.name,
+                "priority_score": max(60, min(int(selected.priority_score or 60), 95)),
                 "target_value": 1.0,
                 "target_unit": "check",
             }
@@ -354,6 +583,30 @@ def _task_template_rows(user: User, window: CycleWindow, frameworks: list[Health
 
 
 def _ensure_window_tasks(db: Session, user: User, window: CycleWindow, frameworks: list[HealthOptimizationFramework]) -> int:
+    payload_rows = _task_template_rows(db, user, window, frameworks)
+    if window.cycle_type == "daily":
+        desired_training_names = {
+            str(row.get("framework_name") or "")
+            for row in payload_rows
+            if row.get("target_metric") == "manual_check" and str(row.get("framework_type") or "") == "training"
+        }
+        stale_training = (
+            db.query(CoachingPlanTask)
+            .filter(
+                CoachingPlanTask.user_id == user.id,
+                CoachingPlanTask.cycle_type == "daily",
+                CoachingPlanTask.cycle_start == window.start.isoformat(),
+                CoachingPlanTask.target_metric == "manual_check",
+                CoachingPlanTask.framework_type == "training",
+                CoachingPlanTask.status == "pending",
+            )
+            .all()
+        )
+        for row in stale_training:
+            if str(row.framework_name or "") not in desired_training_names:
+                db.delete(row)
+        db.flush()
+
     existing = (
         db.query(CoachingPlanTask.target_metric, CoachingPlanTask.framework_name)
         .filter(
@@ -365,7 +618,7 @@ def _ensure_window_tasks(db: Session, user: User, window: CycleWindow, framework
     )
     existing_keys = {(str(metric), str(name or "")) for metric, name in existing}
     created = 0
-    for payload in _task_template_rows(user, window, frameworks):
+    for payload in payload_rows:
         dedupe_key = (str(payload["target_metric"]), str(payload.get("framework_name") or ""))
         if dedupe_key in existing_keys:
             continue
