@@ -15,7 +15,13 @@ if str(ROOT) not in sys.path:
 
 from db.database import Base  # noqa: E402
 from db.models import CoachingPlanAdjustment, CoachingPlanTask, HealthOptimizationFramework, User, UserSettings  # noqa: E402
-from services.coaching_plan_service import apply_framework_selection, get_plan_snapshot, set_task_status, undo_adjustment  # noqa: E402
+from services.coaching_plan_service import (  # noqa: E402
+    apply_framework_selection,
+    get_daily_rolling_snapshot,
+    get_plan_snapshot,
+    set_task_status,
+    undo_adjustment,
+)
 
 
 def _new_db():
@@ -151,3 +157,22 @@ def test_framework_selection_updates_active_flags_and_plan_tasks():
     framework_tasks = [row for row in snapshot["tasks"] if row["domain"] == "framework"]
     assert framework_tasks
     assert all("Follow " in row["title"] for row in framework_tasks)
+
+
+def test_repeated_rolling_snapshots_do_not_leave_future_days_missed():
+    db = _new_db()
+    user = _new_user(db, "plan_rolling_missed_guard")
+
+    first = get_daily_rolling_snapshot(db, user, days=5)
+    db.commit()
+    second = get_daily_rolling_snapshot(db, user, days=5)
+    db.commit()
+
+    for payload in (first, second):
+        days = payload.get("days", [])
+        assert days, "expected rolling day snapshots"
+        for day_snapshot in days:
+            statuses = [str(task.get("status", "")) for task in day_snapshot.get("tasks", [])]
+            assert all(status != "missed" for status in statuses), (
+                f"unexpected missed status in rolling preview for {day_snapshot.get('cycle', {}).get('today')}"
+            )

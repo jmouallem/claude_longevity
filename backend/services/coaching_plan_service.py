@@ -885,6 +885,11 @@ def refresh_task_statuses(
             new_status = "missed"
             if create_notifications:
                 _create_missed_task_notification(db, user, task, day)
+        elif previous == "missed" and date.fromisoformat(str(task.cycle_end)) >= day and progress < 100.0:
+            # If status became "missed" due to a prior forward-looking evaluation,
+            # restore it while the task window is still active.
+            new_status = "pending"
+            task.completed_at = None
         elif previous == "missed" and progress >= 100.0:
             new_status = "completed"
             task.completed_at = task.completed_at or datetime.now(timezone.utc)
