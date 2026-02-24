@@ -172,7 +172,7 @@ export default function GoalChatPanel({
   const { messages, loading, loadHistory, sendMessage } = useChat();
   const [inputText, setInputText] = useState('');
   const [historyLoaded, setHistoryLoaded] = useState(false);
-  const [autoSent, setAutoSent] = useState(false);
+  const lastAutoSentPromptRef = useRef('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -183,26 +183,27 @@ export default function GoalChatPanel({
     }
   }, [open, historyLoaded, loadHistory]);
 
-  // Pre-fill and auto-send the initial check-in message
+  // Pre-fill and auto-send the initial check-in message for each task.
   useEffect(() => {
-    if (open && historyLoaded && initialMessage && !autoSent) {
-      setAutoSent(true);
-      sendMessage(initialMessage);
-    }
-  }, [open, historyLoaded, initialMessage, autoSent, sendMessage]);
+    const prompt = String(initialMessage || '').trim();
+    if (!open || !historyLoaded || !prompt) return;
+    if (lastAutoSentPromptRef.current === prompt) return;
+    lastAutoSentPromptRef.current = prompt;
+    sendMessage(prompt);
+  }, [open, historyLoaded, initialMessage, sendMessage]);
 
-  // Reset auto-send flag when panel is closed (so next open works)
+  // Reset auto-send state when panel is closed (so reopening same task sends again).
   useEffect(() => {
     if (!open) {
-      setAutoSent(false);
+      lastAutoSentPromptRef.current = '';
       setHistoryLoaded(false);
     }
   }, [open]);
 
-  // Scroll to bottom when messages change
+  // Scroll to bottom when messages or loading state changes.
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+  }, [messages, loading]);
 
   // Fire onTaskUpdated after assistant stops streaming
   const prevLoadingRef = useRef(loading);
@@ -233,7 +234,7 @@ export default function GoalChatPanel({
   if (!open) return null;
 
   // Only show messages from after the panel opened (or show all — using all for coaching continuity)
-  const visibleMessages = messages.filter((m) => m.content.trim() !== '');
+  const visibleMessages = messages.filter((m) => m.isStreaming || m.content.trim() !== '');
 
   return (
     <>
