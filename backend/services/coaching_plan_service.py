@@ -1428,3 +1428,54 @@ def clear_plan_data(db: Session, user_id: int) -> dict[str, int]:
         db.query(CoachingPlanAdjustment).filter(CoachingPlanAdjustment.user_id == user_id).delete(synchronize_session=False)
     )
     return {"tasks": int(deleted_tasks or 0), "adjustments": int(deleted_adjustments or 0)}
+
+
+def get_calendar_summary(
+    db: Session,
+    user: User,
+    *,
+    start_date: date,
+    end_date: date,
+) -> list[dict[str, Any]]:
+    """Compact per-day completion stats for a date range (max 42 days)."""
+    max_days = 42
+    delta = (end_date - start_date).days + 1
+    if delta > max_days:
+        end_date = start_date + timedelta(days=max_days - 1)
+
+    tasks = (
+        db.query(CoachingPlanTask)
+        .filter(
+            CoachingPlanTask.user_id == user.id,
+            CoachingPlanTask.cycle_type == "daily",
+            CoachingPlanTask.cycle_start >= start_date.isoformat(),
+            CoachingPlanTask.cycle_start <= end_date.isoformat(),
+        )
+        .all()
+    )
+
+    by_day: dict[str, list[CoachingPlanTask]] = {}
+    for t in tasks:
+        by_day.setdefault(t.cycle_start, []).append(t)
+
+    today_local = _today(user)
+    result: list[dict[str, Any]] = []
+    current = start_date
+    while current <= end_date:
+        iso = current.isoformat()
+        day_tasks = by_day.get(iso, [])
+        total = len(day_tasks)
+        completed = sum(1 for t in day_tasks if t.status == "completed")
+        missed = sum(1 for t in day_tasks if t.status == "missed")
+        result.append({
+            "date": iso,
+            "total": total,
+            "completed": completed,
+            "missed": missed,
+            "completion_ratio": round(completed / total, 2) if total else 0,
+            "is_past": current < today_local,
+            "is_today": current == today_local,
+        })
+        current += timedelta(days=1)
+
+    return result

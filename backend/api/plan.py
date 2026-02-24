@@ -13,6 +13,7 @@ from services.coaching_plan_service import (
     apply_framework_selection,
     clear_plan_data,
     ensure_plan_seeded,
+    get_calendar_summary,
     get_daily_rolling_snapshot,
     get_plan_snapshot,
     mark_notification_read,
@@ -38,6 +39,51 @@ class TaskStatusUpdate(BaseModel):
 
 class FrameworkSelectionRequest(BaseModel):
     selected_framework_ids: list[int] = []
+
+
+@router.get("/calendar")
+def plan_calendar(
+    start: str,
+    end: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    from datetime import date as date_type
+
+    try:
+        start_date = date_type.fromisoformat(start)
+        end_date = date_type.fromisoformat(end)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")
+    if end_date < start_date:
+        raise HTTPException(status_code=400, detail="end must be >= start.")
+    days = get_calendar_summary(db, user, start_date=start_date, end_date=end_date)
+    db.commit()
+    return {"start": start, "end": end, "days": days}
+
+
+@router.get("/snapshot/day")
+def plan_snapshot_day(
+    date: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    from datetime import date as date_type
+
+    try:
+        ref_day = date_type.fromisoformat(date)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")
+    payload = get_plan_snapshot(
+        db,
+        user,
+        cycle_type="daily",
+        reference_day=ref_day,
+        create_notifications=False,
+        allow_adjustments=False,
+    )
+    db.commit()
+    return payload
 
 
 @router.get("/snapshot")

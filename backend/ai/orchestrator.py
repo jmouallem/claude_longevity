@@ -1356,6 +1356,8 @@ def _has_menu_update_intent(db: Session, user: User, message_text: str) -> bool:
 
 def _looks_like_food_logging_message(message_text: str) -> bool:
     text = _normalize_whitespace(message_text)
+    if not text:
+        return False
     strong_cues = (
         "i had ",
         "i ate ",
@@ -1367,13 +1369,124 @@ def _looks_like_food_logging_message(message_text: str) -> bool:
         "my lunch was",
         "my breakfast was",
         "my dinner was",
+        "i made ",
+        "i cooked ",
+        "i'm eating ",
+        "im eating ",
+        "i am eating ",
+        "i had for ",
+        "had a ",
+        "ate a ",
     )
     if any(cue in text for cue in strong_cues):
+        return True
+    if re.search(r"\bfor\s+(breakfast|lunch|dinner|snack)\b", text):
         return True
     quantity_tokens = (" cup", " cups", " tbsp", " tsp", " oz", " ml", " g ", " gram", " grams", " scoop", " scoops")
     if "," in text and any(token in text for token in quantity_tokens):
         return True
+    if any(token in text for token in quantity_tokens) and any(connector in text for connector in (" and ", " with ", "+")):
+        return True
+    if text.startswith(("breakfast:", "lunch:", "dinner:", "snack:")):
+        return True
     return False
+
+
+def _assistant_recently_requested_food_details(db: Session, user: User, reference_utc: datetime) -> bool:
+    last = _last_assistant_message(db, user)
+    if not last or not last.content:
+        return False
+    created_at = last.created_at
+    if created_at is not None:
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        else:
+            created_at = created_at.astimezone(timezone.utc)
+        if (reference_utc - created_at) > timedelta(minutes=30):
+            return False
+    text = _normalize_whitespace(last.content)
+    if "to your menu" in text:
+        return False
+    request_cues = (
+        "what did you eat",
+        "what did you have",
+        "what have you had",
+        "what did you drink",
+        "log your meal",
+        "log your food",
+        "tell me what you ate",
+        "tell me what you had",
+        "share what you ate",
+        "share what you had",
+        "breakdown of your meal",
+    )
+    return any(cue in text for cue in request_cues)
+
+
+def _looks_like_food_followup_answer(message_text: str) -> bool:
+    text = _normalize_whitespace(message_text)
+    if not text:
+        return False
+    if "?" in text:
+        return False
+    if text in MENU_CONFIRM_WORDS or text in TIME_CONFIRM_ACK_TERMS or text in TIME_CONFIRM_REJECT_TERMS:
+        return False
+    if len(text.split()) < 2:
+        return False
+    if any(token in text for token in (" and ", ",", " with ", "+")):
+        return True
+    quantity_tokens = (" cup", " cups", " tbsp", " tsp", " oz", " ml", " gram", " grams", " scoop", " scoops", "slice", "pieces")
+    if any(token in text for token in quantity_tokens):
+        return True
+    return len(text.split()) <= 12
+
+
+def _looks_like_food_planning_question(message_text: str) -> bool:
+    text = _normalize_whitespace(message_text)
+    if not text:
+        return False
+    is_question = "?" in text or bool(re.match(r"^(can|should|could|would|is|are|do|does|did)\b", text))
+    if not is_question:
+        return False
+    past_log_cues = (
+        "i had ",
+        "i ate ",
+        "i drank ",
+        "my lunch was",
+        "my breakfast was",
+        "my dinner was",
+        "just had",
+        "just ate",
+        "just drank",
+    )
+    if any(cue in text for cue in past_log_cues):
+        return False
+    planning_patterns = (
+        r"\bcan\s+i\s+(?:have|eat|drink|try)\b",
+        r"\bcould\s+i\s+(?:have|eat|drink|try)\b",
+        r"\bshould\s+i\s+(?:have|eat|drink|try)\b",
+        r"\bwould\s+it\s+be\s+ok(?:ay)?\s+(?:to|if\s+i)\s+(?:have|eat|drink|try)\b",
+        r"\bis\s+it\s+ok(?:ay)?\s+(?:to|if\s+i)\s+(?:have|eat|drink|try)\b",
+    )
+    return any(re.search(pattern, text) for pattern in planning_patterns)
+
+
+def _minimal_food_payload_from_message(message_text: str, *, low_confidence: bool) -> dict[str, Any]:
+    item_name = _normalize_whitespace(message_text).strip() or "meal entry"
+    note = "Low-confidence meal capture from follow-up context; confirm details if needed."
+    if not low_confidence:
+        note = "Deterministic meal capture"
+    return {
+        "meal_label": "Meal",
+        "items": [{"name": item_name, "quantity": "", "unit": ""}],
+        "calories": None,
+        "protein_g": None,
+        "carbs_g": None,
+        "fat_g": None,
+        "fiber_g": None,
+        "sodium_mg": None,
+        "notes": note,
+    }
 
 
 def _try_handle_menu_template_action(
@@ -2770,63 +2883,126 @@ async def process_chat(
             source_food_log=_latest_food_log(db, user, lookback_hours=72),
         )
 
-    # 3. Parse and save structured data if it's a logging intent
+    # 3. Parse and save structured data.
+    # Primary rule: if a turn contains meal evidence, record the meal even when
+    # classification lands in ask/general categories.
     parsed_log_data: dict[str, Any] | None = None
     saved_log_out: dict[str, Any] | None = None
     log_write_error: str | None = None
-    if category.startswith("log_") and not menu_command_only and not bool(time_confirmation_gate.get("skip_log_parse")):
+    log_context_category = category
+    menu_hint_category = category
+    parsed_by_category: dict[str, dict[str, Any]] = {}
+    saved_by_category: dict[str, dict[str, Any]] = {}
+    write_error_by_category: dict[str, str] = {}
+
+    food_planning_question = _looks_like_food_planning_question(message)
+    explicit_food_signal = _looks_like_food_logging_message(message) and not food_planning_question
+    contextual_food_signal = (
+        category in {"general_chat", "ask_nutrition"}
+        and _assistant_recently_requested_food_details(db, user, message_received_utc)
+        and _looks_like_food_followup_answer(message)
+    )
+    force_food_logging = (explicit_food_signal or contextual_food_signal) and not menu_command_only
+    food_low_confidence = contextual_food_signal and not explicit_food_signal
+
+    log_categories: list[str] = []
+    if category.startswith("log_"):
+        log_categories.append(category)
+    if force_food_logging and "log_food" not in log_categories:
+        log_categories.insert(0, "log_food")
+
+    if log_categories and not menu_command_only and not bool(time_confirmation_gate.get("skip_log_parse")):
         user_profile = ""
         if user_settings.current_weight_kg:
             if user_settings.weight_unit == "lb":
                 user_profile = f"Weight: {kg_to_lb(user_settings.current_weight_kg):.1f}lb"
             else:
                 user_profile = f"Weight: {user_settings.current_weight_kg}kg"
-        parsed_log_data = await parse_log_data(
-            provider,
-            combined_input,
-            category,
-            user_profile=user_profile,
-            db=db,
-            user_id=user.id,
-            allow_model_call=utility_budget.can_call(f"log_parse:{category}"),
-        )
-        if category == "log_sleep":
-            parsed_log_data = _normalize_sleep_payload(message, parsed_log_data)
-        parsed_log_data = _apply_inferred_event_time(
-            category=category,
-            message_text=message,
-            payload=parsed_log_data,
-            reference_utc=message_received_utc,
-            timezone_name=getattr(user_settings, "timezone", None),
-        )
-        if parsed_log_data:
+
+        for log_category in log_categories:
+            parsed_one = await parse_log_data(
+                provider,
+                combined_input,
+                log_category,
+                user_profile=user_profile,
+                db=db,
+                user_id=user.id,
+                allow_model_call=utility_budget.can_call(f"log_parse:{log_category}"),
+            )
+
+            if log_category == "log_sleep":
+                parsed_one = _normalize_sleep_payload(message, parsed_one)
+
+            if log_category == "log_food" and food_low_confidence:
+                if not isinstance(parsed_one, dict):
+                    parsed_one = _minimal_food_payload_from_message(message, low_confidence=True)
+                else:
+                    existing_notes = str(parsed_one.get("notes") or "").strip()
+                    low_conf_note = "Low-confidence meal capture from follow-up context; confirm details if needed."
+                    parsed_one["notes"] = f"{existing_notes} {low_conf_note}".strip()
+                    items = parsed_one.get("items")
+                    if not isinstance(items, list) or not items:
+                        parsed_one["items"] = _minimal_food_payload_from_message(message, low_confidence=True)["items"]
+
+            if log_category == "log_food" and not isinstance(parsed_one, dict):
+                parsed_one = _minimal_food_payload_from_message(message, low_confidence=False)
+
+            parsed_one = _apply_inferred_event_time(
+                category=log_category,
+                message_text=message,
+                payload=parsed_one,
+                reference_utc=message_received_utc,
+                timezone_name=getattr(user_settings, "timezone", None),
+            )
+
+            if isinstance(parsed_one, dict):
+                parsed_by_category[log_category] = parsed_one
+            if not parsed_one:
+                continue
             try:
-                saved_log_out = await save_structured_log(
+                saved_one = await save_structured_log(
                     db,
                     user,
-                    category,
-                    parsed_log_data,
+                    log_category,
+                    parsed_one,
                     reference_utc=message_received_utc,
                 )
                 _persist_low_confidence_time_confirmation(
                     db=db,
                     user=user,
-                    category=category,
-                    parsed_payload=parsed_log_data,
-                    saved_out=saved_log_out,
+                    category=log_category,
+                    parsed_payload=parsed_one,
+                    saved_out=saved_one,
                 )
                 db.commit()
+                if isinstance(saved_one, dict):
+                    saved_by_category[log_category] = saved_one
             except ToolExecutionError as e:
-                log_write_error = str(e)
-                logger.warning(f"Structured log tool write failed ({category}): {e}")
+                write_error_by_category[log_category] = str(e)
+                logger.warning(f"Structured log tool write failed ({log_category}): {e}")
             except Exception as e:
-                log_write_error = str(e)
-                logger.warning(f"Structured log save failed ({category}): {e}")
+                write_error_by_category[log_category] = str(e)
+                logger.warning(f"Structured log save failed ({log_category}): {e}")
+
+    if "log_food" in parsed_by_category or "log_food" in saved_by_category:
+        log_context_category = "log_food"
+        menu_hint_category = "log_food"
+        parsed_log_data = parsed_by_category.get("log_food")
+        saved_log_out = saved_by_category.get("log_food")
+        log_write_error = write_error_by_category.get("log_food")
+    elif log_categories:
+        primary = log_categories[0]
+        log_context_category = primary
+        menu_hint_category = primary
+        parsed_log_data = parsed_by_category.get(primary)
+        saved_log_out = saved_by_category.get(primary)
+        log_write_error = write_error_by_category.get(primary)
 
     # 3a. Chat-driven menu actions (save/update meal templates).
     # Prefer the current turn's food log when available to avoid stale meal capture.
     if menu_action_result is None:
-        source_food_log = _food_log_from_saved_output(db, user, saved_log_out)
+        source_food_out = saved_by_category.get("log_food") if saved_by_category else saved_log_out
+        source_food_log = _food_log_from_saved_output(db, user, source_food_out)
         menu_action_result = _try_handle_menu_template_action(
             db=db,
             user=user,
@@ -2837,7 +3013,7 @@ async def process_chat(
     menu_followup_hint = _build_menu_followup_hint(
         db=db,
         user=user,
-        category=category,
+        category=menu_hint_category,
         message_text=message,
         parsed_log=parsed_log_data,
         saved_out=saved_log_out,
@@ -2948,7 +3124,7 @@ async def process_chat(
 
     menu_context = _format_menu_context(menu_action_result, menu_followup_hint)
     log_write_context = _build_log_write_context(
-        category=category,
+        category=log_context_category,
         parsed_log=parsed_log_data,
         saved_out=saved_log_out,
         write_error=log_write_error,

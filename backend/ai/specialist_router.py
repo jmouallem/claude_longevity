@@ -64,6 +64,35 @@ def _looks_like_question(text: str) -> bool:
     return bool(re.match(r"^(what|how|why|when|where|can|should|could|would|is|are|do|does|did)\b", text))
 
 
+def _looks_like_food_planning_question(text: str) -> bool:
+    normalized = _normalize_text(text)
+    if not normalized:
+        return False
+    if not _looks_like_question(normalized):
+        return False
+    past_log_cues = (
+        "i had ",
+        "i ate ",
+        "i drank ",
+        "my lunch was",
+        "my breakfast was",
+        "my dinner was",
+        "just had",
+        "just ate",
+        "just drank",
+    )
+    if any(cue in normalized for cue in past_log_cues):
+        return False
+    planning_patterns = (
+        r"\bcan\s+i\s+(?:have|eat|drink|try)\b",
+        r"\bcould\s+i\s+(?:have|eat|drink|try)\b",
+        r"\bshould\s+i\s+(?:have|eat|drink|try)\b",
+        r"\bwould\s+it\s+be\s+ok(?:ay)?\s+(?:to|if\s+i)\s+(?:have|eat|drink|try)\b",
+        r"\bis\s+it\s+ok(?:ay)?\s+(?:to|if\s+i)\s+(?:have|eat|drink|try)\b",
+    )
+    return any(re.search(pattern, normalized) for pattern in planning_patterns)
+
+
 def _heuristic_category(message: str) -> str:
     text = _normalize_text(message)
     is_question = _looks_like_question(text)
@@ -129,19 +158,26 @@ def _heuristic_category(message: str) -> str:
     if _contains_any(text, supplement_cues):
         return "ask_supplement" if is_question else "log_supplement"
 
-    food_cues = (
+    food_log_cues = (
         "i ate",
         "i had",
+        "i drank",
         "for breakfast",
         "for lunch",
         "for dinner",
+        "for snack",
+        "my breakfast was",
+        "my lunch was",
+        "my dinner was",
         "snack",
-        "meal",
-        "coffee",
-        "protein shake",
     )
-    if _contains_any(text, food_cues):
-        return "ask_nutrition" if is_question else "log_food"
+    if _contains_any(text, food_log_cues):
+        if is_question and _looks_like_food_planning_question(text):
+            return "ask_nutrition"
+        return "log_food"
+    food_question_cues = ("meal", "coffee", "protein shake", "nutrition", "diet", "calories", "macros")
+    if is_question and _contains_any(text, food_question_cues):
+        return "ask_nutrition"
 
     if is_question:
         if _contains_any(text, ("food", "nutrition", "diet", "calories", "macros")):

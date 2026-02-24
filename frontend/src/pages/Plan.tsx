@@ -1,29 +1,36 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
 import { apiClient } from '../api/client';
 
-type CycleType = 'daily' | 'weekly' | 'monthly';
-type VisibilityMode = 'top3' | 'all';
-type TaskStatus = 'pending' | 'completed' | 'missed' | 'skipped';
+/* ─── Types ─── */
+
+interface CalendarDay {
+  date: string;
+  total: number;
+  completed: number;
+  missed: number;
+  completion_ratio: number;
+  is_past: boolean;
+  is_today: boolean;
+}
+
+interface CalendarData {
+  start: string;
+  end: string;
+  days: CalendarDay[];
+}
 
 interface PlanTask {
   id: number;
-  cycle_type: CycleType | string;
-  cycle_start: string;
-  cycle_end: string;
-  target_metric: string;
   title: string;
   description: string | null;
   domain: string;
-  framework_type: string | null;
-  framework_name: string | null;
+  status: string;
+  progress_pct: number;
+  time_of_day: string;
   priority_score: number;
   target_value: number | null;
   target_unit: string | null;
-  status: TaskStatus;
-  progress_pct: number;
-  due_at: string | null;
-  completed_at: string | null;
+  framework_name: string | null;
 }
 
 interface PlanStats {
@@ -31,21 +38,15 @@ interface PlanStats {
   completed: number;
   missed: number;
   pending: number;
-  skipped: number;
-  completion_ratio: number;
 }
 
-interface PlanReward {
-  points_30d: number;
-  badges: string[];
-  completed_daily_streak: number;
-  missed_daily_streak: number;
-}
-
-interface PlanPreference {
-  visibility_mode: VisibilityMode;
-  max_visible_tasks: number;
-  coaching_why: string | null;
+interface PlanSnapshot {
+  cycle: { cycle_type: string; start: string; end: string; today: string };
+  stats: PlanStats;
+  reward: { completed_daily_streak: number; points_30d: number };
+  tasks: PlanTask[];
+  notifications: PlanNotification[];
+  adjustments: PlanAdjustment[];
 }
 
 interface PlanNotification {
@@ -59,241 +60,455 @@ interface PlanNotification {
 
 interface PlanAdjustment {
   id: number;
-  cycle_anchor: string | null;
   title: string;
   rationale: string;
   status: string;
-  source: string;
   applied_at: string | null;
-  undo_expires_at: string | null;
   undo_available: boolean;
-}
-
-interface PlanSnapshot {
-  cycle: {
-    cycle_type: CycleType | string;
-    start: string;
-    end: string;
-    today: string;
-    timezone?: string | null;
-  };
-  preferences: PlanPreference;
-  stats: PlanStats;
-  reward: PlanReward;
-  tasks: PlanTask[];
-  upcoming_tasks: PlanTask[];
-  notifications: PlanNotification[];
-  adjustments: PlanAdjustment[];
-}
-
-interface FrameworkItem {
-  id: number;
-  framework_type: string;
-  framework_type_label: string;
-  classifier_label: string;
-  name: string;
-  priority_score: number;
-  is_active: boolean;
-  source: string;
-  rationale?: string | null;
 }
 
 interface FrameworkEducation {
   framework_types: Record<
     string,
-    {
-      label: string;
-      classifier_label: string;
-      description?: string;
-      examples?: string[];
-    }
+    { label: string; classifier_label: string; description?: string; examples?: string[] }
   >;
-  grouped: Record<string, FrameworkItem[]>;
+  grouped: Record<string, { id: number; name: string; is_active: boolean }[]>;
 }
 
-function percentage(value: number): string {
-  return `${Math.round(Math.max(0, value))}%`;
+/* ─── Helpers ─── */
+
+function toIsoDate(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
-function statusPill(task: PlanTask) {
-  if (task.status === 'completed') return 'bg-emerald-900/50 text-emerald-300 border-emerald-700/40';
-  if (task.status === 'missed') return 'bg-rose-900/50 text-rose-300 border-rose-700/40';
-  if (task.status === 'skipped') return 'bg-amber-900/50 text-amber-300 border-amber-700/40';
-  return 'bg-slate-800 text-slate-300 border-slate-600/70';
+function formatDateLabel(isoDate: string): string {
+  return new Date(`${isoDate}T00:00:00`).toLocaleDateString('en-US', {
+    weekday: 'long',
+    month: 'short',
+    day: 'numeric',
+  });
 }
+
+function monthLabel(year: number, month: number): string {
+  return new Date(year, month, 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+}
+
+/* ─── SVG Icons ─── */
+
+function StatusIcon({ status }: { status: string }) {
+  if (status === 'completed') {
+    return (
+      <svg width="16" height="16" viewBox="0 0 20 20" className="text-emerald-400 shrink-0">
+        <circle cx="10" cy="10" r="9" fill="none" stroke="currentColor" strokeWidth="1.5" />
+        <path d="M6 10.5l2.5 2.5 5.5-5.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    );
+  }
+  if (status === 'missed') {
+    return (
+      <svg width="16" height="16" viewBox="0 0 20 20" className="text-rose-400/60 shrink-0">
+        <circle cx="10" cy="10" r="9" fill="none" stroke="currentColor" strokeWidth="1.5" />
+        <path d="M7 7l6 6M13 7l-6 6" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+      </svg>
+    );
+  }
+  if (status === 'skipped') {
+    return (
+      <svg width="16" height="16" viewBox="0 0 20 20" className="text-amber-400/60 shrink-0">
+        <circle cx="10" cy="10" r="9" fill="none" stroke="currentColor" strokeWidth="1.5" />
+        <path d="M7 10h6" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+      </svg>
+    );
+  }
+  return (
+    <svg width="16" height="16" viewBox="0 0 20 20" className="text-slate-500 shrink-0">
+      <circle cx="10" cy="10" r="9" fill="none" stroke="currentColor" strokeWidth="1.5" />
+    </svg>
+  );
+}
+
+function ChevronLeft() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M15 18l-6-6 6-6" />
+    </svg>
+  );
+}
+
+function ChevronRight() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M9 18l6-6-6-6" />
+    </svg>
+  );
+}
+
+/* ─── Calendar Grid ─── */
+
+const WEEKDAYS = ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su'];
+
+function CalendarGrid({
+  data,
+  currentMonth,
+  selectedDate,
+  onSelectDate,
+}: {
+  data: CalendarData;
+  currentMonth: { year: number; month: number };
+  selectedDate: string | null;
+  onSelectDate: (date: string) => void;
+}) {
+  const dayMap = useMemo(() => new Map(data.days.map((d) => [d.date, d])), [data.days]);
+
+  const cells = useMemo(() => {
+    const firstDay = new Date(currentMonth.year, currentMonth.month, 1);
+    const startOffset = (firstDay.getDay() + 6) % 7; // Monday = 0
+    const gridStart = new Date(firstDay);
+    gridStart.setDate(gridStart.getDate() - startOffset);
+
+    const result: Array<{ date: string; dayNum: number; inMonth: boolean; day: CalendarDay | undefined }> = [];
+    for (let i = 0; i < 42; i++) {
+      const d = new Date(gridStart);
+      d.setDate(gridStart.getDate() + i);
+      const iso = toIsoDate(d);
+      result.push({
+        date: iso,
+        dayNum: d.getDate(),
+        inMonth: d.getMonth() === currentMonth.month && d.getFullYear() === currentMonth.year,
+        day: dayMap.get(iso),
+      });
+    }
+
+    // Trim trailing weeks that are entirely outside the month
+    while (result.length > 35 && result.slice(-7).every((c) => !c.inMonth)) {
+      result.splice(-7, 7);
+    }
+
+    return result;
+  }, [currentMonth, dayMap]);
+
+  function cellColor(cell: typeof cells[0]): string {
+    if (!cell.inMonth) return '';
+    const d = cell.day;
+    if (!d || d.total === 0) return '';
+    if (d.completion_ratio >= 1) return 'bg-emerald-500/20';
+    if (d.completed > 0) return 'bg-amber-500/15';
+    if (d.is_past) return 'bg-rose-500/10';
+    return '';
+  }
+
+  return (
+    <div className="rounded-xl border border-slate-700 bg-slate-800/60 p-3">
+      {/* Weekday headers */}
+      <div className="grid grid-cols-7 gap-1 mb-1">
+        {WEEKDAYS.map((wd) => (
+          <div key={wd} className="text-center text-[10px] font-semibold uppercase tracking-wider text-slate-500 py-1">
+            {wd}
+          </div>
+        ))}
+      </div>
+      {/* Day cells */}
+      <div className="grid grid-cols-7 gap-1">
+        {cells.map((cell) => {
+          const isSelected = cell.date === selectedDate;
+          const isToday = cell.day?.is_today ?? false;
+          const hasTasks = (cell.day?.total ?? 0) > 0;
+
+          return (
+            <button
+              key={cell.date}
+              type="button"
+              onClick={() => cell.inMonth && onSelectDate(cell.date)}
+              disabled={!cell.inMonth}
+              className={`
+                relative aspect-square flex flex-col items-center justify-center rounded-lg text-sm transition-all
+                ${!cell.inMonth ? 'text-slate-700 cursor-default' : 'cursor-pointer hover:bg-slate-700/50'}
+                ${cell.inMonth ? cellColor(cell) : ''}
+                ${isSelected ? 'ring-2 ring-emerald-400 bg-emerald-600/15' : ''}
+                ${isToday && !isSelected ? 'ring-1 ring-emerald-500/50' : ''}
+              `}
+            >
+              <span className={`${cell.inMonth ? 'text-slate-200' : 'text-slate-700'} ${isToday ? 'font-bold' : ''}`}>
+                {cell.dayNum}
+              </span>
+              {cell.inMonth && hasTasks && (
+                <div className="flex gap-0.5 mt-0.5">
+                  <span className={`w-1 h-1 rounded-full ${
+                    (cell.day?.completion_ratio ?? 0) >= 1 ? 'bg-emerald-400' :
+                    (cell.day?.completed ?? 0) > 0 ? 'bg-amber-400' :
+                    cell.day?.is_past ? 'bg-rose-400/60' : 'bg-slate-500'
+                  }`} />
+                </div>
+              )}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/* ─── Day Detail Panel ─── */
+
+function DayDetail({
+  snapshot,
+  dateStr,
+  loading,
+}: {
+  snapshot: PlanSnapshot | null;
+  dateStr: string;
+  loading: boolean;
+}) {
+  if (loading) {
+    return (
+      <div className="rounded-xl border border-slate-700 bg-slate-800/60 p-4">
+        <div className="space-y-2">
+          {[1, 2, 3].map((i) => (
+            <div key={i} className="h-8 bg-slate-700/40 rounded-lg animate-pulse" />
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  if (!snapshot) return null;
+
+  const tasks = snapshot.tasks.filter((t) => t.status !== 'skipped');
+
+  return (
+    <div className="rounded-xl border border-slate-700 bg-slate-800/60 p-4 space-y-3">
+      <div className="flex items-center justify-between">
+        <h3 className="text-sm font-semibold text-slate-100">{formatDateLabel(dateStr)}</h3>
+        <span className="text-xs text-slate-400">
+          {snapshot.stats.completed}/{snapshot.stats.total} completed
+        </span>
+      </div>
+      {tasks.length === 0 ? (
+        <p className="text-xs text-slate-500">No tasks for this day.</p>
+      ) : (
+        <div className="space-y-1 divide-y divide-slate-700/30">
+          {tasks.map((task) => (
+            <div key={task.id} className="flex items-center gap-2.5 py-2 first:pt-0">
+              <StatusIcon status={task.status} />
+              <div className="flex-1 min-w-0">
+                <p className={`text-sm ${task.status === 'completed' ? 'text-slate-500 line-through' : 'text-slate-200'}`}>
+                  {task.title}
+                </p>
+                {task.framework_name && (
+                  <span className="text-[10px] text-cyan-400/70">{task.framework_name}</span>
+                )}
+              </div>
+              {task.status === 'completed' && task.progress_pct > 0 && (
+                <span className="text-[10px] text-emerald-400">{Math.round(task.progress_pct)}%</span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ─── Sidebar Panels ─── */
+
+function NotificationsPanel({
+  notifications,
+  onMarkRead,
+}: {
+  notifications: PlanNotification[];
+  onMarkRead: (id: number) => void;
+}) {
+  const unread = notifications.filter((n) => !n.is_read);
+
+  return (
+    <div className="rounded-xl border border-slate-700 bg-slate-800/60 p-4 space-y-2">
+      <h2 className="text-sm font-semibold text-slate-100">Notifications</h2>
+      {unread.length === 0 ? (
+        <p className="text-xs text-slate-500">No unread notifications.</p>
+      ) : (
+        <div className="space-y-2 max-h-[200px] overflow-y-auto">
+          {unread.slice(0, 5).map((n) => (
+            <button
+              key={n.id}
+              type="button"
+              onClick={() => onMarkRead(n.id)}
+              className="w-full text-left rounded-lg border border-slate-700/50 bg-slate-900/40 px-3 py-2 hover:border-slate-600 transition-colors"
+            >
+              <p className="text-xs font-medium text-slate-100">{n.title}</p>
+              <p className="text-[11px] text-slate-400 mt-0.5">{n.message}</p>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AdjustmentsPanel({
+  adjustments,
+  onUndo,
+}: {
+  adjustments: PlanAdjustment[];
+  onUndo: (id: number) => void;
+}) {
+  return (
+    <div className="rounded-xl border border-slate-700 bg-slate-800/60 p-4 space-y-2">
+      <h2 className="text-sm font-semibold text-slate-100">Auto Adjustments</h2>
+      {adjustments.length === 0 ? (
+        <p className="text-xs text-slate-500">No adjustments yet.</p>
+      ) : (
+        <div className="space-y-2 max-h-[200px] overflow-y-auto">
+          {adjustments.map((adj) => (
+            <div key={adj.id} className="rounded-lg border border-slate-700/50 bg-slate-900/40 px-3 py-2">
+              <p className="text-xs font-medium text-slate-100">{adj.title}</p>
+              <p className="text-[11px] text-slate-400 mt-0.5">{adj.rationale}</p>
+              {adj.undo_available && (
+                <button
+                  type="button"
+                  onClick={() => onUndo(adj.id)}
+                  className="mt-1.5 px-2 py-0.5 text-[11px] rounded border border-slate-600 text-slate-200 hover:bg-slate-700 transition-colors"
+                >
+                  Undo
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FrameworkPanel({ education }: { education: FrameworkEducation }) {
+  return (
+    <div className="rounded-xl border border-slate-700 bg-slate-800/60 p-4 space-y-2">
+      <h2 className="text-sm font-semibold text-slate-100">Frameworks</h2>
+      <div className="space-y-1.5">
+        {Object.entries(education.framework_types).map(([key, value]) => (
+          <details key={key} className="rounded-lg border border-slate-700/50 bg-slate-900/40 px-3 py-2">
+            <summary className="text-xs text-slate-200 cursor-pointer">{value.label}</summary>
+            <p className="text-[11px] text-slate-400 mt-1.5">{value.description || 'No description.'}</p>
+            {!!value.examples?.length && (
+              <p className="text-[10px] text-slate-500 mt-1">Examples: {value.examples.join(', ')}</p>
+            )}
+          </details>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ─── Main Component ─── */
 
 export default function Plan() {
-  const [searchParams, setSearchParams] = useSearchParams();
-  const navigate = useNavigate();
-  const [cycle, setCycle] = useState<CycleType>('daily');
-  const [snapshot, setSnapshot] = useState<PlanSnapshot | null>(null);
-  const [frameworkEducation, setFrameworkEducation] = useState<FrameworkEducation | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [busyTaskId, setBusyTaskId] = useState<number | null>(null);
-  const [error, setError] = useState('');
-  const [visibilityMode, setVisibilityMode] = useState<VisibilityMode>('top3');
-  const [maxVisible, setMaxVisible] = useState(3);
-  const [why, setWhy] = useState('');
-  const [showOnboarding, setShowOnboarding] = useState(false);
-  const [onboardingStep, setOnboardingStep] = useState(1);
-  const [selectedFrameworkIds, setSelectedFrameworkIds] = useState<number[]>([]);
-  const [applyingFrameworks, setApplyingFrameworks] = useState(false);
-  const [cyclePreview, setCyclePreview] = useState<Record<CycleType, PlanSnapshot | null>>({
-    daily: null,
-    weekly: null,
-    monthly: null,
+  const [currentMonth, setCurrentMonth] = useState(() => {
+    const now = new Date();
+    return { year: now.getFullYear(), month: now.getMonth() };
   });
+  const [calendarData, setCalendarData] = useState<CalendarData | null>(null);
+  const [selectedDate, setSelectedDate] = useState<string | null>(null);
+  const [daySnapshot, setDaySnapshot] = useState<PlanSnapshot | null>(null);
+  const [loadingCalendar, setLoadingCalendar] = useState(true);
+  const [loadingDay, setLoadingDay] = useState(false);
+  const [frameworkEducation, setFrameworkEducation] = useState<FrameworkEducation | null>(null);
+  const [error, setError] = useState('');
 
-  const fetchSnapshot = useCallback(async (cycleType: CycleType) => {
-    setLoading(true);
+  // Fetch calendar data when month changes
+  const fetchCalendar = useCallback(async (year: number, month: number) => {
+    setLoadingCalendar(true);
     setError('');
+    const start = new Date(year, month, 1);
+    const end = new Date(year, month + 1, 0);
+    const startStr = toIsoDate(start);
+    const endStr = toIsoDate(end);
+
     try {
-      const [data, frameworkData] = await Promise.all([
-        apiClient.get<PlanSnapshot>(`/api/plan/snapshot?cycle_type=${cycleType}`),
+      const [cal, fw] = await Promise.all([
+        apiClient.get<CalendarData>(`/api/plan/calendar?start=${startStr}&end=${endStr}`),
         apiClient.get<FrameworkEducation>('/api/plan/framework-education'),
       ]);
-      setSnapshot(data);
-      setFrameworkEducation(frameworkData);
-      setVisibilityMode((data.preferences.visibility_mode || 'top3') as VisibilityMode);
-      setMaxVisible(data.preferences.max_visible_tasks || 3);
-      setWhy(data.preferences.coaching_why || '');
-      const activeIds = Object.values(frameworkData.grouped || {})
-        .flat()
-        .filter((item) => item.is_active)
-        .map((item) => item.id);
-      setSelectedFrameworkIds((prev) => (prev.length > 0 ? prev : activeIds));
+      setCalendarData(cal);
+      setFrameworkEducation(fw);
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : 'Failed to load plan.');
+      setError(e instanceof Error ? e.message : 'Failed to load calendar.');
     } finally {
-      setLoading(false);
+      setLoadingCalendar(false);
     }
   }, []);
 
   useEffect(() => {
-    void fetchSnapshot(cycle);
-  }, [cycle, fetchSnapshot]);
+    void fetchCalendar(currentMonth.year, currentMonth.month);
+  }, [currentMonth, fetchCalendar]);
 
-  useEffect(() => {
-    if (!frameworkEducation) return;
-    const activeCount = Object.values(frameworkEducation.grouped || {})
-      .flat()
-      .filter((item) => item.is_active).length;
-    const shouldShow = searchParams.get('onboarding') === '1' || activeCount === 0;
-    setShowOnboarding(shouldShow);
-    if (shouldShow) {
-      setOnboardingStep(1);
+  // Fetch day detail when a date is clicked
+  const selectDate = useCallback(async (dateStr: string) => {
+    if (dateStr === selectedDate) {
+      setSelectedDate(null);
+      setDaySnapshot(null);
+      return;
     }
-  }, [frameworkEducation, searchParams]);
-
-  const updatePreference = async () => {
-    setSaving(true);
-    setError('');
+    setSelectedDate(dateStr);
+    setLoadingDay(true);
     try {
-      await apiClient.put('/api/plan/preferences', {
-        visibility_mode: visibilityMode,
-        max_visible_tasks: maxVisible,
-        coaching_why: why.trim() || null,
-      });
-      await fetchSnapshot(cycle);
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : 'Failed to update preferences.');
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const setTaskStatus = async (taskId: number, status: 'pending' | 'completed' | 'skipped') => {
-    setBusyTaskId(taskId);
-    setError('');
-    try {
-      await apiClient.post(`/api/plan/tasks/${taskId}/status`, { status });
-      await fetchSnapshot(cycle);
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : 'Failed to update task.');
-    } finally {
-      setBusyTaskId(null);
-    }
-  };
-
-  const markNotificationRead = async (notificationId: number) => {
-    try {
-      await apiClient.post(`/api/plan/notifications/${notificationId}/read`, {});
-      await fetchSnapshot(cycle);
+      const snap = await apiClient.get<PlanSnapshot>(`/api/plan/snapshot/day?date=${dateStr}`);
+      setDaySnapshot(snap);
     } catch {
-      // no-op on read failures
+      setDaySnapshot(null);
+    } finally {
+      setLoadingDay(false);
     }
-  };
+  }, [selectedDate]);
 
-  const undoAdjustment = async (adjustmentId: number) => {
+  const markNotificationRead = useCallback(async (id: number) => {
+    try {
+      await apiClient.post(`/api/plan/notifications/${id}/read`, {});
+      // Refresh the day snapshot to update notifications
+      if (selectedDate) {
+        const snap = await apiClient.get<PlanSnapshot>(`/api/plan/snapshot/day?date=${selectedDate}`);
+        setDaySnapshot(snap);
+      }
+    } catch {
+      // no-op
+    }
+  }, [selectedDate]);
+
+  const undoAdjustment = useCallback(async (id: number) => {
     setError('');
     try {
-      await apiClient.post(`/api/plan/adjustments/${adjustmentId}/undo`, {});
-      await fetchSnapshot(cycle);
+      await apiClient.post(`/api/plan/adjustments/${id}/undo`, {});
+      void fetchCalendar(currentMonth.year, currentMonth.month);
+      if (selectedDate) {
+        const snap = await apiClient.get<PlanSnapshot>(`/api/plan/snapshot/day?date=${selectedDate}`);
+        setDaySnapshot(snap);
+      }
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Failed to undo adjustment.');
     }
-  };
+  }, [currentMonth, selectedDate, fetchCalendar]);
 
-  const closeOnboarding = () => {
-    setShowOnboarding(false);
-    if (searchParams.get('onboarding') === '1') {
-      const nextParams = new URLSearchParams(searchParams);
-      nextParams.delete('onboarding');
-      setSearchParams(nextParams, { replace: true });
-    }
-  };
-
-  const toggleFrameworkSelection = (id: number) => {
-    setSelectedFrameworkIds((prev) =>
-      prev.includes(id) ? prev.filter((itemId) => itemId !== id) : [...prev, id],
-    );
-  };
-
-  const applyFrameworkSelection = async () => {
-    setApplyingFrameworks(true);
-    setError('');
-    try {
-      await apiClient.post('/api/plan/framework-selection', {
-        selected_framework_ids: selectedFrameworkIds,
-      });
-      await fetchSnapshot(cycle);
-      setOnboardingStep(2);
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : 'Failed to apply framework selection.');
-    } finally {
-      setApplyingFrameworks(false);
-    }
-  };
-
-  const loadCyclePreview = useCallback(async () => {
-    try {
-      const [daily, weekly, monthly] = await Promise.all([
-        apiClient.get<PlanSnapshot>('/api/plan/snapshot?cycle_type=daily'),
-        apiClient.get<PlanSnapshot>('/api/plan/snapshot?cycle_type=weekly'),
-        apiClient.get<PlanSnapshot>('/api/plan/snapshot?cycle_type=monthly'),
-      ]);
-      setCyclePreview({ daily, weekly, monthly });
-    } catch {
-      // keep onboarding functional even if preview fetch fails
-    }
+  const prevMonth = useCallback(() => {
+    setCurrentMonth((prev) => {
+      const m = prev.month - 1;
+      return m < 0 ? { year: prev.year - 1, month: 11 } : { year: prev.year, month: m };
+    });
+    setSelectedDate(null);
+    setDaySnapshot(null);
   }, []);
 
-  useEffect(() => {
-    if (!showOnboarding || onboardingStep !== 2) return;
-    void loadCyclePreview();
-  }, [showOnboarding, onboardingStep, loadCyclePreview]);
+  const nextMonth = useCallback(() => {
+    setCurrentMonth((prev) => {
+      const m = prev.month + 1;
+      return m > 11 ? { year: prev.year + 1, month: 0 } : { year: prev.year, month: m };
+    });
+    setSelectedDate(null);
+    setDaySnapshot(null);
+  }, []);
 
-  const unreadNotifications = useMemo(
-    () => (snapshot?.notifications || []).filter((n) => !n.is_read),
-    [snapshot?.notifications],
-  );
-  const frameworkGroups = useMemo(
-    () => frameworkEducation?.grouped || {},
-    [frameworkEducation?.grouped],
-  );
+  // Gather notifications and adjustments from the day snapshot (or empty)
+  const notifications = useMemo(() => daySnapshot?.notifications || [], [daySnapshot]);
+  const adjustments = useMemo(() => daySnapshot?.adjustments || [], [daySnapshot]);
 
-  if (loading && !snapshot) {
+  if (loadingCalendar && !calendarData) {
     return (
       <div className="flex items-center justify-center h-[calc(100vh-3.5rem)]">
         <div className="w-8 h-8 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
@@ -302,209 +517,32 @@ export default function Plan() {
   }
 
   return (
-    <div className="max-w-7xl mx-auto px-4 py-6 space-y-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-100">Plan</h1>
-          <p className="text-sm text-slate-400">
-            Foundation - Execute - Reflect - Loop
-          </p>
-        </div>
-        <div className="inline-flex rounded-lg border border-slate-700 bg-slate-800/80 p-0.5">
-          {[
-            { key: 'daily', label: 'Daily' },
-            { key: 'weekly', label: 'Weekly' },
-            { key: 'monthly', label: '30-Day' },
-          ].map((tab) => (
-            <button
-              key={tab.key}
-              type="button"
-              onClick={() => setCycle(tab.key as CycleType)}
-              className={[
-                'px-3 py-1.5 text-sm rounded-md transition-colors',
-                cycle === tab.key ? 'bg-emerald-600 text-white' : 'text-slate-300 hover:bg-slate-700/70',
-              ].join(' ')}
-            >
-              {tab.label}
-            </button>
-          ))}
+    <div className="max-w-5xl mx-auto px-4 py-6 space-y-4">
+      {/* Header with month navigation */}
+      <div className="flex items-center justify-between">
+        <h1 className="text-2xl font-bold text-slate-100">Plan</h1>
+        <div className="flex items-center gap-1">
+          <button
+            type="button"
+            onClick={prevMonth}
+            className="p-1.5 text-slate-400 hover:text-white hover:bg-slate-700 rounded-lg transition-colors"
+            aria-label="Previous month"
+          >
+            <ChevronLeft />
+          </button>
+          <span className="text-sm font-medium text-slate-100 min-w-[140px] text-center">
+            {monthLabel(currentMonth.year, currentMonth.month)}
+          </span>
+          <button
+            type="button"
+            onClick={nextMonth}
+            className="p-1.5 text-slate-400 hover:text-white hover:bg-slate-700 rounded-lg transition-colors"
+            aria-label="Next month"
+          >
+            <ChevronRight />
+          </button>
         </div>
       </div>
-
-      {showOnboarding && snapshot && frameworkEducation && (
-        <div className="rounded-xl border border-emerald-700/40 bg-emerald-950/10 p-4 space-y-4">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <h2 className="text-base font-semibold text-slate-100">Post-Intake Plan Setup</h2>
-              <p className="text-xs text-slate-400 mt-1">
-                Step {onboardingStep} of 3: choose frameworks, confirm targets, then start execution.
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={closeOnboarding}
-              className="px-2.5 py-1 text-xs rounded-md border border-slate-600 text-slate-300 hover:bg-slate-700"
-            >
-              Skip for now
-            </button>
-          </div>
-
-          {onboardingStep === 1 && (
-            <div className="space-y-3">
-              <p className="text-sm text-slate-300">
-                Select the strategies you want active now. You can change this later in Settings at any time.
-              </p>
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-                {Object.entries(frameworkEducation.framework_types).map(([frameworkType, meta]) => {
-                  const items = frameworkGroups[frameworkType] || [];
-                  return (
-                    <div key={frameworkType} className="rounded-lg border border-slate-700 bg-slate-900/40 p-3 space-y-2">
-                      <div>
-                        <p className="text-sm font-medium text-slate-100">{meta.label}</p>
-                        <p className="text-xs text-slate-400">{meta.classifier_label}</p>
-                      </div>
-                      <details className="text-xs text-slate-400">
-                        <summary className="cursor-pointer">Framework description and examples</summary>
-                        <p className="mt-1">{meta.description || 'No description available.'}</p>
-                        {!!meta.examples?.length && (
-                          <p className="mt-1">Examples: {meta.examples.join(', ')}</p>
-                        )}
-                      </details>
-                      <div className="flex flex-wrap gap-2">
-                        {items.map((item) => {
-                          const selected = selectedFrameworkIds.includes(item.id);
-                          return (
-                            <button
-                              key={item.id}
-                              type="button"
-                              onClick={() => toggleFrameworkSelection(item.id)}
-                              className={[
-                                'px-2.5 py-1 text-xs rounded-md border transition-colors',
-                                selected
-                                  ? 'border-emerald-500 bg-emerald-600/20 text-emerald-200'
-                                  : 'border-slate-600 text-slate-300 hover:bg-slate-700',
-                              ].join(' ')}
-                            >
-                              {item.name}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <p className="text-xs text-slate-400">
-                  Selected strategies: {selectedFrameworkIds.length}
-                </p>
-                <button
-                  type="button"
-                  onClick={applyFrameworkSelection}
-                  disabled={applyingFrameworks}
-                  className="px-3 py-1.5 text-xs rounded-md bg-emerald-600 hover:bg-emerald-500 text-white disabled:opacity-50"
-                >
-                  {applyingFrameworks ? 'Applying...' : 'Apply Selection'}
-                </button>
-              </div>
-            </div>
-          )}
-
-          {onboardingStep === 2 && (
-            <div className="space-y-3">
-              <p className="text-sm text-slate-300">
-                These are your plan targets. Daily, weekly, and rolling 30-day goals will auto-adjust based on progress.
-              </p>
-              <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
-                {([
-                  ['daily', 'Daily'],
-                  ['weekly', 'Weekly'],
-                  ['monthly', '30-Day'],
-                ] as Array<[CycleType, string]>).map(([key, label]) => {
-                  const preview = cyclePreview[key];
-                  const topTasks = (preview?.upcoming_tasks || []).slice(0, 3);
-                  return (
-                    <div key={key} className="rounded-lg border border-slate-700 bg-slate-900/40 p-3 space-y-2">
-                      <p className="text-sm font-medium text-slate-100">{label}</p>
-                      <p className="text-xs text-slate-400">
-                        {preview ? `${Math.round(preview.stats.completion_ratio * 100)}% completion` : 'Loading preview...'}
-                      </p>
-                      {topTasks.length === 0 ? (
-                        <p className="text-xs text-slate-500">No pending tasks in this window.</p>
-                      ) : (
-                        <ul className="text-xs text-slate-300 space-y-1">
-                          {topTasks.map((task) => (
-                            <li key={task.id}>- {task.title}</li>
-                          ))}
-                        </ul>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-              <div className="flex flex-wrap items-center justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={() => setOnboardingStep(1)}
-                  className="px-3 py-1.5 text-xs rounded-md border border-slate-600 text-slate-300 hover:bg-slate-700"
-                >
-                  Back
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setOnboardingStep(3)}
-                  className="px-3 py-1.5 text-xs rounded-md bg-emerald-600 hover:bg-emerald-500 text-white"
-                >
-                  Start Execution
-                </button>
-              </div>
-            </div>
-          )}
-
-          {onboardingStep === 3 && (
-            <div className="space-y-3">
-              <p className="text-sm text-slate-300">
-                Start with the next top goals now. Complete one, then move to the next.
-              </p>
-              <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
-                {(snapshot.upcoming_tasks || []).slice(0, 3).map((task) => (
-                  <div key={task.id} className="rounded-lg border border-slate-700 bg-slate-900/40 p-3 space-y-2">
-                    <p className="text-sm font-medium text-slate-100">{task.title}</p>
-                    {task.description && <p className="text-xs text-slate-400">{task.description}</p>}
-                    <button
-                      type="button"
-                      onClick={() => setTaskStatus(task.id, 'completed')}
-                      disabled={busyTaskId === task.id}
-                      className="px-2.5 py-1 text-xs rounded-md bg-emerald-600 hover:bg-emerald-500 text-white disabled:opacity-50"
-                    >
-                      {busyTaskId === task.id ? 'Saving...' : 'Mark Complete'}
-                    </button>
-                  </div>
-                ))}
-              </div>
-              <div className="flex flex-wrap items-center justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={closeOnboarding}
-                  className="px-3 py-1.5 text-xs rounded-md border border-slate-600 text-slate-300 hover:bg-slate-700"
-                >
-                  Stay on Plan
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    closeOnboarding();
-                    navigate('/chat');
-                  }}
-                  className="px-3 py-1.5 text-xs rounded-md bg-emerald-600 hover:bg-emerald-500 text-white"
-                >
-                  Go to Guided Chat
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
 
       {error && (
         <div className="text-sm text-rose-300 bg-rose-900/20 border border-rose-700/40 rounded-lg px-3 py-2">
@@ -512,214 +550,33 @@ export default function Plan() {
         </div>
       )}
 
-      {snapshot && (
-        <div className="grid grid-cols-1 xl:grid-cols-[1.45fr_1fr] gap-4">
-          <div className="space-y-4">
-            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-              <div className="rounded-xl border border-slate-700 bg-slate-800 p-4">
-                <p className="text-xs text-slate-400">Completion</p>
-                <p className="text-xl font-semibold text-slate-100 mt-1">{percentage(snapshot.stats.completion_ratio * 100)}</p>
-              </div>
-              <div className="rounded-xl border border-slate-700 bg-slate-800 p-4">
-                <p className="text-xs text-slate-400">Points (30d)</p>
-                <p className="text-xl font-semibold text-emerald-300 mt-1">{snapshot.reward.points_30d}</p>
-              </div>
-              <div className="rounded-xl border border-slate-700 bg-slate-800 p-4">
-                <p className="text-xs text-slate-400">Streak</p>
-                <p className="text-xl font-semibold text-slate-100 mt-1">{snapshot.reward.completed_daily_streak}d</p>
-              </div>
-              <div className="rounded-xl border border-slate-700 bg-slate-800 p-4">
-                <p className="text-xs text-slate-400">Window</p>
-                <p className="text-sm font-medium text-slate-100 mt-1">
-                  {snapshot.cycle.start}
-                  {snapshot.cycle.start !== snapshot.cycle.end ? ` -> ${snapshot.cycle.end}` : ''}
-                </p>
-              </div>
-            </div>
-
-            <div className="rounded-xl border border-slate-700 bg-slate-800 p-4 space-y-3">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <h2 className="text-sm font-semibold text-slate-100">Execution Tasks</h2>
-                <span className="text-xs text-slate-400">
-                  {snapshot.stats.completed} completed | {snapshot.stats.pending} pending | {snapshot.stats.missed} missed
-                </span>
-              </div>
-              <div className="space-y-2 max-h-[420px] overflow-y-auto pr-1">
-                {snapshot.tasks.length === 0 ? (
-                  <p className="text-sm text-slate-400">No tasks for this cycle yet.</p>
-                ) : (
-                  snapshot.tasks.map((task) => (
-                    <div key={task.id} className="rounded-lg border border-slate-700 bg-slate-900/40 p-3">
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="min-w-0">
-                          <p className="text-sm font-medium text-slate-100">{task.title}</p>
-                          {task.description && <p className="text-xs text-slate-400 mt-0.5">{task.description}</p>}
-                        </div>
-                        <span className={`text-[10px] px-2 py-0.5 rounded-full border ${statusPill(task)}`}>{task.status}</span>
-                      </div>
-                      <div className="mt-2">
-                        <div className="flex justify-between text-[11px] text-slate-400 mb-1">
-                          <span>{Math.round(task.progress_pct)}%</span>
-                          <span>
-                            {task.target_value != null ? `${task.target_value}${task.target_unit ? ` ${task.target_unit}` : ''}` : ''}
-                          </span>
-                        </div>
-                        <div className="h-2 rounded-full bg-slate-700 overflow-hidden">
-                          <div
-                            className={`h-full ${task.status === 'completed' ? 'bg-emerald-500' : task.status === 'missed' ? 'bg-rose-500' : 'bg-sky-500'} transition-all duration-300`}
-                            style={{ width: `${Math.min(task.progress_pct, 100)}%` }}
-                          />
-                        </div>
-                      </div>
-                      <div className="mt-2 flex flex-wrap items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() => setTaskStatus(task.id, task.status === 'completed' ? 'pending' : 'completed')}
-                          disabled={busyTaskId === task.id}
-                          className="px-2.5 py-1 text-xs rounded-md bg-emerald-600 hover:bg-emerald-500 text-white disabled:opacity-50"
-                        >
-                          {task.status === 'completed' ? 'Mark Pending' : 'Mark Complete'}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setTaskStatus(task.id, 'skipped')}
-                          disabled={busyTaskId === task.id}
-                          className="px-2.5 py-1 text-xs rounded-md border border-slate-600 text-slate-200 hover:bg-slate-700 disabled:opacity-50"
-                        >
-                          Skip
-                        </button>
-                        {task.framework_name && (
-                          <span className="text-[11px] text-cyan-300">{task.framework_name}</span>
-                        )}
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
-            </div>
-          </div>
-
-          <div className="space-y-4">
-            <div className="rounded-xl border border-slate-700 bg-slate-800 p-4 space-y-3">
-              <h2 className="text-sm font-semibold text-slate-100">Display Preferences</h2>
-              <div className="space-y-2">
-                <label className="text-xs text-slate-400 block">Task visibility</label>
-                <div className="inline-flex rounded-lg border border-slate-600 bg-slate-900/40 p-0.5">
-                  <button
-                    type="button"
-                    onClick={() => setVisibilityMode('top3')}
-                    className={`px-2.5 py-1 text-xs rounded-md ${visibilityMode === 'top3' ? 'bg-emerald-600 text-white' : 'text-slate-300 hover:bg-slate-700'}`}
-                  >
-                    Top 3
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setVisibilityMode('all')}
-                    className={`px-2.5 py-1 text-xs rounded-md ${visibilityMode === 'all' ? 'bg-emerald-600 text-white' : 'text-slate-300 hover:bg-slate-700'}`}
-                  >
-                    All
-                  </button>
-                </div>
-              </div>
-              <div className="space-y-1">
-                <label className="text-xs text-slate-400 block">Visible task limit</label>
-                <input
-                  type="number"
-                  min={1}
-                  max={10}
-                  value={maxVisible}
-                  onChange={(e) => setMaxVisible(Math.max(1, Math.min(10, Number(e.target.value || 3))))}
-                  className="w-24 bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm text-slate-100 focus:outline-none focus:border-emerald-500"
-                />
-              </div>
-              <div className="space-y-1">
-                <label className="text-xs text-slate-400 block">Your reminder &quot;why&quot;</label>
-                <textarea
-                  rows={2}
-                  value={why}
-                  onChange={(e) => setWhy(e.target.value)}
-                  placeholder="e.g. I want stable blood pressure and more energy for my family."
-                  className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-emerald-500"
-                />
-              </div>
-              <button
-                type="button"
-                onClick={updatePreference}
-                disabled={saving}
-                className="px-3 py-1.5 text-xs rounded-md bg-emerald-600 hover:bg-emerald-500 text-white disabled:opacity-50"
-              >
-                {saving ? 'Saving...' : 'Save Preferences'}
-              </button>
-            </div>
-
-            <div className="rounded-xl border border-slate-700 bg-slate-800 p-4 space-y-2">
-              <h2 className="text-sm font-semibold text-slate-100">Unread Prompts</h2>
-              {unreadNotifications.length === 0 ? (
-                <p className="text-xs text-slate-400">No missed-goal prompts right now.</p>
-              ) : (
-                <div className="space-y-2">
-                  {unreadNotifications.slice(0, 5).map((n) => (
-                    <button
-                      key={n.id}
-                      type="button"
-                      onClick={() => markNotificationRead(n.id)}
-                      className="w-full text-left rounded-md border border-slate-700 bg-slate-900/40 px-2.5 py-2 hover:border-slate-500"
-                    >
-                      <p className="text-xs font-medium text-slate-100">{n.title}</p>
-                      <p className="text-[11px] text-slate-400 mt-1">{n.message}</p>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            <div className="rounded-xl border border-slate-700 bg-slate-800 p-4 space-y-2">
-              <h2 className="text-sm font-semibold text-slate-100">Auto Adjustments</h2>
-              {snapshot.adjustments.length === 0 ? (
-                <p className="text-xs text-slate-400">No adjustments yet.</p>
-              ) : (
-                <div className="space-y-2 max-h-[200px] overflow-y-auto pr-1">
-                  {snapshot.adjustments.map((adj) => (
-                    <div key={adj.id} className="rounded-md border border-slate-700 bg-slate-900/40 px-2.5 py-2">
-                      <p className="text-xs font-medium text-slate-100">{adj.title}</p>
-                      <p className="text-[11px] text-slate-400 mt-0.5">{adj.rationale}</p>
-                      <p className="text-[10px] text-slate-500 mt-1">
-                        {adj.applied_at ? new Date(adj.applied_at).toLocaleString() : ''}
-                      </p>
-                      {adj.undo_available && (
-                        <button
-                          type="button"
-                          onClick={() => undoAdjustment(adj.id)}
-                          className="mt-2 px-2 py-1 text-[11px] rounded border border-slate-600 text-slate-200 hover:bg-slate-700"
-                        >
-                          Undo
-                        </button>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
+      {/* Main layout: calendar + sidebar */}
+      <div className="grid grid-cols-1 lg:grid-cols-[1fr_280px] gap-4">
+        <div className="space-y-4">
+          {calendarData && (
+            <CalendarGrid
+              data={calendarData}
+              currentMonth={currentMonth}
+              selectedDate={selectedDate}
+              onSelectDate={selectDate}
+            />
+          )}
+          {selectedDate && (
+            <DayDetail
+              snapshot={daySnapshot}
+              dateStr={selectedDate}
+              loading={loadingDay}
+            />
+          )}
         </div>
-      )}
 
-      {frameworkEducation && (
-        <div className="rounded-xl border border-slate-700 bg-slate-800 p-4">
-          <h2 className="text-sm font-semibold text-slate-100 mb-2">Framework Education</h2>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-            {Object.entries(frameworkEducation.framework_types).map(([key, value]) => (
-              <details key={key} className="rounded-md border border-slate-700 bg-slate-900/35 px-3 py-2">
-                <summary className="text-sm text-slate-100 cursor-pointer">{value.label}</summary>
-                <p className="text-xs text-slate-400 mt-2">{value.description || ''}</p>
-                {!!value.examples?.length && (
-                  <p className="text-[11px] text-slate-500 mt-1">Examples: {value.examples.join(', ')}</p>
-                )}
-              </details>
-            ))}
-          </div>
+        {/* Sidebar */}
+        <div className="space-y-4">
+          <NotificationsPanel notifications={notifications} onMarkRead={markNotificationRead} />
+          <AdjustmentsPanel adjustments={adjustments} onUndo={undoAdjustment} />
+          {frameworkEducation && <FrameworkPanel education={frameworkEducation} />}
         </div>
-      )}
+      </div>
     </div>
   );
 }

@@ -4,6 +4,8 @@ import { apiClient } from '../api/client';
 import { useAuthStore } from '../stores/authStore';
 import GoalChatPanel from '../components/GoalChatPanel';
 
+/* ─── Types ─── */
+
 interface UserGoal {
   id: number;
   title: string;
@@ -47,6 +49,7 @@ interface PlanSnapshot {
   stats: PlanStats;
   reward: { completed_daily_streak: number };
   tasks: PlanTask[];
+  upcoming_tasks?: PlanTask[];
 }
 
 interface RollingSnapshot {
@@ -58,25 +61,63 @@ interface RollingSnapshot {
   monthly: { stats: PlanStats };
 }
 
+interface FrameworkItem {
+  id: number;
+  framework_type: string;
+  framework_type_label: string;
+  classifier_label: string;
+  name: string;
+  priority_score: number;
+  is_active: boolean;
+  source: string;
+  rationale?: string | null;
+}
+
+interface FrameworkEducation {
+  framework_types: Record<
+    string,
+    {
+      label: string;
+      classifier_label: string;
+      description?: string;
+      examples?: string[];
+    }
+  >;
+  grouped: Record<string, FrameworkItem[]>;
+}
+
 type ViewMode = 'today' | 'next5';
+type CycleType = 'daily' | 'weekly' | 'monthly';
+
+/* ─── Constants ─── */
 
 const TIME_BLOCKS = [
-  { key: 'morning', label: 'Morning', badge: 'AM' },
-  { key: 'afternoon', label: 'Afternoon', badge: 'PM' },
-  { key: 'evening', label: 'Evening', badge: 'PM' },
-  { key: 'anytime', label: 'Anytime', badge: 'All' },
+  { key: 'morning', label: 'Morning' },
+  { key: 'afternoon', label: 'Afternoon' },
+  { key: 'evening', label: 'Evening' },
+  { key: 'anytime', label: 'Anytime' },
 ];
 
-const GOAL_TYPE_COLORS: Record<string, string> = {
-  weight_loss: 'text-orange-400',
-  cardiovascular: 'text-rose-400',
-  fitness: 'text-blue-400',
-  metabolic: 'text-purple-400',
-  energy: 'text-yellow-400',
-  sleep: 'text-indigo-400',
-  habit: 'text-teal-400',
-  custom: 'text-emerald-400',
+const GOAL_TYPE_STYLES: Record<string, {
+  text: string;
+  ring: string;
+  gradientFrom: string;
+  gradientTo: string;
+  border: string;
+}> = {
+  weight_loss:    { text: 'text-orange-400',  ring: '#fb923c', gradientFrom: 'from-orange-950/40',  gradientTo: 'to-slate-800', border: 'border-orange-800/30' },
+  cardiovascular: { text: 'text-rose-400',    ring: '#fb7185', gradientFrom: 'from-rose-950/40',    gradientTo: 'to-slate-800', border: 'border-rose-800/30' },
+  fitness:        { text: 'text-blue-400',    ring: '#60a5fa', gradientFrom: 'from-blue-950/40',    gradientTo: 'to-slate-800', border: 'border-blue-800/30' },
+  metabolic:      { text: 'text-purple-400',  ring: '#c084fc', gradientFrom: 'from-purple-950/40',  gradientTo: 'to-slate-800', border: 'border-purple-800/30' },
+  energy:         { text: 'text-yellow-400',  ring: '#facc15', gradientFrom: 'from-yellow-950/40',  gradientTo: 'to-slate-800', border: 'border-yellow-800/30' },
+  sleep:          { text: 'text-indigo-400',  ring: '#818cf8', gradientFrom: 'from-indigo-950/40',  gradientTo: 'to-slate-800', border: 'border-indigo-800/30' },
+  habit:          { text: 'text-teal-400',    ring: '#2dd4bf', gradientFrom: 'from-teal-950/40',    gradientTo: 'to-slate-800', border: 'border-teal-800/30' },
+  custom:         { text: 'text-emerald-400', ring: '#34d399', gradientFrom: 'from-emerald-950/40', gradientTo: 'to-slate-800', border: 'border-emerald-800/30' },
 };
+const DEFAULT_STYLE = GOAL_TYPE_STYLES.custom;
+const RING_CIRCUMFERENCE = 2 * Math.PI * 16; // ~100.53
+
+/* ─── Helpers ─── */
 
 function greetingFor(name: string): string {
   const hour = new Date().getHours();
@@ -134,27 +175,80 @@ function completionPct(stats: PlanStats | undefined): number {
   return Math.round((stats.completed / stats.total) * 100);
 }
 
+/* ─── SVG Components ─── */
+
+function ProgressRing({ pct, color, size = 36 }: { pct: number; color: string; size?: number }) {
+  const scale = size / 40;
+  return (
+    <svg width={size} height={size} viewBox="0 0 40 40" className="shrink-0">
+      <circle cx="20" cy="20" r="16" fill="none" stroke="rgba(51,65,85,0.6)" strokeWidth="3.5" />
+      <circle
+        cx="20" cy="20" r="16" fill="none"
+        stroke={color}
+        strokeWidth="3.5"
+        strokeLinecap="round"
+        strokeDasharray={`${(Math.min(100, pct) / 100) * RING_CIRCUMFERENCE} ${RING_CIRCUMFERENCE}`}
+        transform="rotate(-90 20 20)"
+        className="transition-all duration-700"
+      />
+      <text
+        x="20" y="24"
+        textAnchor="middle"
+        fontSize={scale < 0.8 ? '10' : '9'}
+        fill="white"
+        fontWeight="600"
+      >
+        {Math.round(pct)}%
+      </text>
+    </svg>
+  );
+}
+
+function StatusIcon({ status }: { status: string }) {
+  if (status === 'completed') {
+    return (
+      <svg width="18" height="18" viewBox="0 0 20 20" className="text-emerald-400 shrink-0">
+        <circle cx="10" cy="10" r="9" fill="none" stroke="currentColor" strokeWidth="1.5" />
+        <path d="M6 10.5l2.5 2.5 5.5-5.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    );
+  }
+  if (status === 'missed') {
+    return (
+      <svg width="18" height="18" viewBox="0 0 20 20" className="text-rose-400/60 shrink-0">
+        <circle cx="10" cy="10" r="9" fill="none" stroke="currentColor" strokeWidth="1.5" />
+        <path d="M7 7l6 6M13 7l-6 6" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+      </svg>
+    );
+  }
+  return (
+    <svg width="18" height="18" viewBox="0 0 20 20" className="text-slate-500 shrink-0">
+      <circle cx="10" cy="10" r="9" fill="none" stroke="currentColor" strokeWidth="1.5" />
+    </svg>
+  );
+}
+
+/* ─── Sub-components ─── */
+
 function GoalCard({ goal }: { goal: UserGoal }) {
   const pct = goal.progress_pct ?? 0;
-  const color = GOAL_TYPE_COLORS[goal.goal_type] || 'text-emerald-400';
+  const style = GOAL_TYPE_STYLES[goal.goal_type] || DEFAULT_STYLE;
 
   return (
-    <div className="flex-shrink-0 w-44 bg-slate-800 border border-slate-700 rounded-xl p-3 space-y-2">
-      <p className={`text-xs font-semibold uppercase tracking-wide ${color}`}>{goal.goal_type.replace('_', ' ')}</p>
+    <div className={`flex-shrink-0 w-48 snap-center bg-gradient-to-br ${style.gradientFrom} ${style.gradientTo} border ${style.border} rounded-xl p-4 space-y-3 transition-all duration-300 hover:scale-[1.02] hover:shadow-lg hover:shadow-slate-950/50`}>
+      <div className="flex items-start justify-between gap-2">
+        <p className={`text-[10px] font-semibold uppercase tracking-widest ${style.text}`}>
+          {goal.goal_type.replace('_', ' ')}
+        </p>
+        <ProgressRing pct={pct} color={style.ring} />
+      </div>
       <p className="text-sm font-medium text-slate-100 leading-snug line-clamp-2">{goal.title}</p>
       {goal.target_value != null && goal.target_unit && (
         <p className="text-xs text-slate-400">
-          {goal.current_value != null ? `${goal.current_value}` : '?'} to {goal.target_value} {goal.target_unit}
+          {goal.current_value != null ? `${goal.current_value}` : '?'} / {goal.target_value} {goal.target_unit}
         </p>
       )}
-      <div className="h-1.5 bg-slate-700 rounded-full overflow-hidden">
-        <div
-          className="h-full bg-emerald-500 rounded-full transition-all duration-500"
-          style={{ width: `${Math.min(100, pct)}%` }}
-        />
-      </div>
-      <p className="text-xs text-slate-500">{Math.round(pct)}% to goal</p>
-      {goal.target_date && <p className="text-xs text-slate-500">by {goal.target_date}</p>}
+      {goal.target_date && <p className="text-[11px] text-slate-500">by {goal.target_date}</p>}
     </div>
   );
 }
@@ -171,13 +265,11 @@ function TaskRow({
 
   return (
     <div
-      className={`flex items-center gap-3 py-2.5 px-3 rounded-lg transition-colors ${
-        isDone ? 'opacity-60' : isMissed ? 'opacity-40' : 'hover:bg-slate-700/50'
+      className={`flex items-center gap-3 py-2.5 px-3 transition-colors ${
+        isDone ? 'opacity-60' : isMissed ? 'opacity-40' : 'hover:bg-slate-700/30'
       }`}
     >
-      <span className="text-[11px] select-none flex-shrink-0 w-7 text-center text-slate-400">
-        {isDone ? '[x]' : isMissed ? '[-]' : '[ ]'}
-      </span>
+      <StatusIcon status={task.status} />
 
       <div className="flex-1 min-w-0">
         <p className={`text-sm text-slate-200 ${isDone ? 'line-through text-slate-500' : ''}`}>{task.title}</p>
@@ -185,7 +277,7 @@ function TaskRow({
         {task.status === 'pending' && task.progress_pct > 0 && (
           <div className="mt-1 h-0.5 bg-slate-700 rounded-full w-24">
             <div
-              className="h-full bg-emerald-500/70 rounded-full"
+              className="h-full bg-emerald-500/70 rounded-full transition-all duration-500"
               style={{ width: `${Math.min(100, task.progress_pct)}%` }}
             />
           </div>
@@ -195,7 +287,7 @@ function TaskRow({
       {!isDone && (
         <button
           onClick={() => onChat(task)}
-          className="flex-shrink-0 px-2 py-1 text-xs text-slate-400 hover:text-emerald-400 hover:bg-slate-700 rounded-md transition-colors"
+          className="flex-shrink-0 px-2.5 py-1 text-xs text-slate-400 hover:text-emerald-400 hover:bg-slate-700/50 rounded-lg transition-colors"
           title="Check in with coach"
         >
           Chat
@@ -210,30 +302,24 @@ function TimeBlock({
   tasks,
   onChat,
 }: {
-  block: { key: string; label: string; badge: string };
+  block: { key: string; label: string };
   tasks: PlanTask[];
   onChat: (task: PlanTask) => void;
 }) {
   if (tasks.length === 0) return null;
   const done = tasks.filter((t) => t.status === 'completed').length;
+  const allDone = done === tasks.length;
 
   return (
-    <div className="space-y-1">
-      <div className="flex items-center gap-2 px-1">
-        <span className="inline-flex items-center justify-center rounded-md bg-slate-800 border border-slate-700 text-[10px] text-slate-400 px-1.5 py-0.5">
-          {block.badge}
-        </span>
+    <div className="space-y-1.5">
+      <div className="flex items-center gap-2.5 px-1">
+        <span className={`w-1.5 h-1.5 rounded-full transition-colors ${allDone ? 'bg-emerald-400' : 'bg-slate-500'}`} />
         <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400">{block.label}</h3>
-        <span className="text-xs text-slate-600 ml-auto">
-          {done}/{tasks.length}
-        </span>
+        <span className="text-xs text-slate-600 ml-auto">{done}/{tasks.length}</span>
       </div>
-      <div className="bg-slate-800/50 rounded-xl border border-slate-700/50 overflow-hidden">
-        {tasks.map((task, idx) => (
-          <div key={task.id}>
-            {idx > 0 && <div className="border-t border-slate-700/30 mx-3" />}
-            <TaskRow task={task} onChat={onChat} />
-          </div>
+      <div className="bg-slate-800/40 rounded-xl border border-slate-700/40 overflow-hidden divide-y divide-slate-700/30">
+        {tasks.map((task) => (
+          <TaskRow key={task.id} task={task} onChat={onChat} />
         ))}
       </div>
     </div>
@@ -259,7 +345,7 @@ function DayPlanCard({
   }
 
   return (
-    <div className="bg-slate-900/60 border border-slate-700 rounded-xl p-3 space-y-3">
+    <div className="bg-slate-800/30 border border-slate-700/40 rounded-xl p-3 space-y-3">
       <div className="flex items-center justify-between">
         <p className="text-sm font-medium text-slate-100">{dateLabel}</p>
         <p className="text-xs text-slate-400">
@@ -275,10 +361,12 @@ function DayPlanCard({
   );
 }
 
+/* ─── Main Component ─── */
+
 export default function Goals() {
   const user = useAuthStore((state) => state.user);
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const isOnboarding = searchParams.get('onboarding') === '1';
 
   const [goals, setGoals] = useState<UserGoal[]>([]);
@@ -290,6 +378,18 @@ export default function Goals() {
   const [chatOpen, setChatOpen] = useState(false);
   const [chatTask, setChatTask] = useState<PlanTask | null>(null);
   const [chatInitialMessage, setChatInitialMessage] = useState('');
+
+  // Onboarding wizard state
+  const [frameworkEducation, setFrameworkEducation] = useState<FrameworkEducation | null>(null);
+  const [showOnboarding, setShowOnboarding] = useState(false);
+  const [onboardingStep, setOnboardingStep] = useState(1);
+  const [selectedFrameworkIds, setSelectedFrameworkIds] = useState<number[]>([]);
+  const [applyingFrameworks, setApplyingFrameworks] = useState(false);
+  const [cyclePreview, setCyclePreview] = useState<Record<CycleType, PlanSnapshot | null>>({
+    daily: null,
+    weekly: null,
+    monthly: null,
+  });
 
   const fetchGoals = useCallback(async () => {
     try {
@@ -304,8 +404,18 @@ export default function Goals() {
 
   const fetchPlan = useCallback(async () => {
     try {
-      const data = await apiClient.get<RollingSnapshot>('/api/plan/snapshot/rolling?days=5');
-      setRolling(data);
+      const [planData, fwData] = await Promise.all([
+        apiClient.get<RollingSnapshot>('/api/plan/snapshot/rolling?days=5'),
+        apiClient.get<FrameworkEducation>('/api/plan/framework-education'),
+      ]);
+      setRolling(planData);
+      setFrameworkEducation(fwData);
+
+      const activeIds = Object.values(fwData.grouped || {})
+        .flat()
+        .filter((item) => item.is_active)
+        .map((item) => item.id);
+      setSelectedFrameworkIds((prev) => (prev.length > 0 ? prev : activeIds));
     } catch {
       setRolling(null);
     } finally {
@@ -317,6 +427,66 @@ export default function Goals() {
     fetchGoals();
     fetchPlan();
   }, [fetchGoals, fetchPlan]);
+
+  // Onboarding trigger
+  useEffect(() => {
+    if (!frameworkEducation) return;
+    const activeCount = Object.values(frameworkEducation.grouped || {})
+      .flat()
+      .filter((item) => item.is_active).length;
+    const shouldShow = isOnboarding || activeCount === 0;
+    setShowOnboarding(shouldShow);
+    if (shouldShow) setOnboardingStep(1);
+  }, [frameworkEducation, isOnboarding]);
+
+  // Load cycle previews for onboarding step 2
+  const loadCyclePreview = useCallback(async () => {
+    try {
+      const [daily, weekly, monthly] = await Promise.all([
+        apiClient.get<PlanSnapshot>('/api/plan/snapshot?cycle_type=daily'),
+        apiClient.get<PlanSnapshot>('/api/plan/snapshot?cycle_type=weekly'),
+        apiClient.get<PlanSnapshot>('/api/plan/snapshot?cycle_type=monthly'),
+      ]);
+      setCyclePreview({ daily, weekly, monthly });
+    } catch {
+      // keep onboarding functional
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!showOnboarding || onboardingStep !== 2) return;
+    void loadCyclePreview();
+  }, [showOnboarding, onboardingStep, loadCyclePreview]);
+
+  const closeOnboarding = useCallback(() => {
+    setShowOnboarding(false);
+    if (searchParams.get('onboarding') === '1') {
+      const nextParams = new URLSearchParams(searchParams);
+      nextParams.delete('onboarding');
+      setSearchParams(nextParams, { replace: true });
+    }
+  }, [searchParams, setSearchParams]);
+
+  const toggleFrameworkSelection = useCallback((id: number) => {
+    setSelectedFrameworkIds((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
+    );
+  }, []);
+
+  const applyFrameworkSelection = useCallback(async () => {
+    setApplyingFrameworks(true);
+    try {
+      await apiClient.post('/api/plan/framework-selection', {
+        selected_framework_ids: selectedFrameworkIds,
+      });
+      await fetchPlan();
+      setOnboardingStep(2);
+    } catch {
+      // handled
+    } finally {
+      setApplyingFrameworks(false);
+    }
+  }, [selectedFrameworkIds, fetchPlan]);
 
   const todaySnapshot = rolling?.days?.[0] ?? null;
 
@@ -366,6 +536,11 @@ export default function Goals() {
   const hasTodayTasks = ((todaySnapshot?.tasks ?? []).filter((t) => t.status !== 'skipped').length) > 0;
   const isLoading = loadingGoals || loadingPlan;
 
+  const frameworkGroups = useMemo(
+    () => frameworkEducation?.grouped || {},
+    [frameworkEducation?.grouped],
+  );
+
   const launchGoalSettingChat = useCallback(() => {
     const prompt = buildGoalKickoffPrompt({
       goals,
@@ -385,28 +560,182 @@ export default function Goals() {
   return (
     <div className="min-h-screen bg-slate-900">
       <div className="max-w-3xl mx-auto px-4 py-6 space-y-6">
-        <div className="space-y-1">
-          <h1 className="text-xl font-semibold text-slate-100">{greetingFor(displayName)}</h1>
-          <div className="flex items-center gap-3 text-sm text-slate-400 flex-wrap">
+        {/* ── Header ── */}
+        <div className="space-y-2">
+          <h1 className="text-2xl font-bold text-slate-100">{greetingFor(displayName)}</h1>
+          <div className="flex items-center gap-2.5 text-sm text-slate-400 flex-wrap">
             <span>{today}</span>
             {stats && (
-              <>
-                <span>|</span>
-                <span>{stats.completed}/{stats.total} tasks</span>
-              </>
+              <span className="bg-slate-800 border border-slate-700 rounded-full px-2.5 py-0.5 text-xs">
+                {stats.completed}/{stats.total} tasks
+              </span>
             )}
             {streak > 0 && (
-              <>
-                <span>|</span>
-                <span className="text-emerald-400">{streak}-day streak</span>
-              </>
+              <span className="bg-emerald-900/40 border border-emerald-700/40 text-emerald-300 rounded-full px-2.5 py-0.5 text-xs font-medium">
+                {streak}-day streak
+              </span>
             )}
           </div>
         </div>
 
+        {/* ── Onboarding Wizard ── */}
+        {showOnboarding && frameworkEducation && (
+          <div className="rounded-xl border border-emerald-700/40 bg-emerald-950/10 p-4 space-y-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <h2 className="text-base font-semibold text-slate-100">Set Up Your Plan</h2>
+                <p className="text-xs text-slate-400 mt-1">
+                  Step {onboardingStep} of 3: choose frameworks, confirm targets, then start.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={closeOnboarding}
+                className="px-2.5 py-1 text-xs rounded-md border border-slate-600 text-slate-300 hover:bg-slate-700 transition-colors"
+              >
+                Skip for now
+              </button>
+            </div>
+
+            {onboardingStep === 1 && (
+              <div className="space-y-3">
+                <p className="text-sm text-slate-300">
+                  Select the strategies you want active. You can change this later in Settings.
+                </p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {Object.entries(frameworkEducation.framework_types).map(([frameworkType, meta]) => {
+                    const items = frameworkGroups[frameworkType] || [];
+                    return (
+                      <div key={frameworkType} className="rounded-lg border border-slate-700 bg-slate-900/40 p-3 space-y-2">
+                        <div>
+                          <p className="text-sm font-medium text-slate-100">{meta.label}</p>
+                          <p className="text-xs text-slate-400">{meta.classifier_label}</p>
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          {items.map((item) => {
+                            const selected = selectedFrameworkIds.includes(item.id);
+                            return (
+                              <button
+                                key={item.id}
+                                type="button"
+                                onClick={() => toggleFrameworkSelection(item.id)}
+                                className={`px-2.5 py-1 text-xs rounded-md border transition-colors ${
+                                  selected
+                                    ? 'border-emerald-500 bg-emerald-600/20 text-emerald-200'
+                                    : 'border-slate-600 text-slate-300 hover:bg-slate-700'
+                                }`}
+                              >
+                                {item.name}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <p className="text-xs text-slate-400">
+                    Selected: {selectedFrameworkIds.length}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={applyFrameworkSelection}
+                    disabled={applyingFrameworks}
+                    className="px-3 py-1.5 text-xs rounded-md bg-emerald-600 hover:bg-emerald-500 text-white disabled:opacity-50 transition-colors"
+                  >
+                    {applyingFrameworks ? 'Applying...' : 'Apply Selection'}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {onboardingStep === 2 && (
+              <div className="space-y-3">
+                <p className="text-sm text-slate-300">
+                  Your plan targets. Daily, weekly, and 30-day goals auto-adjust based on progress.
+                </p>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  {([
+                    ['daily', 'Daily'],
+                    ['weekly', 'Weekly'],
+                    ['monthly', '30-Day'],
+                  ] as Array<[CycleType, string]>).map(([key, label]) => {
+                    const preview = cyclePreview[key];
+                    const topTasks = (preview?.upcoming_tasks || []).slice(0, 3);
+                    return (
+                      <div key={key} className="rounded-lg border border-slate-700 bg-slate-900/40 p-3 space-y-2">
+                        <p className="text-sm font-medium text-slate-100">{label}</p>
+                        <p className="text-xs text-slate-400">
+                          {preview ? `${Math.round((preview.stats as PlanStats & { completion_ratio?: number }).completion_ratio
+                            ? ((preview.stats as PlanStats & { completion_ratio?: number }).completion_ratio ?? 0) * 100
+                            : preview.stats.total ? (preview.stats.completed / preview.stats.total) * 100 : 0)}% completion` : 'Loading...'}
+                        </p>
+                        {topTasks.length === 0 ? (
+                          <p className="text-xs text-slate-500">No pending tasks.</p>
+                        ) : (
+                          <ul className="text-xs text-slate-300 space-y-1">
+                            {topTasks.map((task) => (
+                              <li key={task.id}>- {task.title}</li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="flex flex-wrap items-center justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setOnboardingStep(1)}
+                    className="px-3 py-1.5 text-xs rounded-md border border-slate-600 text-slate-300 hover:bg-slate-700 transition-colors"
+                  >
+                    Back
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setOnboardingStep(3)}
+                    className="px-3 py-1.5 text-xs rounded-md bg-emerald-600 hover:bg-emerald-500 text-white transition-colors"
+                  >
+                    Looks Good
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {onboardingStep === 3 && (
+              <div className="space-y-3">
+                <p className="text-sm text-slate-300">
+                  You're all set. Start with today's top tasks or jump into coaching.
+                </p>
+                <div className="flex flex-wrap items-center justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={closeOnboarding}
+                    className="px-3 py-1.5 text-xs rounded-md border border-slate-600 text-slate-300 hover:bg-slate-700 transition-colors"
+                  >
+                    Review goals below
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      closeOnboarding();
+                      navigate('/chat');
+                    }}
+                    className="px-3 py-1.5 text-xs rounded-md bg-emerald-600 hover:bg-emerald-500 text-white transition-colors"
+                  >
+                    Start coaching
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ── Goal Cards ── */}
         {!loadingGoals && (
           goals.length > 0 ? (
-            <div className="space-y-2">
+            <div className="space-y-2.5">
               <div className="flex items-center justify-between gap-2">
                 <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-500">Your Goals</h2>
                 <button
@@ -416,14 +745,14 @@ export default function Goals() {
                   Refine with coach
                 </button>
               </div>
-              <div className="flex gap-3 overflow-x-auto pb-1 -mx-1 px-1 scrollbar-hide">
+              <div className="flex gap-3 overflow-x-auto pb-2 -mx-1 px-1 snap-x snap-mandatory scrollbar-hide">
                 {goals.map((goal) => (
                   <GoalCard key={goal.id} goal={goal} />
                 ))}
               </div>
             </div>
           ) : (
-            <div className="bg-slate-800/60 border border-slate-700 rounded-xl p-5 text-center space-y-3">
+            <div className="bg-gradient-to-br from-slate-800/80 to-slate-800/40 border border-slate-700/60 rounded-xl p-6 text-center space-y-3">
               {isOnboarding ? (
                 <>
                   <p className="text-slate-200 font-medium">Let's set your goals</p>
@@ -450,19 +779,25 @@ export default function Goals() {
           )
         )}
 
+        {/* ── Weekly / Monthly Context ── */}
         {!loadingPlan && rolling && (
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-            <div className="bg-slate-800/50 border border-slate-700 rounded-lg px-3 py-2">
-              <p className="text-[11px] uppercase tracking-wide text-slate-500">Weekly context</p>
-              <p className="text-sm text-slate-100 mt-0.5">{weeklyPct}% complete</p>
-            </div>
-            <div className="bg-slate-800/50 border border-slate-700 rounded-lg px-3 py-2">
-              <p className="text-[11px] uppercase tracking-wide text-slate-500">Rolling 30-day context</p>
-              <p className="text-sm text-slate-100 mt-0.5">{monthlyPct}% complete</p>
-            </div>
+          <div className="grid grid-cols-2 gap-3">
+            {[
+              { label: 'Weekly', pct: weeklyPct },
+              { label: 'Rolling 30-day', pct: monthlyPct },
+            ].map(({ label, pct }) => (
+              <div key={label} className="bg-slate-800/40 border border-slate-700/40 rounded-xl px-4 py-3 flex items-center gap-3">
+                <ProgressRing pct={pct} color="rgb(52,211,153)" size={36} />
+                <div className="min-w-0">
+                  <p className="text-[11px] uppercase tracking-wide text-slate-500">{label}</p>
+                  <p className="text-sm font-medium text-slate-100">{pct}% complete</p>
+                </div>
+              </div>
+            ))}
           </div>
         )}
 
+        {/* ── Plan Timeline ── */}
         <div className="space-y-3">
           <div className="flex items-center justify-between gap-3">
             <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-500">Plan timeline</h2>
@@ -486,10 +821,16 @@ export default function Goals() {
             </div>
           </div>
 
-          {isLoading && <div className="text-center py-8 text-slate-500 text-sm">Loading your plan...</div>}
+          {isLoading && (
+            <div className="space-y-3">
+              {[1, 2, 3].map((i) => (
+                <div key={i} className="h-16 bg-slate-800/40 rounded-xl animate-pulse" />
+              ))}
+            </div>
+          )}
 
           {!isLoading && viewMode === 'today' && !hasTodayTasks && (
-            <div className="bg-slate-800/60 border border-slate-700 rounded-xl p-5 text-center space-y-3">
+            <div className="bg-slate-800/40 border border-slate-700/40 rounded-xl p-6 text-center space-y-3">
               <p className="text-slate-400 text-sm">No tasks for today yet.</p>
               <button
                 onClick={() => navigate('/chat')}
@@ -517,6 +858,7 @@ export default function Goals() {
           )}
         </div>
 
+        {/* ── Footer Links ── */}
         <div className="flex flex-wrap gap-2 pt-2">
           <button
             onClick={() => navigate('/chat')}
@@ -528,7 +870,7 @@ export default function Goals() {
             onClick={() => navigate('/plan')}
             className="px-3 py-1.5 text-xs text-slate-400 border border-slate-700 rounded-lg hover:bg-slate-800 hover:text-slate-200 transition-colors"
           >
-            Full plan
+            Plan calendar
           </button>
         </div>
       </div>
