@@ -28,7 +28,7 @@ from utils.med_utils import parse_structured_list
 
 CYCLE_TYPES = {"daily", "weekly", "monthly"}
 VISIBILITY_MODES = {"top3", "all"}
-ADJUSTABLE_METRICS = {"meals_logged", "hydration_ml", "exercise_minutes", "sleep_minutes"}
+ADJUSTABLE_METRICS = {"meals_logged", "hydration_ml", "exercise_minutes"}
 
 _TIME_OF_DAY: dict[str, str] = {
     "medication": "morning",
@@ -768,8 +768,13 @@ def _collect_metric_values(db: Session, user: User, window: CycleWindow) -> dict
     completed_med = sum(1 for item in checklist if item.item_type == "medication" and bool(item.completed))
     completed_supp = sum(1 for item in checklist if item.item_type == "supplement" and bool(item.completed))
 
-    sleep_values = [float(s.duration_minutes) for s in sleep if s.duration_minutes is not None]
-    sleep_avg = (sum(sleep_values) / len(sleep_values)) if sleep_values else None
+    sleep_values = [float(s.duration_minutes) for s in sleep if s.duration_minutes is not None and float(s.duration_minutes) >= 0.0]
+    # Daily sleep goals should credit the best complete sleep session in the day window.
+    # Averaging with partial/duplicate rows can incorrectly keep daily sleep goals pending.
+    if window.cycle_type == "daily":
+        sleep_metric = max(sleep_values) if sleep_values else None
+    else:
+        sleep_metric = (sum(sleep_values) / len(sleep_values)) if sleep_values else None
 
     return {
         "meals_logged": float(len(foods)),
@@ -777,7 +782,7 @@ def _collect_metric_values(db: Session, user: User, window: CycleWindow) -> dict
         "hydration_ml": float(sum(h.amount_ml or 0 for h in hydration)),
         "exercise_minutes": float(sum(e.duration_minutes or 0 for e in exercise)),
         "exercise_sessions": float(len(exercise)),
-        "sleep_minutes": sleep_avg,
+        "sleep_minutes": sleep_metric,
         "medication_adherence": (float(completed_med) / float(expected_med)) if expected_med > 0 else None,
         "supplement_adherence": (float(completed_supp) / float(expected_supp)) if expected_supp > 0 else None,
     }
@@ -872,6 +877,12 @@ def refresh_task_statuses(
         if key not in metric_cache:
             metric_cache[key] = _collect_metric_values(db, user, window)
         metrics = metric_cache[key]
+        # Keep daily sleep task semantics stable at 7 hours (420 minutes).
+        # Historical auto-adjustments may have raised this value and caused
+        # users to appear "pending" despite meeting the documented threshold.
+        if str(task.cycle_type) == "daily" and str(task.target_metric) == "sleep_minutes":
+            if task.target_value is None or float(task.target_value or 0.0) != 420.0:
+                task.target_value = 420.0
         progress = _progress_for_task(task, metrics)
         task.progress_pct = round(progress, 2)
         previous = str(task.status or "pending")

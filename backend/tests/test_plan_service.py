@@ -14,7 +14,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from db.database import Base  # noqa: E402
-from db.models import CoachingPlanAdjustment, CoachingPlanTask, HealthOptimizationFramework, User, UserSettings  # noqa: E402
+from db.models import CoachingPlanAdjustment, CoachingPlanTask, HealthOptimizationFramework, SleepLog, User, UserSettings  # noqa: E402
 from services.coaching_plan_service import (  # noqa: E402
     apply_framework_selection,
     get_daily_rolling_snapshot,
@@ -222,3 +222,87 @@ def test_sleep_window_task_completes_when_start_and_end_logged_together():
     assert task is not None
     assert task.status == "completed"
     assert float(task.progress_pct or 0.0) >= 100.0
+
+
+def test_daily_sleep_progress_uses_best_session_not_average():
+    db = _new_db()
+    user = _new_user(db, "plan_sleep_best_session_user")
+
+    reference = datetime(2026, 2, 23, 12, 0, tzinfo=timezone.utc)
+    get_plan_snapshot(db, user, cycle_type="daily", reference_day=reference.date())
+    db.commit()
+
+    db.add(
+        SleepLog(
+            user_id=user.id,
+            sleep_start=datetime(2026, 2, 23, 0, 0, tzinfo=timezone.utc),
+            sleep_end=datetime(2026, 2, 23, 7, 30, tzinfo=timezone.utc),
+            duration_minutes=450,
+        )
+    )
+    # Duplicate/partial row should not drag daily completion below target.
+    db.add(
+        SleepLog(
+            user_id=user.id,
+            sleep_start=datetime(2026, 2, 23, 6, 0, tzinfo=timezone.utc),
+            sleep_end=datetime(2026, 2, 23, 6, 5, tzinfo=timezone.utc),
+            duration_minutes=5,
+        )
+    )
+    db.commit()
+
+    refresh_task_statuses(db, user, reference_day=reference.date(), create_notifications=False)
+    db.commit()
+
+    task = (
+        db.query(CoachingPlanTask)
+        .filter(
+            CoachingPlanTask.user_id == user.id,
+            CoachingPlanTask.cycle_type == "daily",
+            CoachingPlanTask.cycle_start == reference.date().isoformat(),
+            CoachingPlanTask.target_metric == "sleep_minutes",
+        )
+        .first()
+    )
+    assert task is not None
+    assert task.status == "completed"
+    assert float(task.progress_pct or 0.0) >= 100.0
+
+
+def test_daily_sleep_target_is_normalized_to_420_minutes():
+    db = _new_db()
+    user = _new_user(db, "plan_sleep_target_normalize_user")
+
+    reference = datetime(2026, 2, 23, 12, 0, tzinfo=timezone.utc)
+    get_plan_snapshot(db, user, cycle_type="daily", reference_day=reference.date())
+    db.commit()
+
+    task = (
+        db.query(CoachingPlanTask)
+        .filter(
+            CoachingPlanTask.user_id == user.id,
+            CoachingPlanTask.cycle_type == "daily",
+            CoachingPlanTask.cycle_start == reference.date().isoformat(),
+            CoachingPlanTask.target_metric == "sleep_minutes",
+        )
+        .first()
+    )
+    assert task is not None
+    task.target_value = 462.0
+
+    db.add(
+        SleepLog(
+            user_id=user.id,
+            sleep_start=datetime(2026, 2, 23, 0, 0, tzinfo=timezone.utc),
+            sleep_end=datetime(2026, 2, 23, 7, 30, tzinfo=timezone.utc),
+            duration_minutes=450,
+        )
+    )
+    db.commit()
+
+    refresh_task_statuses(db, user, reference_day=reference.date(), create_notifications=False)
+    db.commit()
+    db.refresh(task)
+
+    assert float(task.target_value or 0.0) == 420.0
+    assert task.status == "completed"

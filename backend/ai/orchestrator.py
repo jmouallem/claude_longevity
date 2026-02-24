@@ -1468,6 +1468,33 @@ def _looks_like_food_logging_message(message_text: str) -> bool:
     return False
 
 
+def _looks_like_sleep_logging_message(message_text: str) -> bool:
+    text = _normalize_whitespace(message_text)
+    if not text:
+        return False
+    if "?" in text:
+        return False
+    sleep_cues = (
+        "went to bed",
+        "going to bed",
+        "fell asleep",
+        "woke up",
+        "wake up",
+        "slept",
+        "sleep start",
+        "sleep end",
+        "bed at",
+    )
+    time_tokens = _extract_clock_time_tokens(message_text)
+    if any(cue in text for cue in sleep_cues):
+        return True
+    if len(time_tokens) >= 2 and any(marker in text for marker in (" to ", "-", " until ", " till ")):
+        return True
+    if any(marker in text for marker in (" hours of sleep", " hrs of sleep", " slept for ")):
+        return True
+    return False
+
+
 def _assistant_recently_requested_food_details(db: Session, user: User, reference_utc: datetime) -> bool:
     last = _last_assistant_message(db, user)
     if not last or not last.content:
@@ -1499,6 +1526,31 @@ def _assistant_recently_requested_food_details(db: Session, user: User, referenc
     return any(cue in text for cue in request_cues)
 
 
+def _assistant_recently_requested_sleep_details(db: Session, user: User, reference_utc: datetime) -> bool:
+    last = _last_assistant_message(db, user)
+    if not last or not last.content:
+        return False
+    created_at = last.created_at
+    if created_at is not None:
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        else:
+            created_at = created_at.astimezone(timezone.utc)
+        if (reference_utc - created_at) > timedelta(minutes=30):
+            return False
+    text = _normalize_whitespace(last.content)
+    request_cues = (
+        "what time did you go to bed",
+        "what time did you wake up",
+        "sleep start time",
+        "sleep end time",
+        "share last night's sleep start/end",
+        "log your sleep",
+        "how many hours did you sleep",
+    )
+    return any(cue in text for cue in request_cues)
+
+
 def _looks_like_food_followup_answer(message_text: str) -> bool:
     text = _normalize_whitespace(message_text)
     if not text:
@@ -1515,6 +1567,25 @@ def _looks_like_food_followup_answer(message_text: str) -> bool:
     if any(token in text for token in quantity_tokens):
         return True
     return len(text.split()) <= 12
+
+
+def _looks_like_sleep_followup_answer(message_text: str) -> bool:
+    text = _normalize_whitespace(message_text)
+    if not text:
+        return False
+    if "?" in text:
+        return False
+    if text in MENU_CONFIRM_WORDS or text in TIME_CONFIRM_ACK_TERMS or text in TIME_CONFIRM_REJECT_TERMS:
+        return False
+    time_tokens = _extract_clock_time_tokens(message_text)
+    if len(time_tokens) >= 2:
+        return True
+    sleep_words = ("bed", "sleep", "woke", "wake")
+    if time_tokens and any(word in text for word in sleep_words):
+        return True
+    if any(phrase in text for phrase in ("slept for", "hours of sleep", "hrs of sleep")):
+        return True
+    return False
 
 
 def _looks_like_food_planning_question(message_text: str) -> bool:
@@ -2981,11 +3052,21 @@ async def process_chat(
     force_food_logging = (explicit_food_signal or contextual_food_signal) and not menu_command_only
     food_low_confidence = contextual_food_signal and not explicit_food_signal
 
+    explicit_sleep_signal = _looks_like_sleep_logging_message(message)
+    contextual_sleep_signal = (
+        category in {"general_chat", "ask_sleep"}
+        and _assistant_recently_requested_sleep_details(db, user, message_received_utc)
+        and _looks_like_sleep_followup_answer(message)
+    )
+    force_sleep_logging = explicit_sleep_signal or contextual_sleep_signal
+
     log_categories: list[str] = []
     if category.startswith("log_"):
         log_categories.append(category)
     if force_food_logging and "log_food" not in log_categories:
         log_categories.insert(0, "log_food")
+    if force_sleep_logging and "log_sleep" not in log_categories:
+        log_categories.insert(0, "log_sleep")
 
     if log_categories and not menu_command_only and not bool(time_confirmation_gate.get("skip_log_parse")):
         user_profile = ""

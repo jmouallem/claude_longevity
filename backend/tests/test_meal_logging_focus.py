@@ -13,6 +13,8 @@ from ai.orchestrator import (
     _looks_like_food_followup_answer,
     _looks_like_food_logging_message,
     _looks_like_food_planning_question,
+    _looks_like_sleep_followup_answer,
+    _looks_like_sleep_logging_message,
     _minimal_food_payload_from_message,
     _normalize_sleep_payload,
 )
@@ -76,3 +78,15 @@ def test_sleep_payload_normalization_does_not_set_end_to_bedtime():
     end_value = str(payload.get("sleep_end") or "").lower()
     assert not end_value.startswith("10:30")
     assert end_value.startswith("6:00")
+
+
+def test_sleep_logging_detector_handles_direct_sleep_log_message():
+    assert _looks_like_sleep_logging_message("I went to bed at 10:30pm and woke up at 6:00 am")
+    assert _looks_like_sleep_logging_message("slept for 7.5 hours")
+    assert not _looks_like_sleep_logging_message("How can I improve sleep?")
+
+
+def test_sleep_followup_detector_handles_time_only_response():
+    assert _looks_like_sleep_followup_answer("10:30pm to 6:00am")
+    assert _looks_like_sleep_followup_answer("woke up at 6am")
+    assert not _looks_like_sleep_followup_answer("yes")
