@@ -153,8 +153,14 @@ function formatTimestamp(isoString: string): string {
   }
 }
 
+/** Strip internal metadata tags (e.g. [task_id=123]) from user-facing text. */
+function stripMetaTags(text: string): string {
+  return text.replace(/\s*\[task_id=\d+\]/g, '');
+}
+
 export default function ChatMessage({ message }: ChatMessageProps) {
   const isUser = message.role === 'user';
+  const displayContent = isUser ? stripMetaTags(message.content) : message.content;
 
   return (
     <div className={`flex ${isUser ? 'justify-end' : 'justify-start'} mb-4`}>
@@ -185,8 +191,8 @@ export default function ChatMessage({ message }: ChatMessageProps) {
             Image attached
           </div>
         )}
-        {!!message.content && (
-          <div className="text-sm leading-7 break-words space-y-3">{renderContent(message.content)}</div>
+        {!!displayContent && (
+          <div className="text-sm leading-7 break-words space-y-3">{renderContent(displayContent)}</div>
         )}
 
         {/* Streaming cursor */}

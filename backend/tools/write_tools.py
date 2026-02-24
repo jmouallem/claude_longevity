@@ -935,6 +935,7 @@ def _tool_fasting_manage(args: dict[str, Any], ctx: ToolContext) -> dict[str, An
         if active.fast_end < start:
             active.fast_end = active.fast_end + timedelta(days=1)
         active.duration_minutes = int((active.fast_end - start).total_seconds() / 60)
+        ctx.db.flush()
         _refresh_tasks_after_write(ctx)
         return {"status": "ended", "fasting_log_id": active.id, "duration_minutes": active.duration_minutes}
 

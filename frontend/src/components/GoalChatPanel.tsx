@@ -139,8 +139,14 @@ function renderContent(content: string): ReactNode[] {
   return blocks;
 }
 
+/** Strip internal metadata tags (e.g. [task_id=123]) from user-facing text. */
+function stripMetaTags(text: string): string {
+  return text.replace(/\s*\[task_id=\d+\]/g, '');
+}
+
 function MessageBubble({ message }: { message: ChatMessage }) {
   const isUser = message.role === 'user';
+  const displayContent = isUser ? stripMetaTags(message.content) : message.content;
   return (
     <div className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
       <div
@@ -151,7 +157,7 @@ function MessageBubble({ message }: { message: ChatMessage }) {
         }`}
       >
         <div className="leading-relaxed break-words space-y-2">
-          {renderContent(message.content)}
+          {renderContent(displayContent)}
           {message.isStreaming && (
             <span className="inline-block w-1.5 h-3.5 ml-0.5 bg-current animate-pulse rounded-sm" />
           )}

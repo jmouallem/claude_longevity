@@ -501,6 +501,15 @@ export default function Dashboard() {
     fetchData();
   }, [fetchData]);
 
+  // Refetch when page becomes visible again (e.g. returning from Chat page)
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') fetchData();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [fetchData]);
+
   const generateSummary = async () => {
     setGenerating(true);
     setGenMessage('');

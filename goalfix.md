@@ -148,3 +148,45 @@ User clicks "Update with Coach" on sleep goal:
   -> AI calls plan_task_update_status(task_id=X, status="completed")
   -> Task is marked done, user sees it reflected immediately
 ```
+
+---
+
+## Code Review Findings (Post-Fix)
+
+### Issue 1: Missing `db.flush()` before `_refresh_tasks_after_write` in fasting_manage (FIXED)
+
+**Location:** `write_tools.py` — `_tool_fasting_manage`, active-fast-ended path (~line 930-939)
+
+The "end active fast" branch modifies the ORM object in-place (`active.fast_end = ...`, `active.duration_minutes = ...`) but did not call `ctx.db.flush()` before `_refresh_tasks_after_write(ctx)`. The refresh function queries the DB for fasting data to compute metric progress, and without a flush the dirty ORM state may not be visible, causing the fasting goal to stay incomplete.
+
+**Fix applied:** Added `ctx.db.flush()` before `_refresh_tasks_after_write(ctx)` on that path.
+
+The other fasting paths (start and direct interval) were already correct — start doesn't refresh, and the direct interval path already had `ctx.db.flush()`.
+
+### Issue 2: `[task_id=N]` tag visible in chat input (FIXED)
+
+**Location:** `ChatMessage.tsx`, `GoalChatPanel.tsx`, `ChatInput.tsx`
+
+The `[task_id=123]` metadata tag is embedded in the message text sent to the backend (where the AI needs it), but is now stripped from all user-facing display:
+- **ChatMessage.tsx** — `stripMetaTags()` removes the tag before rendering user bubbles
+- **GoalChatPanel.tsx** — same `stripMetaTags()` in `MessageBubble` component
+- **ChatInput.tsx** — `fillText` is split: tag stored in `hiddenMetaRef`, stripped text shown in textarea, tag reattached on send
+
+The AI still receives the full message with `[task_id=N]`; the user never sees it.
+
+### Issue 3: Dashboard does NOT auto-refresh after returning from Chat (FIXED)
+
+**Location:** `Dashboard.tsx`
+
+Added a `visibilitychange` listener that calls `fetchData()` when the page becomes visible again (tab switch). SPA navigation already triggers remount since Dashboard uses a standard `<Route>`, which causes the mount-based `useEffect` to re-run.
+
+### Issue 4: Fasting goal closure — all paths covered
+
+**Verification:** The linter-modified code already added `_refresh_tasks_after_write` to both fasting completion paths:
+- Active fast ended (line ~938) — now with flush fix
+- Direct interval created (line ~956) — already had flush
+
+The "start" path correctly does NOT refresh (fast is still in progress, no metric to update).
+The "no_active_fast" fallback return also correctly does NOT refresh (nothing was written).
+
+**Fasting goals will now auto-close** when the logged duration hits the target metric.

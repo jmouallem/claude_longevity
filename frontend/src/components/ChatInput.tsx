@@ -11,6 +11,8 @@ interface ChatInputProps {
   onFillConsumed?: () => void;
 }
 
+const META_TAG_RE = /\s*\[task_id=\d+\]/g;
+
 export default function ChatInput({
   onSend,
   selectedImage,
@@ -20,6 +22,8 @@ export default function ChatInput({
   onFillConsumed,
 }: ChatInputProps) {
   const [text, setText] = useState('');
+  // Hidden metadata tags stripped from display but reattached on send
+  const hiddenMetaRef = useRef('');
   const [selectedImagePreview, setSelectedImagePreview] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -56,9 +60,12 @@ export default function ChatInput({
   }, [selectedImage]);
 
   // Allow parent to pre-fill input (e.g. "Discuss" buttons in goal panel)
+  // Strip metadata tags (e.g. [task_id=123]) from display but preserve for send.
   useEffect(() => {
     if (fillText) {
-      setText(fillText);
+      const metaMatches = fillText.match(META_TAG_RE);
+      hiddenMetaRef.current = metaMatches ? metaMatches.join('') : '';
+      setText(fillText.replace(META_TAG_RE, ''));
       onFillConsumed?.();
       setTimeout(() => textareaRef.current?.focus(), 0);
     }
@@ -69,7 +76,10 @@ export default function ChatInput({
     if (!trimmed && !selectedImage) return;
     if (disabled) return;
 
-    onSend(trimmed, selectedImage || undefined);
+    // Reattach any hidden metadata tags before sending
+    const outgoing = hiddenMetaRef.current ? trimmed + hiddenMetaRef.current : trimmed;
+    hiddenMetaRef.current = '';
+    onSend(outgoing, selectedImage || undefined);
     setText('');
     onSelectedImageChange(null);
     setSelectedImagePreview(null);
