@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+from datetime import datetime
 
 from sqlalchemy.orm import Session
 
@@ -132,6 +133,44 @@ def _extract_time_token(message: str) -> str | None:
     if match:
         return match.group(1).strip()
     return None
+
+
+def _extract_time_tokens(message: str) -> list[str]:
+    matches = re.finditer(
+        r"\b(\d{1,2}:\d{2}\s?(?:am|pm)?|\d{1,2}\s?(?:am|pm))\b",
+        message,
+        flags=re.IGNORECASE,
+    )
+    tokens: list[str] = []
+    for match in matches:
+        token = str(match.group(1) or "").strip()
+        if token:
+            tokens.append(token)
+    return tokens
+
+
+def _clock_token_to_minutes(token: str | None) -> int | None:
+    if not token:
+        return None
+    text = str(token).strip().lower().replace(".", "")
+    patterns = ("%I:%M%p", "%I:%M %p", "%I%p", "%I %p", "%H:%M")
+    for fmt in patterns:
+        try:
+            parsed = datetime.strptime(text.upper(), fmt)
+            return int(parsed.hour) * 60 + int(parsed.minute)
+        except ValueError:
+            continue
+    return None
+
+
+def _duration_minutes_from_tokens(start_token: str | None, end_token: str | None) -> int | None:
+    start_min = _clock_token_to_minutes(start_token)
+    end_min = _clock_token_to_minutes(end_token)
+    if start_min is None or end_min is None:
+        return None
+    if end_min < start_min:
+        end_min += 24 * 60
+    return max(end_min - start_min, 0)
 
 
 def _deterministic_food_parse(message: str) -> dict:
@@ -316,16 +355,36 @@ def _deterministic_fasting_parse(message: str) -> dict:
 
 def _deterministic_sleep_parse(message: str) -> dict:
     lowered = message.lower()
+    time_tokens = _extract_time_tokens(message)
     action = "auto"
-    if any(k in lowered for k in ("woke up", "wake up", "got up", "slept", "sleep end")):
+    has_end_cue = any(k in lowered for k in ("woke up", "wake up", "got up", "slept", "sleep end"))
+    has_start_cue = any(k in lowered for k in ("going to bed", "go to bed", "bedtime", "sleep now", "going to sleep", "went to bed", "fell asleep"))
+    if has_end_cue:
         action = "end"
-    elif any(k in lowered for k in ("going to bed", "go to bed", "bedtime", "sleep now", "going to sleep")):
+    elif has_start_cue:
         action = "start"
+
+    sleep_start = None
+    sleep_end = None
+    if has_start_cue and has_end_cue and len(time_tokens) >= 2:
+        start_pos = min((lowered.find(cue) for cue in ("going to bed", "go to bed", "bedtime", "sleep now", "going to sleep", "went to bed", "fell asleep") if cue in lowered), default=-1)
+        end_pos = min((lowered.find(cue) for cue in ("woke up", "wake up", "got up", "slept", "sleep end") if cue in lowered), default=-1)
+        first, second = time_tokens[0], time_tokens[1]
+        if start_pos != -1 and end_pos != -1 and end_pos < start_pos:
+            sleep_end, sleep_start = first, second
+        else:
+            sleep_start, sleep_end = first, second
+    elif action == "start" and time_tokens:
+        sleep_start = time_tokens[0]
+    elif action == "end" and time_tokens:
+        sleep_end = time_tokens[0]
+
+    duration_minutes = _duration_minutes_from_tokens(sleep_start, sleep_end)
     return {
         "action": action,
-        "sleep_start": _extract_time_token(message) if action == "start" else None,
-        "sleep_end": _extract_time_token(message) if action == "end" else None,
-        "duration_minutes": None,
+        "sleep_start": sleep_start,
+        "sleep_end": sleep_end,
+        "duration_minutes": duration_minutes,
         "quality": None,
         "notes": "Deterministic fallback parse",
     }

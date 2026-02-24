@@ -19,9 +19,12 @@ from services.coaching_plan_service import (  # noqa: E402
     apply_framework_selection,
     get_daily_rolling_snapshot,
     get_plan_snapshot,
+    refresh_task_statuses,
     set_task_status,
     undo_adjustment,
 )
+from tools import tool_registry  # noqa: E402
+from tools.base import ToolContext  # noqa: E402
 
 
 def _new_db():
@@ -176,3 +179,46 @@ def test_repeated_rolling_snapshots_do_not_leave_future_days_missed():
             assert all(status != "missed" for status in statuses), (
                 f"unexpected missed status in rolling preview for {day_snapshot.get('cycle', {}).get('today')}"
             )
+
+
+def test_sleep_window_task_completes_when_start_and_end_logged_together():
+    db = _new_db()
+    user = _new_user(db, "plan_sleep_pair_user")
+
+    reference = datetime(2026, 2, 23, 12, 0, tzinfo=timezone.utc)
+    get_plan_snapshot(db, user, cycle_type="daily", reference_day=reference.date())
+    db.commit()
+
+    ctx = ToolContext(
+        db=db,
+        user=user,
+        specialist_id="sleep_expert",
+        reference_utc=reference,
+    )
+    out = tool_registry.execute(
+        "sleep_log_write",
+        {
+            "action": "auto",
+            "sleep_start": "10:30 pm",
+            "sleep_end": "6:00 am",
+        },
+        ctx,
+    )
+    assert int(out.get("duration_minutes") or 0) >= 450
+
+    refresh_task_statuses(db, user, reference_day=reference.date(), create_notifications=False)
+    db.commit()
+
+    task = (
+        db.query(CoachingPlanTask)
+        .filter(
+            CoachingPlanTask.user_id == user.id,
+            CoachingPlanTask.cycle_type == "daily",
+            CoachingPlanTask.cycle_start == reference.date().isoformat(),
+            CoachingPlanTask.target_metric == "sleep_minutes",
+        )
+        .first()
+    )
+    assert task is not None
+    assert task.status == "completed"
+    assert float(task.progress_pct or 0.0) >= 100.0

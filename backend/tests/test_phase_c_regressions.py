@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
 from api.analysis import list_proposals  # noqa: E402
 from db.database import Base  # noqa: E402
 from db.models import AnalysisProposal, AnalysisRun, SleepLog, User, UserSettings  # noqa: E402
+from ai.log_parser import _deterministic_sleep_parse  # noqa: E402
 from services.analysis_service import run_longitudinal_analysis  # noqa: E402
 from utils.datetime_utils import end_of_day, sleep_log_overlaps_window, start_of_day  # noqa: E402
 
@@ -173,3 +174,11 @@ def test_sleep_window_uses_event_overlap_not_created_at_only():
 
     assert len(rows) == 1
     assert rows[0].duration_minutes == 420
+
+
+def test_deterministic_sleep_parse_extracts_start_end_and_duration():
+    payload = _deterministic_sleep_parse("I went to bed at 10:30pm and woke up at 6:00 am")
+    assert payload["action"] == "end"
+    assert str(payload.get("sleep_start") or "").lower().startswith("10:30")
+    assert str(payload.get("sleep_end") or "").lower().startswith("6:00")
+    assert int(payload.get("duration_minutes") or 0) >= 450

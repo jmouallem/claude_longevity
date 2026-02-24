@@ -750,6 +750,32 @@ def _tool_sleep_log_write(args: dict[str, Any], ctx: ToolContext) -> dict[str, A
         .order_by(SleepLog.created_at.desc())
         .first()
     )
+
+    # If no active session exists but both start/end are provided in one turn,
+    # persist a complete sleep event so downstream plan progress can update.
+    if not active and args.get("sleep_start") and args.get("sleep_end"):
+        if end_dt < start_dt:
+            end_dt = end_dt + timedelta(days=1)
+        computed_minutes = int((end_dt - start_dt).total_seconds() / 60)
+        resolved_minutes = duration if duration is not None else max(0, computed_minutes)
+        row = SleepLog(
+            user_id=ctx.user.id,
+            sleep_start=start_dt,
+            sleep_end=end_dt,
+            duration_minutes=resolved_minutes,
+            quality=quality,
+            notes=notes,
+        )
+        ctx.db.add(row)
+        ctx.db.flush()
+        return {
+            "status": "created",
+            "sleep_log_id": row.id,
+            "sleep_start": row.sleep_start.isoformat() if row.sleep_start else None,
+            "sleep_end": row.sleep_end.isoformat() if row.sleep_end else None,
+            "duration_minutes": row.duration_minutes,
+        }
+
     if not active:
         row = SleepLog(
             user_id=ctx.user.id,
