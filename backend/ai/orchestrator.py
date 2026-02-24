@@ -143,6 +143,7 @@ MENU_CONFIRM_WORDS = {
     "save it",
     "add it",
 }
+DASH_CONFIRM_PROMPT = "This meal looks DASH-aligned. Do you want me to mark today's DASH goal complete?"
 LOW_SIGNAL_CHECKIN_PHRASES = {
     "hi",
     "hello",
@@ -1326,6 +1327,117 @@ def _assistant_requested_menu_update(db: Session, user: User) -> bool:
     return "update your base menu item" in text or "update the base meal template" in text
 
 
+def _assistant_requested_dash_completion(db: Session, user: User) -> bool:
+    last = _last_assistant_message(db, user)
+    if not last or not last.content:
+        return False
+    text = _normalize_whitespace(last.content)
+    if "dash goal complete" in text:
+        return True
+    return bool(
+        re.search(r"\bmark\b.{0,60}\bdash\b.{0,60}\bcomplete\b", text, flags=re.IGNORECASE)
+    )
+
+
+def _is_affirmative_reply(message_text: str) -> bool:
+    norm = _normalize_whitespace(message_text)
+    if not norm:
+        return False
+    if norm in MENU_CONFIRM_WORDS:
+        return True
+    if norm.startswith("yes"):
+        return True
+    return False
+
+
+def _pending_dash_task(snapshot: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(snapshot, dict):
+        return None
+    tasks = snapshot.get("tasks") or []
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        if str(task.get("status", "")).strip().lower() != "pending":
+            continue
+        if str(task.get("target_metric", "")).strip().lower() != "manual_check":
+            continue
+        framework_name = str(task.get("framework_name", "") or "").strip().lower()
+        title = str(task.get("title", "") or "").strip().lower()
+        if "dash" in framework_name or "dash" in title:
+            return task
+    return None
+
+
+def _food_payload_looks_dash_aligned(payload: dict[str, Any] | None) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    items = payload.get("items")
+    if not isinstance(items, list) or not items:
+        return False
+
+    names: list[str] = []
+    for item in items:
+        if isinstance(item, dict):
+            name = str(item.get("name", "")).strip().lower()
+        else:
+            name = str(item).strip().lower()
+        if name:
+            names.append(name)
+    if not names:
+        return False
+
+    joined = " ".join(names)
+
+    dash_positive = (
+        "berry",
+        "berries",
+        "fruit",
+        "vegetable",
+        "salad",
+        "oat",
+        "whole wheat",
+        "whole grain",
+        "brown rice",
+        "quinoa",
+        "bean",
+        "lentil",
+        "chickpea",
+        "fish",
+        "chicken breast",
+        "yogurt",
+        "cottage cheese",
+        "nuts",
+        "almond",
+        "walnut",
+        "seed",
+    )
+    dash_negative = (
+        "fries",
+        "chips",
+        "soda",
+        "donut",
+        "candy",
+        "ice cream",
+        "pepperoni pizza",
+        "fast food",
+        "sausage",
+        "bacon",
+    )
+    if any(token in joined for token in dash_negative):
+        return False
+    if any(token in joined for token in dash_positive):
+        sodium = payload.get("sodium_mg")
+        try:
+            sodium_val = float(sodium) if sodium is not None else None
+        except (TypeError, ValueError):
+            sodium_val = None
+        # Very high sodium entries are usually not DASH-aligned.
+        if sodium_val is not None and sodium_val > 900:
+            return False
+        return True
+    return False
+
+
 def _extract_template_name_from_message(message_text: str) -> str | None:
     text = message_text.strip()
     patterns = [
@@ -1850,6 +1962,84 @@ def _response_already_has_followup(full_response: str, followup_hint: dict[str, 
     if hint_type == "ask_update_base":
         return "update" in text and ("base meal" in text or "one-off" in text) and "?" in full_response
     return False
+
+
+def _response_mentions_dash_completion(full_response: str) -> bool:
+    text = _normalize_whitespace(full_response)
+    return "dash goal" in text and ("mark" in text or "complete" in text)
+
+
+def _response_mentions_meal_save_status(full_response: str) -> bool:
+    text = _normalize_whitespace(full_response)
+    return (
+        "saved meal log" in text
+        or "couldn't save this meal log" in text
+        or "could not save this meal log" in text
+    )
+
+
+def _is_explicit_dash_completion_signal(message_text: str) -> bool:
+    text = _normalize_whitespace(message_text)
+    if not text or "?" in text:
+        return False
+    if "dash" not in text:
+        return False
+    completion_cues = (
+        "followed dash",
+        "stuck to dash",
+        "did dash",
+        "on dash today",
+        "kept dash",
+        "dash compliant",
+    )
+    return any(cue in text for cue in completion_cues)
+
+
+def _try_handle_dash_goal_hybrid(
+    db: Session,
+    user: User,
+    message_text: str,
+    parsed_food: dict[str, Any] | None,
+    saved_food: dict[str, Any] | None,
+    reference_utc: datetime,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {"completed": False, "prompt": False, "task_id": None}
+    snapshot = _safe_daily_plan_snapshot(db, user)
+    task = _pending_dash_task(snapshot)
+    if not task:
+        return result
+
+    raw_task_id = task.get("id")
+    try:
+        task_id = int(raw_task_id)
+    except (TypeError, ValueError):
+        return result
+    if task_id <= 0:
+        return result
+
+    should_complete = False
+    if _assistant_requested_dash_completion(db, user) and _is_affirmative_reply(message_text):
+        should_complete = True
+    elif _is_explicit_dash_completion_signal(message_text):
+        should_complete = True
+
+    if should_complete:
+        try:
+            tool_registry.execute(
+                "plan_task_update_status",
+                {"task_id": task_id, "status": "completed"},
+                ToolContext(db=db, user=user, specialist_id="orchestrator", reference_utc=reference_utc),
+            )
+            db.commit()
+            return {"completed": True, "prompt": False, "task_id": task_id}
+        except Exception as e:
+            logger.warning(f"DASH task completion update failed: {e}")
+            return result
+
+    if isinstance(saved_food, dict) and _food_payload_looks_dash_aligned(parsed_food):
+        if not _assistant_requested_dash_completion(db, user):
+            return {"completed": False, "prompt": True, "task_id": task_id}
+    return result
 
 
 def _extract_energy_level(message_text: str) -> int | None:
@@ -3193,6 +3383,22 @@ async def process_chat(
         menu_action_result=menu_action_result,
     )
 
+    dash_goal_sync_result: dict[str, Any] = {"completed": False, "prompt": False, "task_id": None}
+    dash_candidate = (
+        ("log_food" in saved_by_category)
+        or _is_explicit_dash_completion_signal(message)
+        or (_assistant_requested_dash_completion(db, user) and _is_affirmative_reply(message))
+    )
+    if dash_candidate:
+        dash_goal_sync_result = _try_handle_dash_goal_hybrid(
+            db=db,
+            user=user,
+            message_text=message,
+            parsed_food=parsed_by_category.get("log_food"),
+            saved_food=saved_by_category.get("log_food"),
+            reference_utc=message_received_utc,
+        )
+
     # 3b. Auto-sync profile fields from user message/image context
     # Run for supplement/medical/general chats and any image-assisted message.
     extracted_profile_refs = {"matched_medications": [], "matched_supplements": []}
@@ -3409,6 +3615,16 @@ async def process_chat(
         goal_followup = _goal_sync_followup_text(goal_sync_result, full_response)
         if goal_followup:
             append_text = f"\n\n{goal_followup}" if full_response else goal_followup
+            full_response += append_text
+            yield {"type": "chunk", "text": append_text}
+
+        dash_followup = ""
+        if bool(dash_goal_sync_result.get("completed")):
+            dash_followup = "I marked today's DASH goal complete."
+        elif bool(dash_goal_sync_result.get("prompt")) and not _response_mentions_dash_completion(full_response):
+            dash_followup = DASH_CONFIRM_PROMPT
+        if dash_followup:
+            append_text = f"\n\n{dash_followup}" if full_response else dash_followup
             full_response += append_text
             yield {"type": "chunk", "text": append_text}
 

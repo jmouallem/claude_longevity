@@ -135,6 +135,43 @@ def _to_float(value: Any, field: str) -> float | None:
         raise ToolExecutionError(f"`{field}` must be a number") from exc
 
 
+def _to_float_relaxed(value: Any, field: str) -> float | None:
+    """
+    Lenient numeric parser used for AI-extracted nutrition fields.
+    Accepts values like "<1g", "220 kcal", "~30", "1,200 mg".
+    Returns None for empty/unknown values.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if not text:
+        return None
+
+    lowered = text.lower().strip()
+    if lowered in {"none", "null", "n/a", "na", "unknown", "unsure", "?"}:
+        return None
+
+    # Normalize common textual prefixes and separators.
+    lowered = lowered.replace(",", "")
+    lowered = re.sub(r"^(about|approx(?:imately)?|around|~)\s*", "", lowered)
+
+    less_than = lowered.startswith("<")
+    if less_than:
+        lowered = lowered[1:].strip()
+
+    match = re.search(r"[-+]?\d*\.?\d+", lowered)
+    if not match:
+        raise ToolExecutionError(f"`{field}` must be a number")
+
+    parsed = float(match.group(0))
+    if less_than and parsed > 0:
+        # Preserve the "less than" meaning without failing the full write.
+        parsed = parsed * 0.5
+    return parsed
+
+
 def _to_int(value: Any, field: str) -> int | None:
     if value is None:
         return None
@@ -572,17 +609,41 @@ def _tool_food_log_write(args: dict[str, Any], ctx: ToolContext) -> dict[str, An
             items = json.loads(items_val)
         except json.JSONDecodeError:
             items = [{"name": items_val}]
+    elif isinstance(items_val, dict):
+        items = [items_val]
     elif isinstance(items_val, list):
         items = items_val
     else:
-        raise ToolExecutionError("`items` must be a list or JSON string")
+        items = []
 
     if not isinstance(items, list):
-        raise ToolExecutionError("`items` must resolve to a list")
+        items = []
+
+    normalized_items: list[dict[str, str]] = []
+    for raw_item in items:
+        if isinstance(raw_item, dict):
+            name = str(raw_item.get("name") or raw_item.get("item") or "").strip()
+            if not name:
+                continue
+            normalized_items.append(
+                {
+                    "name": name,
+                    "quantity": str(raw_item.get("quantity", "") or "").strip(),
+                    "unit": str(raw_item.get("unit", "") or "").strip(),
+                }
+            )
+            continue
+        text_item = str(raw_item or "").strip()
+        if text_item:
+            normalized_items.append({"name": text_item, "quantity": "", "unit": ""})
+
+    if not normalized_items:
+        fallback_name = meal_label or str(args.get("template_name", "")).strip() or "Meal entry"
+        normalized_items = [{"name": fallback_name, "quantity": "", "unit": ""}]
 
     query_name = str(args.get("template_name", "")).strip() or meal_label or ""
-    if not query_name and items:
-        first = items[0]
+    if not query_name and normalized_items:
+        first = normalized_items[0]
         if isinstance(first, dict):
             query_name = str(first.get("name", "")).strip()
         else:
@@ -638,13 +699,13 @@ def _tool_food_log_write(args: dict[str, Any], ctx: ToolContext) -> dict[str, An
         user_id=ctx.user.id,
         logged_at=_resolve_logged_at(args, ctx),
         meal_label=meal_label,
-        items=_json_dumps(items),
-        calories=_coerce_float_field(args, "calories"),
-        protein_g=_coerce_float_field(args, "protein_g"),
-        carbs_g=_coerce_float_field(args, "carbs_g"),
-        fat_g=_coerce_float_field(args, "fat_g"),
-        fiber_g=_coerce_float_field(args, "fiber_g"),
-        sodium_mg=_coerce_float_field(args, "sodium_mg"),
+        items=_json_dumps(normalized_items),
+        calories=_coerce_float_field(args, "calories", strict=False),
+        protein_g=_coerce_float_field(args, "protein_g", strict=False),
+        carbs_g=_coerce_float_field(args, "carbs_g", strict=False),
+        fat_g=_coerce_float_field(args, "fat_g", strict=False),
+        fiber_g=_coerce_float_field(args, "fiber_g", strict=False),
+        sodium_mg=_coerce_float_field(args, "sodium_mg", strict=False),
         notes=str(args.get("notes", "")).strip() or None,
     )
     ctx.db.add(row)
@@ -902,10 +963,18 @@ def _tool_exercise_plan_upsert(args: dict[str, Any], ctx: ToolContext) -> dict[s
     return {"exercise_plan_id": row.id, "created": created}
 
 
-def _coerce_float_field(args: dict[str, Any], field: str) -> float | None:
+def _coerce_float_field(args: dict[str, Any], field: str, *, strict: bool = True) -> float | None:
     if field not in args:
         return None
-    return _to_float(args.get(field), field)
+    value = args.get(field)
+    try:
+        if strict:
+            return _to_float(value, field)
+        return _to_float_relaxed(value, field)
+    except ToolExecutionError:
+        if strict:
+            raise
+        return None
 
 
 def _meal_template_snapshot(row: MealTemplate) -> dict[str, Any]:

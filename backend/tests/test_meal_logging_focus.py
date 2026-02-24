@@ -10,6 +10,8 @@ if str(ROOT) not in sys.path:
 
 
 from ai.orchestrator import (
+    _food_payload_looks_dash_aligned,
+    _is_explicit_dash_completion_signal,
     _looks_like_food_followup_answer,
     _looks_like_food_logging_message,
     _looks_like_food_planning_question,
@@ -56,6 +58,34 @@ def test_food_planning_question_detector_avoids_false_logs():
     assert _looks_like_food_planning_question("Should I eat oats for breakfast?")
     assert not _looks_like_food_planning_question("I had a banana for lunch")
     assert not _looks_like_food_planning_question("I had a banana for lunch, is that okay?")
+
+
+def test_dash_alignment_heuristic_detects_common_dash_friendly_meal():
+    payload = {
+        "items": [
+            {"name": "Kirkland cottage cheese", "quantity": "1", "unit": "cup"},
+            {"name": "frozen berry mix", "quantity": "1/2", "unit": "cup"},
+        ],
+        "sodium_mg": 320,
+    }
+    assert _food_payload_looks_dash_aligned(payload)
+
+
+def test_dash_alignment_heuristic_rejects_clearly_non_dash_meal():
+    payload = {
+        "items": [
+            {"name": "fries"},
+            {"name": "pepperoni pizza"},
+        ],
+        "sodium_mg": 1400,
+    }
+    assert not _food_payload_looks_dash_aligned(payload)
+
+
+def test_explicit_dash_completion_signal_detection():
+    assert _is_explicit_dash_completion_signal("I followed DASH today")
+    assert _is_explicit_dash_completion_signal("I stuck to DASH with all meals")
+    assert not _is_explicit_dash_completion_signal("Should I follow DASH today?")
 
 
 def test_sleep_payload_normalization_sets_start_and_end_from_two_times():
