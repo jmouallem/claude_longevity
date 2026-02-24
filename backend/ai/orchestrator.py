@@ -191,10 +191,12 @@ class UtilityCallBudget:
 SLEEP_START_CUES = (
     "heading to bed",
     "going to bed",
+    "went to bed",
     "go to bed",
     "bed now",
     "sleep now",
     "going to sleep",
+    "fell asleep",
     "good night",
 )
 SLEEP_END_CUES = (
@@ -802,28 +804,102 @@ def _extract_clock_time_token(text: str) -> str | None:
     return match.group(1).strip()
 
 
+def _extract_clock_time_tokens(text: str) -> list[str]:
+    matches = re.finditer(
+        r"\b((?:\d{1,2}:\d{2}\s?(?:am|pm)?)|(?:\d{1,2}\s?(?:am|pm)))\b",
+        text,
+        flags=re.IGNORECASE,
+    )
+    tokens: list[str] = []
+    for match in matches:
+        token = str(match.group(1) or "").strip()
+        if token:
+            tokens.append(token)
+    return tokens
+
+
+def _clock_token_to_minutes(token: str | None) -> int | None:
+    if not token:
+        return None
+    text = str(token).strip().lower().replace(".", "")
+    for fmt in ("%I:%M%p", "%I:%M %p", "%I%p", "%I %p", "%H:%M"):
+        try:
+            parsed = datetime.strptime(text.upper(), fmt)
+            return int(parsed.hour) * 60 + int(parsed.minute)
+        except ValueError:
+            continue
+    return None
+
+
+def _duration_from_sleep_tokens(sleep_start: str | None, sleep_end: str | None) -> int | None:
+    start_min = _clock_token_to_minutes(sleep_start)
+    end_min = _clock_token_to_minutes(sleep_end)
+    if start_min is None or end_min is None:
+        return None
+    if end_min < start_min:
+        end_min += 24 * 60
+    return max(end_min - start_min, 0)
+
+
 def _normalize_sleep_payload(message_text: str, payload: dict[str, Any] | None) -> dict[str, Any] | None:
     if not isinstance(payload, dict):
         return payload
 
     text = _normalize_whitespace(message_text)
+    time_tokens = _extract_clock_time_tokens(message_text)
+    has_start_cue = any(cue in text for cue in SLEEP_START_CUES)
+    has_end_cue = any(cue in text for cue in SLEEP_END_CUES)
     action = str(payload.get("action", "")).strip().lower()
     if action not in {"start", "end", "auto"}:
-        has_start_cue = any(cue in text for cue in SLEEP_START_CUES)
-        has_end_cue = any(cue in text for cue in SLEEP_END_CUES)
-        if has_end_cue and not has_start_cue:
-            action = "end"
-        elif has_start_cue and not has_end_cue:
-            action = "start"
-        else:
-            action = "auto"
+        action = "auto"
+
+    if has_end_cue and not has_start_cue:
+        action = "end"
+    elif has_start_cue and not has_end_cue:
+        action = "start"
+    elif has_start_cue and has_end_cue and action == "auto":
+        action = "end"
     payload["action"] = action
 
-    time_token = _extract_clock_time_token(text)
-    if action == "start" and not payload.get("sleep_start") and time_token:
-        payload["sleep_start"] = time_token
-    elif action == "end" and not payload.get("sleep_end") and time_token:
-        payload["sleep_end"] = time_token
+    sleep_start = str(payload.get("sleep_start") or "").strip() or None
+    sleep_end = str(payload.get("sleep_end") or "").strip() or None
+
+    if has_start_cue and has_end_cue and len(time_tokens) >= 2:
+        start_idx = min((text.find(cue) for cue in SLEEP_START_CUES if cue in text), default=-1)
+        end_idx = min((text.find(cue) for cue in SLEEP_END_CUES if cue in text), default=-1)
+        first, second = time_tokens[0], time_tokens[1]
+        if start_idx != -1 and end_idx != -1 and end_idx < start_idx:
+            inferred_start, inferred_end = second, first
+        else:
+            inferred_start, inferred_end = first, second
+        if not sleep_start:
+            sleep_start = inferred_start
+        if not sleep_end:
+            sleep_end = inferred_end
+    elif action == "start":
+        if not sleep_start and time_tokens:
+            sleep_start = time_tokens[0]
+    elif action == "end":
+        if not sleep_end and time_tokens:
+            if len(time_tokens) >= 2 and has_start_cue:
+                sleep_end = time_tokens[1]
+                if not sleep_start:
+                    sleep_start = time_tokens[0]
+            else:
+                sleep_end = time_tokens[0]
+
+    if sleep_start:
+        payload["sleep_start"] = sleep_start
+    if sleep_end:
+        payload["sleep_end"] = sleep_end
+
+    if payload.get("duration_minutes") in (None, "", 0):
+        derived_duration = _duration_from_sleep_tokens(
+            str(payload.get("sleep_start") or "").strip() or None,
+            str(payload.get("sleep_end") or "").strip() or None,
+        )
+        if derived_duration is not None and derived_duration > 0:
+            payload["duration_minutes"] = derived_duration
 
     return payload
 

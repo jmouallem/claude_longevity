@@ -14,6 +14,7 @@ from ai.orchestrator import (
     _looks_like_food_logging_message,
     _looks_like_food_planning_question,
     _minimal_food_payload_from_message,
+    _normalize_sleep_payload,
 )
 from ai.specialist_router import _heuristic_category
 
@@ -53,3 +54,25 @@ def test_food_planning_question_detector_avoids_false_logs():
     assert _looks_like_food_planning_question("Should I eat oats for breakfast?")
     assert not _looks_like_food_planning_question("I had a banana for lunch")
     assert not _looks_like_food_planning_question("I had a banana for lunch, is that okay?")
+
+
+def test_sleep_payload_normalization_sets_start_and_end_from_two_times():
+    payload = _normalize_sleep_payload(
+        "I went to bed at 10:30pm and woke up at 6:00 am",
+        {"action": "end", "sleep_start": None, "sleep_end": None, "duration_minutes": None},
+    )
+    assert payload is not None
+    assert str(payload.get("sleep_start") or "").lower().startswith("10:30")
+    assert str(payload.get("sleep_end") or "").lower().startswith("6:00")
+    assert int(payload.get("duration_minutes") or 0) >= 450
+
+
+def test_sleep_payload_normalization_does_not_set_end_to_bedtime():
+    payload = _normalize_sleep_payload(
+        "I went to bed at 10:30pm and woke up at 6:00 am",
+        {"action": "end", "sleep_end": None},
+    )
+    assert payload is not None
+    end_value = str(payload.get("sleep_end") or "").lower()
+    assert not end_value.startswith("10:30")
+    assert end_value.startswith("6:00")
