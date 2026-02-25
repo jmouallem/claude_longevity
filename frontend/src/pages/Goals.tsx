@@ -4,8 +4,8 @@ import { apiClient } from '../api/client';
 import { useAuthStore } from '../stores/authStore';
 import GoalChatPanel from '../components/GoalChatPanel';
 import {
-  TIME_BLOCKS, GOAL_TYPE_LABELS, GOAL_TYPE_STYLES, DEFAULT_STYLE, RING_CIRCUMFERENCE,
-  greetingFor, completionPct, daysRemaining, goalProgressPct, milestoneMessage, motivationalLine,
+  TIME_BLOCKS, GOAL_TYPE_LABELS, GOAL_TYPE_STYLES, DEFAULT_STYLE,
+  greetingFor, completionPct, daysRemaining, milestoneMessage, motivationalLine,
 } from '../utils/coaching-ui';
 import type { PlanStats } from '../utils/coaching-ui';
 import { ProgressRing, ProgressJourney, GoalTypeIcon } from '../utils/coaching-ui-components';

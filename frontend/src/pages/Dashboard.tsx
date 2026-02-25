@@ -6,7 +6,7 @@ import FastingTimer from '../components/FastingTimer';
 import { kgToLb, mlToOz, round1, type HydrationUnit, type WeightUnit } from '../utils/units';
 import { greetingFor, motivationalLine, GOAL_TYPE_LABELS, GOAL_TYPE_STYLES, DEFAULT_STYLE, goalProgressPct } from '../utils/coaching-ui';
 import type { GoalLike } from '../utils/coaching-ui';
-import { ProgressRing, GoalTypeIcon } from '../utils/coaching-ui-components';
+import { ProgressRing } from '../utils/coaching-ui-components';
 
 /* ─── Types ─── */
 

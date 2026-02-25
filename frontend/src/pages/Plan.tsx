@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { apiClient } from '../api/client';
-import { useAuthStore } from '../stores/authStore';
-import { greetingFor, motivationalLine, TIME_BLOCKS } from '../utils/coaching-ui';
+import { motivationalLine, TIME_BLOCKS } from '../utils/coaching-ui';
 import type { GoalLike, PlanStats } from '../utils/coaching-ui';
 import { ProgressRing, DomainIcon } from '../utils/coaching-ui-components';
 
@@ -505,9 +504,6 @@ function FrameworkPanel({ education }: { education: FrameworkEducation }) {
 /* ─── Main Component ─── */
 
 export default function Plan() {
-  const user = useAuthStore((state) => state.user);
-  const displayName = user?.display_name || '';
-
   const [currentMonth, setCurrentMonth] = useState(() => {
     const now = new Date();
     return { year: now.getFullYear(), month: now.getMonth() };
