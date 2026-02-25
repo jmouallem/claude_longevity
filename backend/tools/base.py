@@ -22,6 +22,7 @@ class ToolContext:
     user: User
     specialist_id: str = "orchestrator"
     reference_utc: datetime | None = None
+    message_id: int | None = None
 
 
 @dataclass(frozen=True)

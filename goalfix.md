@@ -190,3 +190,25 @@ The "start" path correctly does NOT refresh (fast is still in progress, no metri
 The "no_active_fast" fallback return also correctly does NOT refresh (nothing was written).
 
 **Fasting goals will now auto-close** when the logged duration hits the target metric.
+
+---
+
+## Outstanding Issues (Resolved)
+
+### Issue 5: Combined hydration + supplement messages lose the hydration data (FIXED)
+
+**Was:** "drank 24 oz with 10 mg creatine and fat burner" → only `log_supplement`, hydration lost.
+
+**Fix:** Added `_heuristic_log_categories()` in `specialist_router.py` — a multi-intent scanner that runs independent checks for ALL log categories instead of stopping at the first match. The orchestrator now merges these secondary categories into `log_categories` after the existing force-signal block.
+
+**Result:** "drank 24 oz with creatine and fat burner" → `[log_hydration, log_supplement]` — both get parsed and saved.
+
+### Issue 6: Hydration heuristic cues are too narrow (FIXED)
+
+**Was:** Hydration cues required "water" explicitly. "drank 24 oz" missed because no "water".
+
+**Fix:** Added regex-based detection for quantity + fluid unit + drinking verb (e.g., `\b\d+\s*(oz|ml|cups?|...)\b` + "drank"/"drink") in both `_heuristic_category()` and `_heuristic_log_categories()`. Also added named supplement detection (`_SUPPLEMENT_NAMES` tuple) and broadened food cues to align with `_looks_like_food_logging_message()`.
+
+**Files changed:**
+- `backend/ai/specialist_router.py` — added `_heuristic_log_categories()`, `_SUPPLEMENT_NAMES`, broadened hydration/supplement cues
+- `backend/ai/orchestrator.py` — added multi-intent merge loop after force-signal block

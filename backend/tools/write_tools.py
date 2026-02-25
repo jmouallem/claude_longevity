@@ -570,6 +570,7 @@ def _tool_vitals_log_write(args: dict[str, Any], ctx: ToolContext) -> dict[str, 
     row = VitalsLog(
         user_id=ctx.user.id,
         logged_at=_resolve_logged_at(args, ctx),
+        source_message_id=ctx.message_id,
         **payload,
     )
     ctx.db.add(row)
@@ -594,6 +595,7 @@ def _tool_exercise_log_write(args: dict[str, Any], ctx: ToolContext) -> dict[str
         avg_hr=_to_int(args.get("avg_hr"), "avg_hr"),
         calories_burned=_to_float(args.get("calories_burned"), "calories_burned"),
         notes=str(args.get("notes", "")).strip() or None,
+        source_message_id=ctx.message_id,
     )
     ctx.db.add(row)
     ctx.db.flush()
@@ -689,6 +691,7 @@ def _tool_food_log_write(args: dict[str, Any], ctx: ToolContext) -> dict[str, An
             fiber_g=(resolved_template.fiber_g * mult) if resolved_template.fiber_g is not None else None,
             sodium_mg=(resolved_template.sodium_mg * mult) if resolved_template.sodium_mg is not None else None,
             notes=str(args.get("notes", "")).strip() or None,
+            source_message_id=ctx.message_id,
         )
         ctx.db.add(row)
         ctx.db.flush()
@@ -707,6 +710,7 @@ def _tool_food_log_write(args: dict[str, Any], ctx: ToolContext) -> dict[str, An
         fiber_g=_coerce_float_field(args, "fiber_g", strict=False),
         sodium_mg=_coerce_float_field(args, "sodium_mg", strict=False),
         notes=str(args.get("notes", "")).strip() or None,
+        source_message_id=ctx.message_id,
     )
     ctx.db.add(row)
     ctx.db.flush()
@@ -724,6 +728,7 @@ def _tool_hydration_log_write(args: dict[str, Any], ctx: ToolContext) -> dict[st
         amount_ml=amount_ml,
         source=str(args.get("source", "water")).strip() or "water",
         notes=str(args.get("notes", "")).strip() or None,
+        source_message_id=ctx.message_id,
     )
     ctx.db.add(row)
     ctx.db.flush()
@@ -750,6 +755,7 @@ def _tool_supplement_log_write(args: dict[str, Any], ctx: ToolContext) -> dict[s
         supplements=_json_dumps(supplements),
         timing=str(args.get("timing", "")).strip() or None,
         notes=str(args.get("notes", "")).strip() or None,
+        source_message_id=ctx.message_id,
     )
     ctx.db.add(row)
     ctx.db.flush()
@@ -807,6 +813,7 @@ def _tool_sleep_log_write(args: dict[str, Any], ctx: ToolContext) -> dict[str, A
             duration_minutes=None,
             quality=quality,
             notes=notes,
+            source_message_id=ctx.message_id,
         )
         ctx.db.add(row)
         ctx.db.flush()
@@ -820,6 +827,7 @@ def _tool_sleep_log_write(args: dict[str, Any], ctx: ToolContext) -> dict[str, A
             duration_minutes=duration,
             quality=quality,
             notes=notes,
+            source_message_id=ctx.message_id,
         )
         ctx.db.add(row)
         ctx.db.flush()
@@ -852,6 +860,7 @@ def _tool_sleep_log_write(args: dict[str, Any], ctx: ToolContext) -> dict[str, A
             duration_minutes=resolved_minutes,
             quality=quality,
             notes=notes,
+            source_message_id=ctx.message_id,
         )
         ctx.db.add(row)
         ctx.db.flush()
@@ -872,6 +881,7 @@ def _tool_sleep_log_write(args: dict[str, Any], ctx: ToolContext) -> dict[str, A
             duration_minutes=duration,
             quality=quality,
             notes=notes,
+            source_message_id=ctx.message_id,
         )
         ctx.db.add(row)
         ctx.db.flush()
@@ -887,6 +897,8 @@ def _tool_sleep_log_write(args: dict[str, Any], ctx: ToolContext) -> dict[str, A
         active.quality = quality
     if notes:
         active.notes = notes
+    if ctx.message_id and not active.source_message_id:
+        active.source_message_id = ctx.message_id
     ctx.db.flush()
     _refresh_tasks_after_write(ctx)
     return {
@@ -911,6 +923,7 @@ def _tool_fasting_manage(args: dict[str, Any], ctx: ToolContext) -> dict[str, An
             fast_start=fast_start,
             fast_type=str(args.get("fast_type", "")).strip() or None,
             notes=str(args.get("notes", "")).strip() or None,
+            source_message_id=ctx.message_id,
         )
         ctx.db.add(row)
         ctx.db.flush()
@@ -935,6 +948,8 @@ def _tool_fasting_manage(args: dict[str, Any], ctx: ToolContext) -> dict[str, An
         if active.fast_end < start:
             active.fast_end = active.fast_end + timedelta(days=1)
         active.duration_minutes = int((active.fast_end - start).total_seconds() / 60)
+        if ctx.message_id and not active.source_message_id:
+            active.source_message_id = ctx.message_id
         ctx.db.flush()
         _refresh_tasks_after_write(ctx)
         return {"status": "ended", "fasting_log_id": active.id, "duration_minutes": active.duration_minutes}
@@ -951,6 +966,7 @@ def _tool_fasting_manage(args: dict[str, Any], ctx: ToolContext) -> dict[str, An
             duration_minutes=int((end_dt - start_dt).total_seconds() / 60),
             fast_type=str(args.get("fast_type", "")).strip() or None,
             notes=str(args.get("notes", "")).strip() or None,
+            source_message_id=ctx.message_id,
         )
         ctx.db.add(row)
         ctx.db.flush()

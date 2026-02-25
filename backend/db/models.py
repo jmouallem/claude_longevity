@@ -186,6 +186,7 @@ class FoodLog(Base):
     fiber_g = Column(Float)
     sodium_mg = Column(Float)
     notes = Column(Text)
+    source_message_id = Column(Integer, ForeignKey("messages.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     meal_template = relationship("MealTemplate", back_populates="food_logs")
@@ -311,6 +312,7 @@ class HydrationLog(Base):
     amount_ml = Column(Float, nullable=False)
     source = Column(Text)
     notes = Column(Text)
+    source_message_id = Column(Integer, ForeignKey("messages.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -328,6 +330,7 @@ class VitalsLog(Base):
     temperature_c = Column(Float)
     spo2 = Column(Float)
     notes = Column(Text)
+    source_message_id = Column(Integer, ForeignKey("messages.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -344,6 +347,7 @@ class ExerciseLog(Base):
     avg_hr = Column(Integer)
     calories_burned = Column(Float)
     notes = Column(Text)
+    source_message_id = Column(Integer, ForeignKey("messages.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -384,6 +388,7 @@ class SupplementLog(Base):
     supplements = Column(Text, nullable=False)  # JSON array
     timing = Column(Text)
     notes = Column(Text)
+    source_message_id = Column(Integer, ForeignKey("messages.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -397,6 +402,7 @@ class FastingLog(Base):
     duration_minutes = Column(Integer)
     fast_type = Column(Text)
     notes = Column(Text)
+    source_message_id = Column(Integer, ForeignKey("messages.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -410,6 +416,7 @@ class SleepLog(Base):
     duration_minutes = Column(Integer)
     quality = Column(Text)
     notes = Column(Text)
+    source_message_id = Column(Integer, ForeignKey("messages.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 

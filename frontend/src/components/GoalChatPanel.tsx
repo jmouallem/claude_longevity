@@ -139,14 +139,17 @@ function renderContent(content: string): ReactNode[] {
   return blocks;
 }
 
-/** Strip internal metadata tags (e.g. [task_id=123]) from user-facing text. */
+/** Strip internal metadata tags and tool call blocks from user-facing text. */
 function stripMetaTags(text: string): string {
-  return text.replace(/\s*\[task_id=\d+\]/g, '');
+  let cleaned = text.replace(/\s*\[task_id=\d+\]/g, '');
+  cleaned = cleaned.replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '');
+  cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
+  return cleaned.trim();
 }
 
 function MessageBubble({ message }: { message: ChatMessage }) {
   const isUser = message.role === 'user';
-  const displayContent = isUser ? stripMetaTags(message.content) : message.content;
+  const displayContent = stripMetaTags(message.content);
   return (
     <div className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
       <div

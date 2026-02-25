@@ -512,3 +512,56 @@ async def parse_log_data(
         record_ai_failure("utility", f"log_parse:{category}", str(e))
         logger.error(f"Log parsing failed for category {category}: {e}")
         return _deterministic_parse_by_category(message, category)
+
+
+# ---------------------------------------------------------------------------
+# Confidence-gated parse scoring
+# ---------------------------------------------------------------------------
+
+_CRITICAL_FIELDS: dict[str, list[str]] = {
+    "log_food": ["items"],
+    "log_vitals": [],  # any single vital is useful
+    "log_exercise": ["exercise_type"],
+    "log_supplement": ["supplements"],
+    "log_hydration": ["amount_ml"],
+    "log_sleep": [],  # action alone is useful
+    "log_fasting": [],  # action alone is useful
+}
+
+_NOTABLE_FIELDS: dict[str, list[str]] = {
+    "log_food": ["items", "calories", "protein_g", "carbs_g", "fat_g", "fiber_g"],
+    "log_vitals": ["weight_kg", "bp_systolic", "bp_diastolic", "heart_rate", "blood_glucose"],
+    "log_exercise": ["exercise_type", "duration_minutes", "calories_burned"],
+    "log_supplement": ["supplements"],
+    "log_hydration": ["amount_ml", "source"],
+    "log_sleep": ["sleep_start", "sleep_end", "duration_minutes", "quality"],
+    "log_fasting": ["fast_start", "fast_end", "duration_minutes"],
+}
+
+
+def assess_parse_confidence(parsed: dict, category: str) -> tuple[str, list[str]]:
+    """Score parse quality and return (confidence_level, missing_field_names).
+
+    confidence_level is "high", "medium", or "low".
+    missing_field_names lists notable fields that are absent/null.
+    """
+    notes = str(parsed.get("notes") or "").lower()
+    is_fallback = "deterministic fallback" in notes or "low-confidence" in notes
+
+    critical = _CRITICAL_FIELDS.get(category, [])
+    notable = _NOTABLE_FIELDS.get(category, [])
+
+    def _is_empty(val: object) -> bool:
+        return val is None or val == "" or val == []
+
+    critical_missing = [f for f in critical if _is_empty(parsed.get(f))]
+    notable_missing = [f.replace("_", " ") for f in notable if _is_empty(parsed.get(f))]
+    notable_present_count = len(notable) - len(notable_missing)
+
+    if is_fallback or critical_missing:
+        return "low", notable_missing
+
+    if notable and notable_present_count <= len(notable) / 2:
+        return "medium", notable_missing
+
+    return "high", notable_missing

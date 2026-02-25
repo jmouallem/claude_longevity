@@ -64,22 +64,31 @@
 49. Focused meal logging regression tests added.
 50. False-positive safeguards for planning questions (no unintended meal write).
 
+### Meal Recording Focus - Status Updates (33-44)
+33. Workflow A resilience (explicit meal logs): **Partially addressed** with forced food logging gates; edge cases remain.
+34. Workflow B resilience (short contextual follow-ups): **Partially addressed** via carry-over detection.
+35. Workflow C resilience (mixed log + nutrition question): **Mostly addressed** for food-first handling.
+38. Workflow F resilience (timezone/day-bucket perception): **Partially addressed** with server-driven dashboard day key.
+40. Phase M2 secondary food-intent override/carry-over: **Partially addressed**.
+41. Phase M3 deterministic parse/write fallback + failure surfacing: **Partially addressed**.
+43. Phase M5 server day-key consistency: **Partially addressed** in dashboard path.
+
 ## Items Outstanding
 
 ### Meal Recording Focus - Deferred Work
-33. Workflow A resilience: explicit meal logs still depend on category gate in edge cases.
-34. Workflow B resilience: short contextual follow-ups can still be fragile.
-35. Workflow C resilience: mixed log + nutrition-question handling consistency.
-36. Workflow D resilience: one-message multi-domain logging completeness.
-37. Workflow E resilience: menu save/update dependence on latest persisted meal.
-38. Workflow F resilience: perceived misses from timezone/day-bucket mismatch UX.
+33. Workflow A resilience: close remaining edge cases where explicit meal content bypasses write path.
+34. Workflow B resilience: increase confidence/coverage for terse follow-up meal replies.
+35. Workflow C resilience: enforce consistent “log first + coach” behavior for all mixed meal-question forms.
+36. Workflow D resilience: one-message multi-domain logging completeness is still unresolved.
+37. Workflow E resilience: menu save/update still depends on latest persisted meal and can drift.
+38. Workflow F resilience: remaining UX mismatch outside dashboard aggregation path.
 
 ### Deferred Execution Plan (Not Fully Closed)
 39. Phase M1 reproduction matrix + decision-trace telemetry for meal-write path.
-40. Phase M2 secondary food-intent override + one-turn context carry-over guarantees.
-41. Phase M3 deterministic parse/write guarantees + explicit failure surfacing.
+40. Phase M2 hard guarantees (not heuristics) for secondary food-intent override/carry-over.
+41. Phase M3 completion: deterministic parse/write guarantees across all food message patterns.
 42. Phase M4 multi-intent segmentation and idempotent multi-write execution.
-43. Phase M5 server-driven day-key UX consistency + write receipt UX.
+43. Phase M5 completion: server day-key consistency across all goal/chat/menu surfaces + write receipt UX.
 44. End-state validation criteria for zero silent meal drops across message patterns.
 
 ### P0 - Correctness and Data Integrity
@@ -600,27 +609,27 @@
 
 ### Perspectives and Workflow Lenses
 
-33. Workflow A - Explicit meal logs ("I had X for lunch") mostly works, but only if intent resolves to `log_food`
+33. Workflow A - Explicit meal logs ("I had X for lunch") **PARTIALLY ADDRESSED**
 - Evidence: Parse/write path is gated by `if category.startswith("log_")` (`backend/ai/orchestrator.py`).
 - Risk: Any misclassification bypasses parse + write entirely.
 
-34. Workflow B - Contextual follow-up replies are fragile ("banana and bagel")
+34. Workflow B - Contextual follow-up replies are fragile ("banana and bagel") **PARTIALLY ADDRESSED**
 - Evidence: Intent classifier is message-only (no conversational turn context) and can fallback to deterministic heuristics (`backend/ai/orchestrator.py`, `backend/ai/specialist_router.py`).
 - Risk: Short follow-up meal answers without strong cues can classify as `general_chat`, so no meal is written.
 
-35. Workflow C - Mixed log + question messages can be routed as Q&A and skip persistence
+35. Workflow C - Mixed log + question messages can be routed as Q&A and skip persistence **MOSTLY ADDRESSED (food path)**
 - Evidence: Food heuristic routes question-shaped meal messages to `ask_nutrition` (`backend/ai/specialist_router.py`).
 - Example failure: "I had a bagel and coffee, is that okay?" can be coached but not persisted.
 
-36. Workflow D - Multi-domain messages lose one side of the update
+36. Workflow D - Multi-domain messages lose one side of the update **OUTSTANDING**
 - Evidence: Router chooses one category only (`ROUTING_PROMPT_TEMPLATE` one-category contract in `backend/ai/specialist_router.py`).
 - Example failure: "I ate lunch and took my meds" persists only one domain depending on category chosen.
 
-37. Workflow E - Menu save/update confirmation and meal logging are separate paths
+37. Workflow E - Menu save/update confirmation and meal logging are separate paths **OUTSTANDING**
 - Evidence: Menu actions use intent helpers and recent food log lookup (`backend/ai/orchestrator.py`).
 - Risk: If the meal itself did not persist first, follow-up "yes save to menu" succeeds/fails against stale or missing latest food log.
 
-38. Workflow F - "Not recorded" perception can be day-bucket mismatch, not write failure
+38. Workflow F - "Not recorded" perception can be day-bucket mismatch, not write failure **PARTIALLY ADDRESSED**
 - Evidence: Meal writes use inferred/explicit `logged_at`; dashboard reads by `target_date`.
 - Risk: Meals inferred near day boundary/timezone edges appear under adjacent day and look missing in "today" view.
 
@@ -633,7 +642,7 @@
 
 ### Deferred Implementation Plan
 
-39. Phase M1 - Reproduction Matrix and Telemetry Hardening
+39. Phase M1 - Reproduction Matrix and Telemetry Hardening **OUTSTANDING**
 - Add a meal-log diagnostic matrix in tests for 6 message shapes:
   - explicit statement
   - short follow-up
@@ -647,27 +656,27 @@
   - write success/failure reason
   - resulting food_log_id(s)
 
-40. Phase M2 - Intent and Routing Reliability
+40. Phase M2 - Intent and Routing Reliability **PARTIALLY ADDRESSED**
 - Add a secondary food-intent detector in orchestrator that can override category to `log_food` when strong meal evidence exists, even if classifier returns `ask_nutrition`/`general_chat`.
 - Introduce "context carryover intent" for one turn after assistant asks meal-detail follow-up, so short answers are treated as food logs.
 - Support `log_food + coaching` behavior for mixed meal/question messages.
 
-41. Phase M3 - Parse/Write Safety Guarantees
+41. Phase M3 - Parse/Write Safety Guarantees **PARTIALLY ADDRESSED**
 - Ensure meal logging path always attempts deterministic parse fallback before giving up when category indicates food-like content.
 - On write failure, enforce explicit assistant disclosure ("not saved") and actionable retry guidance.
 - Add optional minimal-write mode for low-confidence meal extraction with a pending-confirmation tag.
 
-42. Phase M4 - Multi-Intent Handling
+42. Phase M4 - Multi-Intent Handling **OUTSTANDING**
 - Add orchestrator split-pass for compound user messages:
   - identify meal segment and medication/supplement segment in same turn,
   - execute multiple write tools idempotently,
   - return one unified coaching response summarizing all successful writes.
 
-43. Phase M5 - UX/Readback Consistency
+43. Phase M5 - UX/Readback Consistency **PARTIALLY ADDRESSED**
 - Standardize server-driven day keys for meal totals in all goal/dashboard/chat follow-up cards.
 - Add a visible "Logged just now" confirmation snippet in chat sourced from actual write output (`food_log_id`, meal label, timestamp) to reduce ambiguity.
 
-44. Validation and Done Criteria (Meal Logging)
+44. Validation and Done Criteria (Meal Logging) **OUTSTANDING**
 - 0% silent meal-drop for tested patterns: if user message contains meal content, system either writes a food log or explicitly asks clarifying follow-up before claiming success.
 - Mixed meal+question and mixed meal+med turns persist expected writes in one turn.
 - Dashboard "today" meal counts match newly logged meals for user timezone within one refresh cycle.

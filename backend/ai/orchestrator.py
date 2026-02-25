@@ -11,8 +11,14 @@ from sqlalchemy.orm import Session
 
 from config import settings
 from ai.context_builder import build_context, get_recent_messages
-from ai.specialist_router import classify_intent
-from ai.log_parser import parse_log_data
+from ai.specialist_router import classify_intent, _heuristic_log_categories
+from ai.log_parser import parse_log_data, assess_parse_confidence
+from ai.tool_call_executor import (
+    DirectToolCallExecutor,
+    extract_tool_calls,
+    format_tool_results_context,
+    strip_tool_calls,
+)
 from ai.image_analyzer import analyze_image
 from ai.providers import get_provider
 from ai.usage_tracker import track_model_usage, track_usage_from_result
@@ -2050,33 +2056,131 @@ def _format_menu_context(menu_action: dict[str, Any] | None, followup_hint: dict
     return "\n".join(lines).strip()
 
 
-def _build_log_write_context(
+# Fields the user can meaningfully provide, per log category.
+# Used to surface "missing" hints so the AI can ask follow-up questions.
+_NOTABLE_FIELDS: dict[str, list[str]] = {
+    "log_food": ["items", "calories", "protein_g", "carbs_g", "fat_g", "fiber_g"],
+    "log_vitals": ["weight_kg", "bp_systolic", "bp_diastolic", "heart_rate", "blood_glucose"],
+    "log_exercise": ["exercise_type", "duration_minutes", "calories_burned"],
+    "log_supplement": ["supplements"],
+    "log_hydration": ["amount_ml", "source"],
+    "log_sleep": ["sleep_start", "sleep_end", "duration_minutes", "quality"],
+    "log_fasting": ["fast_start", "fast_end", "duration_minutes"],
+}
+
+_CATEGORY_LABELS: dict[str, str] = {
+    "log_food": "Food",
+    "log_vitals": "Vitals",
+    "log_exercise": "Exercise",
+    "log_supplement": "Supplement",
+    "log_hydration": "Hydration",
+    "log_sleep": "Sleep",
+    "log_fasting": "Fasting",
+}
+
+
+def _summarize_parsed_fields(parsed: dict[str, Any], category: str) -> tuple[list[str], list[str]]:
+    """Return (present_lines, missing_field_names) for a parsed log payload."""
+    notable = _NOTABLE_FIELDS.get(category, [])
+    present: list[str] = []
+    missing: list[str] = []
+    for field in notable:
+        value = parsed.get(field)
+        if value is None or value == "" or value == []:
+            missing.append(field.replace("_", " "))
+        elif isinstance(value, list):
+            # Summarize list items (e.g. food items, supplements)
+            names = []
+            for item in value[:5]:
+                if isinstance(item, dict):
+                    names.append(str(item.get("name") or item.get("item") or item))
+                else:
+                    names.append(str(item))
+            summary = ", ".join(names)
+            if len(value) > 5:
+                summary += f" (+{len(value) - 5} more)"
+            present.append(f"  - {field}: {summary}")
+        else:
+            present.append(f"  - {field}: {value}")
+    # Include notes if present
+    notes = parsed.get("notes")
+    if notes:
+        present.append(f"  - notes: {notes}")
+    return present, missing
+
+
+def _build_single_log_context(
     category: str,
     parsed_log: dict[str, Any] | None,
     saved_out: dict[str, Any] | None,
     write_error: str | None,
 ) -> str:
-    if not category.startswith("log_"):
-        return ""
+    label = _CATEGORY_LABELS.get(category, category)
+    if isinstance(saved_out, dict) and isinstance(parsed_log, dict):
+        lines = [f"### {label} Log: saved"]
+        confidence = parsed_log.get("_parse_confidence", "high")
+        conf_missing = parsed_log.get("_parse_missing_fields", [])
+        if confidence == "low":
+            lines.append("  **Parse confidence: LOW** -- ask user to verify recorded values and provide missing details before coaching.")
+        elif confidence == "medium":
+            missing_str = ", ".join(conf_missing) if conf_missing else "some fields"
+            lines.append(f"  Parse confidence: MEDIUM -- confirm values and ask about missing fields: {missing_str}.")
+        present, missing = _summarize_parsed_fields(parsed_log, category)
+        if present:
+            lines.append("  Recorded:")
+            lines.extend(present)
+        if missing:
+            lines.append(f"  Missing (user could provide): {', '.join(missing)}")
+        lines.append("  You may confirm this event as saved.")
+        return "\n".join(lines)
     if isinstance(saved_out, dict):
-        return (
-            "## Write Status\n"
-            "- Structured log write: success\n"
-            "- You may confirm this event as saved."
-        )
+        return f"### {label} Log: saved\n  You may confirm this event as saved."
     if isinstance(parsed_log, dict):
         reason = (write_error or "unknown").strip() or "unknown"
         return (
-            "## Write Status\n"
-            "- Structured log write: failed\n"
-            f"- Failure reason: {reason}\n"
-            "- Do not claim this event was saved.\n"
-            "- Tell the user save failed and ask them to retry."
+            f"### {label} Log: FAILED\n"
+            f"  Failure reason: {reason}\n"
+            "  Do not claim this event was saved. Tell the user and ask them to retry."
         )
     return (
-        "## Write Status\n"
-        "- No structured payload could be extracted for this logging intent.\n"
-        "- Do not claim this event was saved."
+        f"### {label} Log: not captured\n"
+        "  No structured payload could be extracted.\n"
+        "  Do not claim this event was saved."
+    )
+
+
+def _build_log_write_context(
+    category: str,
+    parsed_log: dict[str, Any] | None,
+    saved_out: dict[str, Any] | None,
+    write_error: str | None,
+    *,
+    parsed_by_category: dict[str, dict[str, Any]] | None = None,
+    saved_by_category: dict[str, dict[str, Any]] | None = None,
+    write_error_by_category: dict[str, str] | None = None,
+) -> str:
+    # If multi-category data is provided, build context for all of them.
+    if parsed_by_category or saved_by_category:
+        all_cats = sorted(
+            set(list(parsed_by_category or {}) + list(saved_by_category or {}))
+        )
+        if not all_cats:
+            return ""
+        sections = ["## Write Status"]
+        for cat in all_cats:
+            sections.append(_build_single_log_context(
+                cat,
+                (parsed_by_category or {}).get(cat),
+                (saved_by_category or {}).get(cat),
+                (write_error_by_category or {}).get(cat),
+            ))
+        return "\n".join(sections)
+
+    # Fallback: single-category (backward compat)
+    if not category.startswith("log_"):
+        return ""
+    return "## Write Status\n" + _build_single_log_context(
+        category, parsed_log, saved_out, write_error
     )
 
 
@@ -3107,9 +3211,10 @@ async def save_structured_log(
     category: str,
     data: dict,
     reference_utc: datetime | None = None,
+    message_id: int | None = None,
 ):
     """Save parsed structured data to the appropriate log table."""
-    tool_ctx = ToolContext(db=db, user=user, specialist_id="orchestrator", reference_utc=reference_utc)
+    tool_ctx = ToolContext(db=db, user=user, specialist_id="orchestrator", reference_utc=reference_utc, message_id=message_id)
     out: dict[str, Any] | None = None
     if category == "log_food" and data:
         out = tool_registry.execute(
@@ -3425,6 +3530,22 @@ async def process_chat(
         log_categories.insert(0, "log_sleep")
     if force_fasting_logging and "log_fasting" not in log_categories:
         log_categories.insert(0, "log_fasting")
+    # Multi-intent scan: detect secondary log categories missed by the
+    # single-return classifier (e.g., hydration in "drank 24 oz with creatine").
+    for secondary_cat in _heuristic_log_categories(message):
+        if secondary_cat not in log_categories:
+            log_categories.append(secondary_cat)
+
+    # Save user message early so source_message_id is available for log writes.
+    user_msg = Message(
+        user_id=user.id,
+        role="user",
+        content=message,
+        has_image=bool(image_bytes),
+        created_at=message_received_utc,
+    )
+    db.add(user_msg)
+    db.commit()
 
     if log_categories and not menu_command_only and not bool(time_confirmation_gate.get("skip_log_parse")):
         user_profile = ""
@@ -3473,6 +3594,9 @@ async def process_chat(
             )
 
             if isinstance(parsed_one, dict):
+                confidence, missing = assess_parse_confidence(parsed_one, log_category)
+                parsed_one["_parse_confidence"] = confidence
+                parsed_one["_parse_missing_fields"] = missing
                 parsed_by_category[log_category] = parsed_one
             if not parsed_one:
                 continue
@@ -3483,6 +3607,7 @@ async def process_chat(
                     log_category,
                     parsed_one,
                     reference_utc=message_received_utc,
+                    message_id=user_msg.id,
                 )
                 _persist_low_confidence_time_confirmation(
                     db=db,
@@ -3661,6 +3786,9 @@ async def process_chat(
         parsed_log=parsed_log_data,
         saved_out=saved_log_out,
         write_error=log_write_error,
+        parsed_by_category=parsed_by_category,
+        saved_by_category=saved_by_category,
+        write_error_by_category=write_error_by_category,
     )
     verbosity_context = _verbosity_style_context(_normalize_chat_verbosity(verbosity))
     time_inference_context = _build_time_inference_context(parsed_log_data)
@@ -3696,16 +3824,7 @@ async def process_chat(
     recent = get_recent_messages(db, user, limit=20)
     messages = recent + [{"role": "user", "content": combined_input}]
 
-    # 6. Save user message
-    user_msg = Message(
-        user_id=user.id,
-        role="user",
-        content=message,
-        has_image=bool(image_bytes),
-        created_at=message_received_utc,
-    )
-    db.add(user_msg)
-    db.commit()
+    # 6. user_msg already saved earlier (before log-save loop) for source_message_id linking.
 
     # 6b. Capture meal response signal from chat if present (energy/GI patterns).
     try:
@@ -3782,6 +3901,29 @@ async def process_chat(
             full_response += append_text
             yield {"type": "chunk", "text": append_text}
 
+        # 7b. Post-response AI tool calls
+        # Extract <tool_call> blocks from the AI response and execute them.
+        ai_tool_calls = extract_tool_calls(full_response)
+        ai_tool_results_text = ""
+        if ai_tool_calls:
+            tool_ctx = ToolContext(
+                db=db,
+                user=user,
+                specialist_id=specialist,
+                reference_utc=message_received_utc,
+            )
+            executor = DirectToolCallExecutor(tool_registry)
+            ai_tool_results = await executor.execute(ai_tool_calls, tool_ctx)
+            db.commit()
+            results_summary = format_tool_results_context(ai_tool_results)
+            if results_summary:
+                ai_tool_results_text = f"\n\n**Actions taken:**\n{results_summary}"
+                yield {"type": "chunk", "text": ai_tool_results_text}
+            # Strip tool_call blocks from the stored response
+            full_response = strip_tool_calls(full_response)
+            if ai_tool_results_text:
+                full_response += ai_tool_results_text
+
         yield {"type": "done", "specialist": specialist, "category": category}
 
     except Exception as e:
@@ -3792,6 +3934,8 @@ async def process_chat(
         yield {"type": "error", "text": error_msg}
 
     # 8. Save assistant message
+    # Strip any residual <tool_call> blocks before persisting
+    full_response = strip_tool_calls(full_response) if "<tool_call>" in full_response else full_response
     assistant_msg = Message(
         user_id=user.id,
         role="assistant",

@@ -137,6 +137,16 @@ def run_startup_migrations() -> None:
     if plan_task_columns and "time_of_day" not in plan_task_columns:
         alter_statements.append("ALTER TABLE coaching_plan_tasks ADD COLUMN time_of_day TEXT DEFAULT 'anytime'")
 
+    # Add source_message_id FK to all health log tables for message correlation.
+    _log_tables_for_source_msg = [
+        "food_log", "hydration_log", "vitals_log", "exercise_log",
+        "supplement_log", "fasting_log", "sleep_log",
+    ]
+    for _tbl in _log_tables_for_source_msg:
+        _cols = _table_columns(_tbl)
+        if _cols and "source_message_id" not in _cols:
+            alter_statements.append(f"ALTER TABLE {_tbl} ADD COLUMN source_message_id INTEGER")
+
     with engine.begin() as conn:
         for stmt in alter_statements:
             conn.execute(text(stmt))
