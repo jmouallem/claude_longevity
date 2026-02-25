@@ -53,8 +53,13 @@ async function requestMicrophoneAccess(): Promise<void> {
 export function useVoice() {
   const [isListening, setIsListening] = useState(false);
   const [transcript, setTranscript] = useState('');
+  const [interimText, setInterimText] = useState('');
   const [error, setError] = useState<string | null>(null);
   const recognitionRef = useRef<SpeechRecognitionInstance | null>(null);
+  // Accumulate finalized segments across the continuous session
+  const accumulatedRef = useRef('');
+  // Track intentional stop so onend doesn't restart
+  const stoppingRef = useRef(false);
 
   const isSupported = getSpeechRecognition() !== null;
 
@@ -80,37 +85,44 @@ export function useVoice() {
         return;
       }
       setError(null);
+      accumulatedRef.current = '';
+      stoppingRef.current = false;
 
       const recognition = new SpeechRecognitionCtor();
-      recognition.continuous = false;
+      recognition.continuous = true;
       recognition.interimResults = true;
       recognition.lang = 'en-US';
 
       recognition.onresult = (event: SpeechRecognitionEvent) => {
-        let finalTranscript = '';
-        let interimTranscript = '';
+        let finalChunk = '';
+        let interim = '';
 
         for (let i = event.resultIndex; i < event.results.length; i++) {
           const result = event.results[i];
           if (result.isFinal) {
-            finalTranscript += result[0].transcript;
+            finalChunk += result[0].transcript;
           } else {
-            interimTranscript += result[0].transcript;
+            interim += result[0].transcript;
           }
         }
 
-        setTranscript(finalTranscript || interimTranscript);
+        if (finalChunk) {
+          const sep = accumulatedRef.current ? ' ' : '';
+          accumulatedRef.current += sep + finalChunk;
+          setTranscript(accumulatedRef.current);
+        }
+        setInterimText(interim);
       };
 
       recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
         const code = event?.error || 'unknown';
+        // "no-speech" is common during pauses — don't kill the session
+        if (code === 'no-speech') return;
         if (code === 'not-allowed') {
           setError('Microphone permission denied.');
-        } else if (code === 'no-speech') {
-          setError('No speech detected. Try again.');
         } else if (code === 'audio-capture') {
           setError('No microphone detected.');
-        } else {
+        } else if (code !== 'aborted') {
           setError(`Voice error: ${code}`);
         }
         setIsListening(false);
@@ -118,12 +130,27 @@ export function useVoice() {
       };
 
       recognition.onend = () => {
-        setIsListening(false);
-        recognitionRef.current = null;
+        // If user intentionally stopped, finalize
+        if (stoppingRef.current) {
+          setIsListening(false);
+          recognitionRef.current = null;
+          return;
+        }
+        // Otherwise the browser stopped on its own (silence timeout) — restart
+        // to keep recording until user explicitly presses stop.
+        if (recognitionRef.current) {
+          try {
+            recognitionRef.current.start();
+          } catch {
+            setIsListening(false);
+            recognitionRef.current = null;
+          }
+        }
       };
 
       recognitionRef.current = recognition;
       setTranscript('');
+      setInterimText('');
       setIsListening(true);
       try {
         recognition.start();
@@ -138,16 +165,19 @@ export function useVoice() {
   }, []);
 
   const stopListening = useCallback(() => {
+    stoppingRef.current = true;
     if (recognitionRef.current) {
       recognitionRef.current.stop();
       recognitionRef.current = null;
     }
+    setInterimText('');
     setIsListening(false);
   }, []);
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
+      stoppingRef.current = true;
       if (recognitionRef.current) {
         recognitionRef.current.abort();
         recognitionRef.current = null;
@@ -155,5 +185,5 @@ export function useVoice() {
     };
   }, []);
 
-  return { isListening, transcript, isSupported, error, startListening, stopListening };
+  return { isListening, transcript, interimText, isSupported, error, startListening, stopListening };
 }
