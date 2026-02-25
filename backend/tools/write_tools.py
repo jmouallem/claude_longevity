@@ -917,6 +917,19 @@ def _tool_fasting_manage(args: dict[str, Any], ctx: ToolContext) -> dict[str, An
         raise ToolExecutionError("`action` must be `start` or `end`")
 
     if action == "start":
+        # Auto-close any existing active fast before starting a new one
+        existing = (
+            ctx.db.query(FastingLog)
+            .filter(FastingLog.user_id == ctx.user.id, FastingLog.fast_end.is_(None))
+            .all()
+        )
+        for old in existing:
+            old_start = old.fast_start if old.fast_start.tzinfo else old.fast_start.replace(tzinfo=timezone.utc)
+            old.fast_end = now
+            old.duration_minutes = int((now - old_start).total_seconds() / 60)
+        if existing:
+            ctx.db.flush()
+
         fast_start = _resolve_local_datetime(ctx, args.get("fast_start"), now)
         row = FastingLog(
             user_id=ctx.user.id,

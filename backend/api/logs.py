@@ -388,6 +388,9 @@ def _daily_checklist_payload(db: Session, user: User, d: date, tz_name: str | No
     return DailyChecklistResponse(target_date=d_iso, medications=med_items, supplements=supp_items)
 
 
+_MAX_FAST_HOURS = 36  # Auto-close fasts older than this
+
+
 def _active_fast_payload(db: Session, user: User) -> dict:
     active = (
         db.query(FastingLog)
@@ -399,6 +402,14 @@ def _active_fast_payload(db: Session, user: User) -> dict:
         return {"active": False}
     fast_start = active.fast_start if active.fast_start.tzinfo else active.fast_start.replace(tzinfo=timezone.utc)
     elapsed = (datetime.now(timezone.utc) - fast_start).total_seconds() / 60
+
+    # Auto-close zombie fasts that exceed the maximum duration
+    if elapsed > _MAX_FAST_HOURS * 60:
+        active.fast_end = fast_start + timedelta(hours=_MAX_FAST_HOURS)
+        active.duration_minutes = _MAX_FAST_HOURS * 60
+        db.commit()
+        return {"active": False}
+
     return {
         "active": True,
         "id": active.id,
