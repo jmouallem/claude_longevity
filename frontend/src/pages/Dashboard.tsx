@@ -1,8 +1,14 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { apiClient } from '../api/client';
+import { useAuthStore } from '../stores/authStore';
 import FastingTimer from '../components/FastingTimer';
 import { kgToLb, mlToOz, round1, type HydrationUnit, type WeightUnit } from '../utils/units';
+import { greetingFor, motivationalLine, GOAL_TYPE_LABELS, GOAL_TYPE_STYLES, DEFAULT_STYLE, goalProgressPct } from '../utils/coaching-ui';
+import type { GoalLike } from '../utils/coaching-ui';
+import { ProgressRing, GoalTypeIcon } from '../utils/coaching-ui-components';
+
+/* ─── Types ─── */
 
 interface DailyTotals {
   date: string;
@@ -105,6 +111,14 @@ interface DashboardSnapshot {
   };
 }
 
+interface UserGoal extends GoalLike {
+  id: number;
+  status: string;
+  priority: number;
+}
+
+/* ─── Helpers ─── */
+
 function dayKeyForTimezone(timezone?: string | null, when: Date = new Date()): string {
   if (!timezone) return toIsoDate(when);
   try {
@@ -134,6 +148,133 @@ function shiftIsoDate(isoDate: string, days: number): string {
   dt.setUTCDate(dt.getUTCDate() + days);
   return dt.toISOString().slice(0, 10);
 }
+
+function toIsoDate(d: Date): string {
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+function formatShortDate(isoDate: string): string {
+  const d = new Date(`${isoDate}T00:00:00`);
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+
+function buildWeightSeries(vitals: Vital[], fromDate: string, toDate: string): WeightPoint[] {
+  const byDay = new Map<string, WeightPoint>();
+  for (const v of vitals) {
+    if (v.weight_kg == null) continue;
+    const day = v.logged_at.slice(0, 10);
+    byDay.set(day, { date: day, weight_kg: v.weight_kg });
+  }
+
+  const series: WeightPoint[] = [];
+  let cursor = new Date(`${fromDate}T00:00:00`);
+  const end = new Date(`${toDate}T00:00:00`);
+  while (cursor <= end) {
+    const day = toIsoDate(cursor);
+    const point = byDay.get(day);
+    if (point) series.push(point);
+    cursor = new Date(cursor.getTime() + 86400000);
+  }
+  return series;
+}
+
+const ALL_DONE_MESSAGES = [
+  "All done for today — you've earned some rest!",
+  "Today's plan: crushed. Tomorrow: ready.",
+  "Every task checked off. Consistency is your superpower.",
+  "Clean sweep today — your future self thanks you.",
+  "100% complete. That's the energy we love to see.",
+  "Nothing left but to be proud of yourself today.",
+  "All tasks done — momentum is building!",
+];
+
+function allDoneMessage(): string {
+  const dayOfYear = Math.floor((Date.now() - new Date(new Date().getFullYear(), 0, 0).getTime()) / 86400000);
+  return ALL_DONE_MESSAGES[dayOfYear % ALL_DONE_MESSAGES.length];
+}
+
+/* ─── SVG Icons for metric cards ─── */
+
+function CalorieIcon() {
+  return (
+    <svg className="w-5 h-5" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M10 2c0 4-4 6-4 10a4 4 0 0 0 8 0c0-4-4-6-4-10z" />
+    </svg>
+  );
+}
+
+function HydrationIcon() {
+  return (
+    <svg className="w-5 h-5" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M10 2c-3 5-6 7.5-6 11a6 6 0 0 0 12 0c0-3.5-3-6-6-11z" />
+    </svg>
+  );
+}
+
+function ExerciseIcon() {
+  return (
+    <svg className="w-5 h-5" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M3 10h14M5 7v6M15 7v6M7 5v10M13 5v10" />
+    </svg>
+  );
+}
+
+function SodiumIcon() {
+  return (
+    <svg className="w-5 h-5" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="10" cy="10" r="8" />
+      <path d="M7 7l6 6" />
+    </svg>
+  );
+}
+
+function WeightIcon() {
+  return (
+    <svg className="w-5 h-5" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M10 3v14M6 13l4 4 4-4" />
+    </svg>
+  );
+}
+
+function MedsIcon() {
+  return (
+    <svg className="w-5 h-5" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="4" y="4" width="12" height="12" rx="3" />
+      <path d="M4 10h12M10 4v12" />
+    </svg>
+  );
+}
+
+function VitalsIcon() {
+  return (
+    <svg className="w-5 h-5" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M10 17s-7-4.5-7-9a4 4 0 0 1 7-2.5A4 4 0 0 1 17 8c0 4.5-7 9-7 9z" />
+    </svg>
+  );
+}
+
+function MacrosIcon() {
+  return (
+    <svg className="w-5 h-5" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="10" cy="10" r="8" />
+      <path d="M10 2v16M2 10h16" />
+    </svg>
+  );
+}
+
+function FastingIcon() {
+  return (
+    <svg className="w-5 h-5" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="10" cy="10" r="8" />
+      <path d="M10 6v4l2.5 2.5" />
+    </svg>
+  );
+}
+
+/* ─── Sub-components ─── */
 
 function MacroBar({ protein, carbs, fat }: { protein: number; carbs: number; fat: number }) {
   const total = protein + carbs + fat || 1;
@@ -198,7 +339,7 @@ function MacroTargetsCard({
         <div className="flex-1 flex items-start justify-around gap-4">
         {macros.map((m) => {
           const pct = m.target > 0 ? (m.value / m.target) * 100 : 0;
-          const fillPct = Math.min(pct, 200) / 2; // 200% => full bar
+          const fillPct = Math.min(pct, 200) / 2;
           return (
             <div key={m.key} className="flex flex-col items-center gap-2 w-20">
               <div className="relative h-32 w-12 mt-6 rounded-md bg-slate-700 border border-slate-600 overflow-hidden">
@@ -227,45 +368,39 @@ function MacroTargetsCard({
   );
 }
 
-function Card({ title, children, className = '' }: { title: string; children: React.ReactNode; className?: string }) {
+function MetricCard({
+  title,
+  icon,
+  accent = 'emerald',
+  helperText,
+  children,
+  className = '',
+}: {
+  title: string;
+  icon: React.ReactNode;
+  accent?: 'emerald' | 'sky' | 'amber' | 'rose';
+  helperText?: string;
+  children: React.ReactNode;
+  className?: string;
+}) {
+  const accentBorder: Record<string, string> = {
+    emerald: 'border-l-emerald-500',
+    sky: 'border-l-sky-500',
+    amber: 'border-l-amber-500',
+    rose: 'border-l-rose-500',
+  };
   return (
-    <div className={`bg-slate-800 rounded-xl p-5 border border-slate-700 ${className}`}>
-      <h3 className="text-sm font-medium text-slate-400 mb-3">{title}</h3>
+    <div className={`bg-slate-800 rounded-xl p-5 border border-slate-700 border-l-[3px] ${accentBorder[accent]} ${className}`}>
+      <div className="flex items-center gap-2 mb-3">
+        <div className="text-slate-400">{icon}</div>
+        <h3 className="text-sm font-medium text-slate-400">{title}</h3>
+      </div>
       {children}
+      {helperText && (
+        <p className="text-xs text-slate-500 mt-2">{helperText}</p>
+      )}
     </div>
   );
-}
-
-function formatShortDate(isoDate: string): string {
-  const d = new Date(`${isoDate}T00:00:00`);
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-}
-
-function toIsoDate(d: Date): string {
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, '0');
-  const dd = String(d.getDate()).padStart(2, '0');
-  return `${yyyy}-${mm}-${dd}`;
-}
-
-function buildWeightSeries(vitals: Vital[], fromDate: string, toDate: string): WeightPoint[] {
-  const byDay = new Map<string, WeightPoint>();
-  for (const v of vitals) {
-    if (v.weight_kg == null) continue;
-    const day = v.logged_at.slice(0, 10);
-    byDay.set(day, { date: day, weight_kg: v.weight_kg });
-  }
-
-  const series: WeightPoint[] = [];
-  let cursor = new Date(`${fromDate}T00:00:00`);
-  const end = new Date(`${toDate}T00:00:00`);
-  while (cursor <= end) {
-    const day = toIsoDate(cursor);
-    const point = byDay.get(day);
-    if (point) series.push(point);
-    cursor = new Date(cursor.getTime() + 86400000);
-  }
-  return series;
 }
 
 function WeightTrendChart({
@@ -295,8 +430,11 @@ function WeightTrendChart({
 
   if (allValues.length === 0) {
     return (
-      <div className="h-[130px] rounded-lg border border-slate-700 bg-slate-900/40 flex items-center justify-center text-xs text-slate-500">
-        No weight data in last 14 days
+      <div className="h-[130px] rounded-lg border border-slate-700 bg-slate-900/40 flex flex-col items-center justify-center gap-2">
+        <div className="w-8 h-8 rounded-full bg-slate-700/50 flex items-center justify-center">
+          <WeightIcon />
+        </div>
+        <p className="text-xs text-slate-500">No weight data in last 14 days</p>
       </div>
     );
   }
@@ -395,7 +533,14 @@ function VitalsTrendChart({
   const hrValues = points.map((p) => p.hr).filter((v): v is number => v != null);
   const anySeries = sysValues.length > 0 || diaValues.length > 0 || hrValues.length > 0;
   if (!anySeries) {
-    return <p className="text-slate-500 text-sm">No BP/HR data in last 2 weeks</p>;
+    return (
+      <div className="flex flex-col items-center justify-center gap-2 py-4">
+        <div className="w-8 h-8 rounded-full bg-slate-700/50 flex items-center justify-center">
+          <VitalsIcon />
+        </div>
+        <p className="text-xs text-slate-500">No BP/HR data in last 2 weeks</p>
+      </div>
+    );
   }
 
   const all = [...sysValues, ...diaValues, ...hrValues];
@@ -444,8 +589,13 @@ function VitalsTrendChart({
   );
 }
 
+/* ─── Main Component ─── */
+
 export default function Dashboard() {
   const navigate = useNavigate();
+  const user = useAuthStore((state) => state.user);
+  const displayName = user?.display_name || '';
+
   const [totals, setTotals] = useState<DailyTotals | null>(null);
   const [vitals, setVitals] = useState<Vital[]>([]);
   const [profile, setProfile] = useState<ProfileData | null>(null);
@@ -460,13 +610,15 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [targetDate, setTargetDate] = useState<string>(today());
   const [planSnapshot, setPlanSnapshot] = useState<DailyPlanSnapshot | null>(null);
+  const [goals, setGoals] = useState<UserGoal[]>([]);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
-      const [snapshot, planData] = await Promise.all([
+      const [snapshot, planData, goalsData] = await Promise.all([
         apiClient.get<DashboardSnapshot>('/api/logs/dashboard'),
         apiClient.get<DailyPlanSnapshot>('/api/plan/snapshot?cycle_type=daily').catch(() => null),
+        apiClient.get<UserGoal[]>('/api/goals?status=active').catch(() => [] as UserGoal[]),
       ]);
       const p = snapshot.profile || null;
       const todayKey = snapshot.target_date || today(p?.timezone);
@@ -484,6 +636,7 @@ export default function Dashboard() {
       setWeightSeries(buildWeightSeries(vitalsRange, fromIso, toIso));
       setWeightRange({ from: fromIso, to: toIso });
       setPlanSnapshot(planData);
+      setGoals(goalsData);
     } catch {
       // individual cards will show empty state
     } finally {
@@ -493,7 +646,6 @@ export default function Dashboard() {
 
   const goToCoachForTask = (task: DailyPlanTask) => {
     const desc = task.description ? ` (${task.description})` : '';
-    // Pass the coaching check-in prompt via navigation state so Chat can pre-fill
     navigate('/chat', { state: { chatFill: `Goal check-in: ${task.title}${desc} [task_id=${task.id}]` } });
   };
 
@@ -501,7 +653,6 @@ export default function Dashboard() {
     fetchData();
   }, [fetchData]);
 
-  // Refetch when page becomes visible again (e.g. returning from Chat page)
   useEffect(() => {
     const onVisible = () => {
       if (document.visibilityState === 'visible') fetchData();
@@ -564,7 +715,6 @@ export default function Dashboard() {
   const carbs = totals?.food.carbs_g ?? 0;
   const fat = totals?.food.fat_g ?? 0;
 
-  // Mifflin-St Jeor BMR × 1.375 (lightly active) for calorie target
   const calorieTarget = (() => {
     if (profile?.current_weight_kg && profile?.height_cm && profile?.age) {
       const bmr = profile.sex?.toLowerCase().startsWith('f')
@@ -612,15 +762,81 @@ export default function Dashboard() {
   const totalTasks = planSnapshot?.upcoming_tasks?.length ?? 0;
   const streak = planSnapshot?.reward?.completed_daily_streak ?? 0;
   const allDoneToday = totalTasks > 0 && completedTasks.length === totalTasks;
+  const planStats = planSnapshot ? planSnapshot.stats : undefined;
+
+  // Calorie helper text
+  const calRemaining = Math.max(0, calorieTarget - Math.round(totals?.food.calories ?? 0));
+  const calOver = Math.max(0, Math.round(totals?.food.calories ?? 0) - calorieTarget);
+  const calorieHelper = totals
+    ? (calOver > 0
+        ? `Over by ${calOver} kcal — adjust tomorrow`
+        : `Room for ~${calRemaining} kcal`)
+    : undefined;
+
+  // Hydration helper text
+  const hydrationHelper = (() => {
+    if (!totals) return undefined;
+    if (hydrationPct >= 100) return 'Water goal hit!';
+    if (hydrationPct >= 50) return 'More than halfway!';
+    return `${Math.round(hydrationPct)}% to water goal`;
+  })();
+
+  // Exercise helper text
+  const exerciseMin = totals ? Math.round(totals.exercise_minutes) : 0;
+  const exerciseHelper = exerciseMin === 0
+    ? 'Get moving! Even 10 minutes counts.'
+    : `Active for ${exerciseMin} min today`;
+
+  // Meds helper
+  const medsTaken = (checklist?.medications || []).filter(m => m.completed).length;
+  const medsTotal = (checklist?.medications || []).length;
+  const suppsTaken = (checklist?.supplements || []).filter(s => s.completed).length;
+  const suppsTotal = (checklist?.supplements || []).length;
+  const allChecklistTotal = medsTotal + suppsTotal;
+  const allChecklistDone = medsTaken + suppsTaken;
+  const medsHelper = allChecklistTotal > 0
+    ? `${allChecklistDone} of ${allChecklistTotal} taken today`
+    : undefined;
+
+  // Weight helper
+  const currentWeightDisplay = latestWeight != null
+    ? displayWeight(latestWeight)
+    : profile?.current_weight_kg != null
+      ? displayWeight(profile.current_weight_kg)
+      : null;
+  const goalWeightDisplay = profile?.goal_weight_kg ? displayWeight(profile.goal_weight_kg) : null;
+  const weightHelper = (() => {
+    if (currentWeightDisplay == null || goalWeightDisplay == null) return undefined;
+    const diff = Math.abs(round1(currentWeightDisplay - goalWeightDisplay));
+    if (diff <= 0.1) return 'At your goal weight!';
+    return `${diff} ${weightUnit} to go`;
+  })();
+
+  // Top 3 active goals for the goal strip
+  const topGoals = goals.slice(0, 3);
 
   return (
     <div className="max-w-6xl mx-auto px-4 py-6">
-      <div className="flex items-center justify-between mb-4">
+      {/* ─── Personalized Header ─── */}
+      <div className="flex items-start justify-between mb-5">
         <div>
-          <h1 className="text-2xl font-bold text-slate-100">Dashboard</h1>
-          <p className="text-slate-400 text-sm mt-1">{new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}</p>
+          <h1 className="text-2xl font-bold text-slate-100">{greetingFor(displayName)}</h1>
+          <p className="text-slate-400 text-sm mt-1">
+            {new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}
+          </p>
+          <p className="text-sm text-slate-300 mt-1">
+            {motivationalLine(goals, planStats, streak)}
+          </p>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 shrink-0">
+          {streak > 0 && (
+            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-amber-900/30 border border-amber-700/30">
+              <svg className="w-4 h-4 text-amber-400" viewBox="0 0 20 20" fill="currentColor">
+                <path d="M10 2c0 4-4 6-4 10a4 4 0 0 0 8 0c0-4-4-6-4-10z" />
+              </svg>
+              <span className="text-sm font-semibold text-amber-300">{streak}</span>
+            </div>
+          )}
           {genMessage && (
             <span className={`text-sm ${genMessage.includes('success') ? 'text-emerald-400' : 'text-rose-400'}`}>
               {genMessage}
@@ -636,49 +852,42 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* Today's Focus coaching card */}
+      {/* ─── Today's Focus Hero ─── */}
       {planSnapshot && totalTasks > 0 && (
-        <div className={`mb-5 rounded-xl border p-4 ${
+        <div className={`mb-5 rounded-xl border p-5 bg-gradient-to-br ${
           allDoneToday
-            ? 'border-emerald-700/50 bg-emerald-950/30'
-            : 'border-slate-700 bg-slate-800/60'
+            ? 'from-emerald-950/40 to-slate-800/60 border-emerald-700/40'
+            : 'from-slate-800/80 to-slate-800/40 border-slate-700'
         }`}>
-          <div className="flex items-center justify-between gap-3 mb-3">
-            <div className="flex items-center gap-3">
+          <div className="flex items-center justify-between gap-4 mb-4">
+            <div className="flex items-center gap-4">
+              <ProgressRing
+                pct={totalTasks > 0 ? (completedTasks.length / totalTasks) * 100 : 0}
+                color={allDoneToday ? '#34d399' : '#38bdf8'}
+                size={48}
+              />
               <div>
-                <h2 className="text-sm font-semibold text-slate-100">
+                <h2 className="text-base font-semibold text-slate-100">
                   {allDoneToday ? "Today's plan complete!" : "Today's Focus"}
                 </h2>
-                <p className="text-xs text-slate-400 mt-0.5">
-                  {completedTasks.length}/{totalTasks} goals done
-                  {streak > 1 ? ` · ${streak}-day streak` : ''}
+                <p className="text-sm text-slate-400 mt-0.5">
+                  {completedTasks.length}/{totalTasks} tasks done
+                  {streak > 1 && (
+                    <span className="ml-2 inline-flex items-center gap-1 text-amber-400">
+                      <svg className="w-3.5 h-3.5" viewBox="0 0 20 20" fill="currentColor"><path d="M10 2c0 4-4 6-4 10a4 4 0 0 0 8 0c0-4-4-6-4-10z" /></svg>
+                      {streak}-day streak
+                    </span>
+                  )}
                 </p>
               </div>
             </div>
-            <div className="flex items-center gap-2 shrink-0">
-              {/* Progress ring */}
-              <svg width="40" height="40" viewBox="0 0 40 40" className="shrink-0">
-                <circle cx="20" cy="20" r="16" fill="none" stroke="rgba(51,65,85,1)" strokeWidth="4" />
-                <circle
-                  cx="20" cy="20" r="16" fill="none"
-                  stroke={allDoneToday ? 'rgb(52,211,153)' : 'rgb(56,189,248)'}
-                  strokeWidth="4"
-                  strokeLinecap="round"
-                  strokeDasharray={`${totalTasks > 0 ? (completedTasks.length / totalTasks) * 100.5 : 0} 100.5`}
-                  transform="rotate(-90 20 20)"
-                />
-                <text x="20" y="24" textAnchor="middle" fontSize="10" fill={allDoneToday ? 'rgb(52,211,153)' : 'rgb(148,163,184)'} fontWeight="600">
-                  {totalTasks > 0 ? Math.round((completedTasks.length / totalTasks) * 100) : 0}%
-                </text>
-              </svg>
-              <button
-                type="button"
-                onClick={() => navigate('/chat')}
-                className="px-3 py-1.5 text-xs rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white font-medium transition-colors"
-              >
-                Chat with Coach
-              </button>
-            </div>
+            <button
+              type="button"
+              onClick={() => navigate('/chat')}
+              className="px-4 py-2 text-sm rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white font-medium transition-colors shrink-0"
+            >
+              Chat with Coach
+            </button>
           </div>
 
           {!allDoneToday && pendingTasks.length > 0 && (
@@ -688,17 +897,25 @@ export default function Dashboard() {
                   key={task.id}
                   type="button"
                   onClick={() => goToCoachForTask(task)}
-                  className="w-full flex items-center gap-3 rounded-lg border border-slate-700 bg-slate-900/50 hover:bg-slate-800 px-3 py-2 text-left transition-colors group"
+                  className="w-full flex items-center gap-3 rounded-lg border border-slate-700/60 bg-slate-900/40 hover:bg-slate-800/60 px-4 py-2.5 text-left transition-colors group"
                 >
                   <div className="flex-1 min-w-0">
                     <p className="text-sm text-slate-100 font-medium truncate">{task.title}</p>
                     {task.framework_name && (
-                      <p className="text-[11px] text-cyan-400 mt-0.5">{task.framework_name}</p>
+                      <p className="text-[11px] text-cyan-400/80 mt-0.5">{task.framework_name}</p>
                     )}
                   </div>
-                  <div className="flex items-center gap-2 shrink-0">
+                  <div className="flex items-center gap-3 shrink-0">
+                    {task.progress_pct > 0 && (
+                      <div className="w-16 h-1.5 rounded-full bg-slate-700 overflow-hidden">
+                        <div
+                          className="h-full rounded-full bg-emerald-500 transition-all duration-500"
+                          style={{ width: `${Math.min(task.progress_pct, 100)}%` }}
+                        />
+                      </div>
+                    )}
                     <span className="text-xs text-slate-400">{Math.round(task.progress_pct)}%</span>
-                    <span className="text-xs text-slate-400 group-hover:text-emerald-400 transition-colors">Update →</span>
+                    <span className="text-xs text-slate-400 group-hover:text-emerald-400 transition-colors">Update</span>
                   </div>
                 </button>
               ))}
@@ -706,25 +923,54 @@ export default function Dashboard() {
                 <button
                   type="button"
                   onClick={() => navigate('/plan')}
-                  className="text-xs text-slate-400 hover:text-slate-200 mt-1"
+                  className="text-xs text-slate-400 hover:text-slate-200 mt-1 ml-1"
                 >
-                  +{pendingTasks.length - 3} more → View Plan
+                  +{pendingTasks.length - 3} more tasks in Plan
                 </button>
               )}
             </div>
           )}
 
           {allDoneToday && (
-            <p className="text-sm text-emerald-300">
-              All goals completed for today. Great work! Keep it up tomorrow.
-            </p>
+            <p className="text-sm text-emerald-300/90">{allDoneMessage()}</p>
           )}
         </div>
       )}
 
+      {/* ─── Goal Progress Strip ─── */}
+      {topGoals.length > 0 && (
+        <div className="mb-5 flex gap-3 overflow-x-auto pb-1">
+          {topGoals.map((goal) => {
+            const style = GOAL_TYPE_STYLES[goal.goal_type] || DEFAULT_STYLE;
+            const pct = goalProgressPct(goal);
+            const label = GOAL_TYPE_LABELS[goal.goal_type] || goal.goal_type.replace('_', ' ');
+            return (
+              <button
+                key={goal.id}
+                type="button"
+                onClick={() => navigate('/goals')}
+                className={`flex items-center gap-3 px-4 py-2.5 rounded-xl border ${style.border} bg-gradient-to-r ${style.gradientFrom} ${style.gradientTo} hover:opacity-90 transition-opacity shrink-0`}
+              >
+                <ProgressRing pct={pct} color={style.ring} size={32} />
+                <div className="text-left">
+                  <p className="text-xs font-medium text-slate-200 truncate max-w-[140px]">{goal.title}</p>
+                  <p className={`text-[11px] ${style.text}`}>{label}</p>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {/* ─── Metric Cards Grid ─── */}
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
         {/* Calories */}
-        <Card title="Calories">
+        <MetricCard
+          title="Calories"
+          icon={<CalorieIcon />}
+          accent={calOver > 0 ? 'rose' : 'emerald'}
+          helperText={calorieHelper}
+        >
           <div className="flex items-end justify-between">
             <p className="text-3xl font-bold text-slate-100">
               {totals ? Math.round(totals.food.calories) : 0}
@@ -743,15 +989,22 @@ export default function Dashboard() {
                     style={{ width: `${Math.min((totals.food.calories / calorieTarget) * 100, 100)}%` }}
                   />
                 </div>
-                <p className="text-xs text-slate-500 mt-1">{totals.food.meal_count} meal{totals.food.meal_count !== 1 ? 's' : ''} · {Math.max(0, calorieTarget - Math.round(totals.food.calories))} kcal remaining</p>
+                <p className="text-xs text-slate-500 mt-1">
+                  {totals.food.meal_count} meal{totals.food.meal_count !== 1 ? 's' : ''} logged
+                </p>
               </div>
               <MacroBar protein={totals.food.protein_g} carbs={totals.food.carbs_g} fat={totals.food.fat_g} />
             </>
           )}
-        </Card>
+        </MetricCard>
 
         {/* Hydration */}
-        <Card title="Hydration">
+        <MetricCard
+          title="Hydration"
+          icon={<HydrationIcon />}
+          accent="sky"
+          helperText={hydrationHelper}
+        >
           <p className="text-3xl font-bold text-slate-100">
             {hydrationValue}
             <span className="text-lg font-normal text-slate-500 ml-1">{hydrationUnit}</span>
@@ -768,12 +1021,17 @@ export default function Dashboard() {
               />
             </div>
           </div>
-        </Card>
+        </MetricCard>
 
         {/* Exercise */}
-        <Card title="Exercise">
+        <MetricCard
+          title="Exercise"
+          icon={<ExerciseIcon />}
+          accent={exerciseMin > 0 ? 'emerald' : 'amber'}
+          helperText={exerciseHelper}
+        >
           <p className="text-3xl font-bold text-slate-100">
-            {totals ? Math.round(totals.exercise_minutes) : 0}
+            {exerciseMin}
             <span className="text-lg font-normal text-slate-500 ml-1">min</span>
           </p>
           {totals && totals.exercise_calories_burned > 0 && (
@@ -816,10 +1074,14 @@ export default function Dashboard() {
               {generatingPlan ? 'Generating...' : 'Generate Plan'}
             </button>
           </div>
-        </Card>
+        </MetricCard>
 
         {/* Sodium */}
-        <Card title="Sodium">
+        <MetricCard
+          title="Sodium"
+          icon={<SodiumIcon />}
+          accent={sodiumOverMg > 0 ? 'rose' : 'emerald'}
+        >
           <p className={`text-3xl font-bold ${sodiumOverMg > 0 ? 'text-rose-400' : 'text-slate-100'}`}>
             {sodiumTodayMg}
             <span className="text-lg font-normal text-slate-500 ml-1">mg</span>
@@ -841,15 +1103,30 @@ export default function Dashboard() {
               <p className="text-xs text-slate-500 mt-2">{sodiumUpperLimitMg - sodiumTodayMg} mg remaining</p>
             )}
           </div>
-        </Card>
+        </MetricCard>
 
         {/* Fasting */}
-        <Card title="Fasting Timer">
+        <MetricCard title="Fasting Timer" icon={<FastingIcon />} accent="amber">
           <FastingTimer />
-        </Card>
+        </MetricCard>
 
         {/* Meds & Vitamins */}
-        <Card title="Meds & Vitamins">
+        <MetricCard
+          title="Meds & Vitamins"
+          icon={<MedsIcon />}
+          accent={allChecklistTotal > 0 && allChecklistDone === allChecklistTotal ? 'emerald' : 'amber'}
+          helperText={medsHelper}
+        >
+          {allChecklistTotal > 0 && (
+            <div className="mb-3">
+              <div className="h-1.5 rounded-full bg-slate-700 overflow-hidden">
+                <div
+                  className="h-full rounded-full bg-emerald-500 transition-all duration-500"
+                  style={{ width: `${allChecklistTotal > 0 ? (allChecklistDone / allChecklistTotal) * 100 : 0}%` }}
+                />
+              </div>
+            </div>
+          )}
           <div className="space-y-3">
             <div>
               <p className="text-xs text-slate-500 mb-1">Medications</p>
@@ -898,20 +1175,21 @@ export default function Dashboard() {
               </div>
             </div>
           </div>
-        </Card>
+        </MetricCard>
 
         {/* Weight */}
-        <Card title="Weight">
+        <MetricCard
+          title="Weight"
+          icon={<WeightIcon />}
+          accent="emerald"
+          helperText={weightHelper}
+        >
           <div className="grid grid-cols-[90px_1fr] gap-3">
             <div className="space-y-2">
               <div>
                 <p className="text-xs text-slate-500">Current</p>
                 <p className="text-2xl font-bold text-slate-100">
-                  {latestWeight != null
-                    ? displayWeight(latestWeight)
-                    : profile?.current_weight_kg != null
-                      ? displayWeight(profile.current_weight_kg)
-                      : '--'}
+                  {currentWeightDisplay ?? '--'}
                   <span className="text-sm font-normal text-slate-500 ml-1">{weightUnit}</span>
                 </p>
               </div>
@@ -942,10 +1220,10 @@ export default function Dashboard() {
               )}
             </div>
           </div>
-        </Card>
+        </MetricCard>
 
         {/* Macro Targets */}
-        <Card title="Macro Targets (P/C/F)">
+        <MetricCard title="Macro Targets (P/C/F)" icon={<MacrosIcon />} accent="amber">
           <MacroTargetsCard
             protein={protein}
             carbs={carbs}
@@ -954,10 +1232,19 @@ export default function Dashboard() {
             carbsTarget={carbsTargetG}
             fatTarget={fatTargetG}
           />
-        </Card>
+        </MetricCard>
 
         {/* Vitals */}
-        <Card title="Latest Vitals">
+        <MetricCard
+          title="Latest Vitals"
+          icon={<VitalsIcon />}
+          accent="rose"
+          helperText={
+            !(latestVital && (latestVital.bp_systolic || latestVital.heart_rate)) && vitalsWindow.length === 0
+              ? 'No vitals logged today. A quick check-in helps track trends.'
+              : undefined
+          }
+        >
           {(latestVital && (latestVital.bp_systolic || latestVital.heart_rate)) || vitalsWindow.length > 0 ? (
             <div className="space-y-3">
               <div className="flex items-center justify-between text-xs text-slate-400">
@@ -971,9 +1258,15 @@ export default function Dashboard() {
               )}
             </div>
           ) : (
-            <p className="text-slate-500 text-sm">No vitals recorded today</p>
+            <div className="flex flex-col items-center justify-center gap-2 py-6">
+              <div className="w-10 h-10 rounded-full bg-slate-700/50 flex items-center justify-center text-slate-500">
+                <VitalsIcon />
+              </div>
+              <p className="text-sm text-slate-500">No vitals recorded today</p>
+              <p className="text-xs text-slate-600">Log via chat to start tracking</p>
+            </div>
           )}
-        </Card>
+        </MetricCard>
       </div>
     </div>
   );
