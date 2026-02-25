@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
@@ -20,6 +21,7 @@ from db.models import (
     User,
     UserGoal,
     UserSettings,
+    VitalsLog,
 )
 from services.health_framework_service import FRAMEWORK_TYPES, ensure_default_frameworks
 from utils.datetime_utils import end_of_day, start_of_day, start_of_week, today_for_tz, sleep_log_overlaps_window
@@ -630,6 +632,60 @@ def _ensure_window_tasks(db: Session, user: User, window: CycleWindow, framework
     return created
 
 
+_GOAL_TYPE_TO_METRICS: dict[str, list[str]] = {
+    "weight_loss": ["meals_logged", "food_log_days", "exercise_minutes", "exercise_sessions"],
+    "cardiovascular": ["exercise_minutes", "exercise_sessions"],
+    "fitness": ["exercise_minutes", "exercise_sessions"],
+    "metabolic": ["meals_logged", "food_log_days"],
+    "energy": ["sleep_minutes", "exercise_minutes", "meals_logged"],
+    "sleep": ["sleep_minutes"],
+    "habit": ["manual_check"],
+    "custom": [],
+}
+
+
+def link_tasks_to_goals(db: Session, user: User, window: CycleWindow) -> int:
+    """Assign goal_id to unlinked tasks whose target_metric matches a goal type."""
+    active_goals = (
+        db.query(UserGoal)
+        .filter(UserGoal.user_id == user.id, UserGoal.status == "active")
+        .order_by(UserGoal.priority.asc())
+        .all()
+    )
+    if not active_goals:
+        return 0
+
+    metric_to_goal: dict[str, int] = {}
+    for goal in active_goals:
+        goal_metrics = _GOAL_TYPE_TO_METRICS.get(str(goal.goal_type or "custom"), [])
+        for metric in goal_metrics:
+            if metric not in metric_to_goal:
+                metric_to_goal[metric] = int(goal.id)
+
+    if not metric_to_goal:
+        return 0
+
+    tasks = (
+        db.query(CoachingPlanTask)
+        .filter(
+            CoachingPlanTask.user_id == user.id,
+            CoachingPlanTask.cycle_type == window.cycle_type,
+            CoachingPlanTask.cycle_start == window.start.isoformat(),
+            CoachingPlanTask.goal_id.is_(None),
+        )
+        .all()
+    )
+    linked = 0
+    for task in tasks:
+        goal_id = metric_to_goal.get(str(task.target_metric or ""))
+        if goal_id:
+            task.goal_id = goal_id
+            linked += 1
+    if linked:
+        db.flush()
+    return linked
+
+
 def ensure_plan_seeded(
     db: Session,
     user: User,
@@ -648,6 +704,7 @@ def ensure_plan_seeded(
     created = 0
     for window in windows:
         created += _ensure_window_tasks(db, user, window, frameworks)
+        link_tasks_to_goals(db, user, window)
     return {"created": created}
 
 
@@ -836,6 +893,94 @@ def _create_missed_task_notification(db: Session, user: User, task: CoachingPlan
     db.add(reminder)
 
 
+def _refresh_goal_progress(db: Session, user: User, reference_day: date) -> int:
+    """Update UserGoal.current_value from the latest log data.
+
+    Only updates goals that have a target_value and target_unit set.
+    Returns count of goals updated.
+    """
+    active_goals = (
+        db.query(UserGoal)
+        .filter(UserGoal.user_id == user.id, UserGoal.status == "active")
+        .all()
+    )
+    if not active_goals:
+        return 0
+
+    tz_name = _tz_name(user)
+    updated = 0
+
+    for goal in active_goals:
+        if goal.target_value is None:
+            continue
+
+        new_value: float | None = None
+        gtype = str(goal.goal_type or "custom")
+        unit = str(goal.target_unit or "").lower()
+
+        if gtype == "weight_loss" and unit in ("kg", "lbs", "lb", "pounds"):
+            latest = (
+                db.query(VitalsLog)
+                .filter(VitalsLog.user_id == user.id, VitalsLog.weight_kg.isnot(None))
+                .order_by(VitalsLog.logged_at.desc())
+                .first()
+            )
+            if latest and latest.weight_kg is not None:
+                new_value = float(latest.weight_kg)
+
+        elif gtype == "cardiovascular" and ("systolic" in unit or "mmhg" in unit or "bp" in unit):
+            latest = (
+                db.query(VitalsLog)
+                .filter(VitalsLog.user_id == user.id, VitalsLog.bp_systolic.isnot(None))
+                .order_by(VitalsLog.logged_at.desc())
+                .first()
+            )
+            if latest and latest.bp_systolic is not None:
+                new_value = float(latest.bp_systolic)
+
+        elif gtype == "sleep" and ("min" in unit or "hour" in unit):
+            window_start = start_of_day(reference_day - timedelta(days=7), tz_name)
+            window_end = end_of_day(reference_day, tz_name)
+            sleep_logs = (
+                db.query(SleepLog)
+                .filter(
+                    SleepLog.user_id == user.id,
+                    sleep_log_overlaps_window(SleepLog, window_start, window_end),
+                )
+                .all()
+            )
+            values = [float(s.duration_minutes) for s in sleep_logs
+                      if s.duration_minutes is not None and float(s.duration_minutes) >= 0]
+            if values:
+                new_value = sum(values) / len(values)
+
+        elif gtype == "fitness" and ("min" in unit or "session" in unit):
+            window_start = start_of_day(reference_day - timedelta(days=7), tz_name)
+            window_end = end_of_day(reference_day, tz_name)
+            exercises = (
+                db.query(ExerciseLog)
+                .filter(
+                    ExerciseLog.user_id == user.id,
+                    ExerciseLog.logged_at >= window_start,
+                    ExerciseLog.logged_at <= window_end,
+                )
+                .all()
+            )
+            if "session" in unit:
+                new_value = float(len(exercises))
+            else:
+                new_value = float(sum(e.duration_minutes or 0 for e in exercises))
+
+        if new_value is not None and new_value != goal.current_value:
+            goal.current_value = round(new_value, 2)
+            goal.updated_at = datetime.now(timezone.utc)
+            updated += 1
+
+    if updated:
+        db.flush()
+    return updated
+
+
 def refresh_task_statuses(
     db: Session,
     user: User,
@@ -912,6 +1057,7 @@ def refresh_task_statuses(
         if new_status == "missed":
             missed += 1
 
+    _refresh_goal_progress(db, user, day)
     return {"updated": touched, "completed": completed, "missed": missed}
 
 
@@ -1136,6 +1282,7 @@ def _task_to_dict(task: CoachingPlanTask) -> dict[str, Any]:
         "due_at": task.due_at.isoformat() if task.due_at else None,
         "completed_at": task.completed_at.isoformat() if task.completed_at else None,
         "source": task.source,
+        "goal_id": task.goal_id,
     }
 
 

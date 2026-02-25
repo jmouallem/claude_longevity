@@ -516,10 +516,12 @@ class CoachingPlanTask(Base):
     completed_at = Column(DateTime)
     source = Column(Text, nullable=False, default="system")  # intake | user | adaptive | system
     metadata_json = Column(Text)
+    goal_id = Column(Integer, ForeignKey("user_goals.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     user = relationship("User", back_populates="coaching_plan_tasks")
+    goal = relationship("UserGoal", backref="tasks")
 
 
 class UserGoal(Base):

@@ -127,6 +127,9 @@ Triggered when the user has just completed intake, when no UserGoal records exis
 
 ## Goal-Refinement Workflow (When Goals Already Exist)
 Triggered when a message starts with "Goal-refinement kickoff:" or the user asks to refine existing goals.
+
+**Note:** If goals were auto-created from intake (created_by='intake'), they are drafts that may lack specific target values, timelines, and personal why. Show the existing goals and help the user fill in these details. Use `update_goal` to add specifics rather than creating duplicates.
+
 1. Summarize current active goals and ask what should change first.
 2. Confirm adjustments to target value, timeline, priority, and why before updating.
 3. Use `<tool_call>` with `update_goal` to apply changes and keep goals measurable.

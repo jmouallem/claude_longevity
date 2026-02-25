@@ -19,6 +19,7 @@ interface UserGoal {
   status: string;
   priority: number;
   why?: string;
+  created_by?: string;
   progress_pct?: number;
 }
 
@@ -154,12 +155,14 @@ function buildGoalKickoffPrompt(args: {
   }
 
   const listedGoals = goals.slice(0, 5).map(formatGoalForPrompt).join('; ');
+  const hasIntakeDrafts = isOnboarding && goals.some(g => g.created_by === 'intake');
   return [
     `Goal-refinement kickoff${namePart}:`,
     `Please review and refine my existing goals: ${listedGoals}.`,
+    hasIntakeDrafts ? 'These goals were auto-created from my intake answers and may need specific targets and timelines.' : '',
     'Help me keep only high-value goals, adjust targets/timelines where needed, and update any goal records.',
     'After we finalize changes, remind me to return to the Goals page to review todays timeline.',
-  ].join(' ');
+  ].filter(Boolean).join(' ');
 }
 
 function formatDateLabel(isoDate: string): string {

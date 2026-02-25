@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy.orm import Session
 
-from db.models import IntakeSession, UserSettings
+from db.models import IntakeSession, UserGoal, UserSettings
 from services.health_framework_service import sync_frameworks_from_settings
 from services.coaching_plan_service import ensure_plan_seeded
 from utils.med_utils import cleanup_structured_list, merge_structured_items, parse_structured_list, to_structured
@@ -629,6 +629,95 @@ def _apply_patch_to_settings(settings: UserSettings, patch: dict[str, Any]) -> N
         setattr(settings, field_id, value)
 
 
+_INTAKE_GOAL_HEURISTICS: list[tuple[tuple[str, ...], str, str, int]] = [
+    # (keywords, goal_type, default_title, priority)
+    (("lose weight", "weight loss", "drop weight", "shed weight", "slim down"), "weight_loss", "Lose weight", 1),
+    (("lower blood pressure", "reduce blood pressure", "bp", "hypertension"), "cardiovascular", "Lower blood pressure", 1),
+    (("improve cardio", "heart health", "cardiovascular"), "cardiovascular", "Improve cardiovascular health", 2),
+    (("build muscle", "gain muscle", "strength", "get stronger"), "fitness", "Build strength", 2),
+    (("improve fitness", "get fit", "more active", "exercise more"), "fitness", "Improve fitness", 2),
+    (("better sleep", "sleep better", "improve sleep", "more sleep", "sleep quality"), "sleep", "Improve sleep quality", 2),
+    (("more energy", "improve energy", "less fatigue", "energy level"), "energy", "Boost energy levels", 2),
+    (("blood sugar", "glucose", "a1c", "diabetes", "metabolic"), "metabolic", "Improve metabolic health", 2),
+    (("eat better", "nutrition", "healthier diet", "eat healthier", "clean eating"), "habit", "Improve nutrition habits", 3),
+    (("reduce stress", "manage stress", "stress"), "habit", "Manage stress", 3),
+]
+
+
+def create_goals_from_intake(
+    db: Session,
+    user_id: int,
+    health_goals: list[str],
+    settings: UserSettings,
+) -> list[UserGoal]:
+    """Convert flat health_goal strings from intake into draft UserGoal records.
+
+    Uses heuristic keyword matching. Goals are created with created_by='intake'
+    and minimal target_value (filled in during goal-setting chat refinement).
+    """
+    if not health_goals:
+        return []
+
+    existing = (
+        db.query(UserGoal)
+        .filter(UserGoal.user_id == user_id, UserGoal.status == "active")
+        .all()
+    )
+    existing_titles_lower = {str(g.title or "").strip().lower() for g in existing}
+
+    created: list[UserGoal] = []
+    for raw_goal in health_goals[:5]:
+        goal_lower = str(raw_goal).strip().lower()
+        if not goal_lower:
+            continue
+
+        matched_type = "custom"
+        matched_title = raw_goal.strip()
+        matched_priority = 3
+        for keywords, gtype, default_title, priority in _INTAKE_GOAL_HEURISTICS:
+            if any(kw in goal_lower for kw in keywords):
+                matched_type = gtype
+                matched_title = default_title
+                matched_priority = priority
+                break
+
+        if matched_title.lower() in existing_titles_lower:
+            continue
+        if goal_lower in existing_titles_lower:
+            continue
+
+        baseline_value = None
+        target_value = None
+        target_unit = None
+        if matched_type == "weight_loss" and settings:
+            if settings.current_weight_kg:
+                baseline_value = float(settings.current_weight_kg)
+                target_unit = "kg"
+            if settings.goal_weight_kg:
+                target_value = float(settings.goal_weight_kg)
+
+        goal = UserGoal(
+            user_id=user_id,
+            title=matched_title,
+            description=f"From intake: {raw_goal.strip()}",
+            goal_type=matched_type,
+            target_value=target_value,
+            target_unit=target_unit,
+            baseline_value=baseline_value,
+            current_value=baseline_value,
+            status="active",
+            priority=matched_priority,
+            created_by="intake",
+        )
+        db.add(goal)
+        created.append(goal)
+        existing_titles_lower.add(matched_title.lower())
+
+    if created:
+        db.flush()
+    return created
+
+
 def finalize_session(session: IntakeSession, settings: UserSettings, db: Session | None = None) -> dict[str, Any]:
     patch = _draft_patch(session)
     _apply_patch_to_settings(settings, patch)
@@ -640,6 +729,17 @@ def finalize_session(session: IntakeSession, settings: UserSettings, db: Session
     settings.intake_skipped_at = None
 
     if db is not None and settings.user is not None:
+        # Create draft UserGoal records from health_goals BEFORE plan seeding
+        # so tasks can be linked to goals.
+        health_goals_raw = patch.get("health_goals") or []
+        if not health_goals_raw and settings.health_goals:
+            try:
+                health_goals_raw = json.loads(settings.health_goals)
+            except (json.JSONDecodeError, TypeError):
+                health_goals_raw = []
+        if isinstance(health_goals_raw, list) and health_goals_raw:
+            create_goals_from_intake(db, settings.user.id, health_goals_raw, settings)
+
         sync_frameworks_from_settings(db, settings.user, source="intake", commit=False)
         ensure_plan_seeded(db, settings.user)
 
