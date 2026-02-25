@@ -36,6 +36,7 @@ interface PlanTask {
   priority_score: number;
   target_value?: number;
   target_unit?: string;
+  goal_id?: number;
 }
 
 interface PlanStats {
@@ -99,6 +100,17 @@ const TIME_BLOCKS = [
   { key: 'anytime', label: 'Anytime' },
 ];
 
+const GOAL_TYPE_LABELS: Record<string, string> = {
+  weight_loss: 'Lose Weight',
+  cardiovascular: 'Heart Health',
+  fitness: 'Get Stronger',
+  metabolic: 'Blood Sugar & Metabolism',
+  energy: 'More Energy',
+  sleep: 'Better Sleep',
+  habit: 'Build a Habit',
+  custom: 'Personal Goal',
+};
+
 const GOAL_TYPE_STYLES: Record<string, {
   text: string;
   ring: string;
@@ -116,14 +128,14 @@ const GOAL_TYPE_STYLES: Record<string, {
   custom:         { text: 'text-emerald-400', ring: '#34d399', gradientFrom: 'from-emerald-950/40', gradientTo: 'to-slate-800', border: 'border-emerald-800/30' },
 };
 const DEFAULT_STYLE = GOAL_TYPE_STYLES.custom;
-const RING_CIRCUMFERENCE = 2 * Math.PI * 16; // ~100.53
+const RING_CIRCUMFERENCE = 2 * Math.PI * 16;
 
 /* ─── Helpers ─── */
 
 function greetingFor(name: string): string {
   const hour = new Date().getHours();
   const greeting = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
-  return name ? `${greeting}, ${name}.` : `${greeting}.`;
+  return name ? `${greeting}, ${name}` : `${greeting}`;
 }
 
 function formatGoalForPrompt(goal: UserGoal): string {
@@ -178,6 +190,65 @@ function completionPct(stats: PlanStats | undefined): number {
   return Math.round((stats.completed / stats.total) * 100);
 }
 
+function daysRemaining(targetDate: string): number | null {
+  if (!targetDate) return null;
+  const target = new Date(`${targetDate}T00:00:00`);
+  const now = new Date();
+  now.setHours(0, 0, 0, 0);
+  return Math.ceil((target.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+}
+
+function goalProgressPct(goal: UserGoal): number {
+  if (goal.progress_pct != null && goal.progress_pct > 0) return goal.progress_pct;
+  if (goal.baseline_value == null || goal.target_value == null || goal.current_value == null) return 0;
+  const range = goal.target_value - goal.baseline_value;
+  if (range === 0) return goal.current_value === goal.target_value ? 100 : 0;
+  const progress = goal.current_value - goal.baseline_value;
+  return Math.max(0, Math.min(100, Math.round((progress / range) * 100)));
+}
+
+function milestoneMessage(goal: UserGoal): string | null {
+  const pct = goalProgressPct(goal);
+  if (pct <= 0 || goal.baseline_value == null || goal.current_value == null || goal.target_value == null) return null;
+
+  const change = Math.abs(goal.current_value - goal.baseline_value);
+  const unit = goal.target_unit || '';
+  const direction = goal.target_value < goal.baseline_value ? 'Down' : 'Up';
+  const changeStr = change % 1 === 0 ? change.toString() : change.toFixed(1);
+
+  if (pct >= 100) return `Goal reached! ${direction} ${changeStr} ${unit}`;
+  if (pct >= 75) return `Almost there! ${direction} ${changeStr} ${unit} — ${pct}% of the way`;
+  if (pct >= 50) return `Halfway! ${direction} ${changeStr} ${unit} — ${pct}% done`;
+  if (pct >= 25) return `${direction} ${changeStr} ${unit} — ${pct}% of the way there`;
+  return `${direction} ${changeStr} ${unit} — keep going!`;
+}
+
+function motivationalLine(goals: UserGoal[], stats: PlanStats | undefined, streak: number): string {
+  if (stats && stats.total > 0 && stats.completed === stats.total) {
+    return "You crushed today's goals — well done!";
+  }
+  if (streak >= 7) return `${streak}-day streak — you're on fire!`;
+  if (streak >= 3) return `${streak}-day streak — keep the momentum going!`;
+
+  const goalsWithProgress = goals
+    .filter(g => g.target_value != null && goalProgressPct(g) > 0)
+    .sort((a, b) => goalProgressPct(b) - goalProgressPct(a));
+
+  if (goalsWithProgress.length > 0) {
+    const best = goalsWithProgress[0];
+    const pct = goalProgressPct(best);
+    const label = GOAL_TYPE_LABELS[best.goal_type] || best.title;
+    if (pct >= 50) return `More than halfway to "${label}" — ${pct}% there!`;
+    if (pct > 0) return `Making progress on "${label}" — ${pct}% and counting.`;
+  }
+
+  if (stats && stats.completed > 0) {
+    return `${stats.completed} of ${stats.total} tasks done today. Keep it up!`;
+  }
+
+  return "Every small step counts. Here's your plan for today.";
+}
+
 /* ─── SVG Components ─── */
 
 function ProgressRing({ pct, color, size = 36 }: { pct: number; color: string; size?: number }) {
@@ -207,6 +278,78 @@ function ProgressRing({ pct, color, size = 36 }: { pct: number; color: string; s
   );
 }
 
+function ProgressJourney({ goal }: { goal: UserGoal }) {
+  const style = GOAL_TYPE_STYLES[goal.goal_type] || DEFAULT_STYLE;
+  const pct = goalProgressPct(goal);
+  const hasData = goal.baseline_value != null && goal.target_value != null;
+
+  if (!hasData) {
+    return (
+      <div className="mt-3">
+        <div className="h-2.5 rounded-full bg-slate-700/50" />
+        <p className="text-xs text-slate-500 mt-2 italic">
+          Target not set yet — refine this goal to start tracking
+        </p>
+      </div>
+    );
+  }
+
+  const baseline = goal.baseline_value!;
+  const target = goal.target_value!;
+  const current = goal.current_value ?? baseline;
+  const unit = goal.target_unit || '';
+
+  return (
+    <div className="mt-3 space-y-1.5">
+      <div className="relative h-2.5 rounded-full bg-slate-700/50 overflow-hidden">
+        <div
+          className="absolute inset-y-0 left-0 rounded-full transition-all duration-700"
+          style={{ width: `${Math.min(100, Math.max(0, pct))}%`, backgroundColor: style.ring }}
+        />
+        {pct > 2 && pct < 98 && (
+          <div
+            className="absolute top-1/2 w-3 h-3 rounded-full border-2 border-slate-900 transition-all duration-700"
+            style={{
+              left: `${Math.min(96, Math.max(2, pct))}%`,
+              backgroundColor: style.ring,
+              transform: 'translate(-50%, -50%)',
+            }}
+          />
+        )}
+      </div>
+      <div className="flex items-center justify-between text-[11px]">
+        <span className="text-slate-500">{baseline} {unit}</span>
+        {current !== baseline && (
+          <span className={`font-semibold ${style.text}`}>{current} {unit}</span>
+        )}
+        <span className="text-slate-500">{target} {unit}</span>
+      </div>
+    </div>
+  );
+}
+
+function GoalTypeIcon({ goalType, className = '' }: { goalType: string; className?: string }) {
+  const c = `w-5 h-5 ${className}`;
+  switch (goalType) {
+    case 'weight_loss':
+      return (<svg className={c} viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M10 3v14M6 13l4 4 4-4" /></svg>);
+    case 'cardiovascular':
+      return (<svg className={c} viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M10 17s-7-4.5-7-9a4 4 0 0 1 7-2.5A4 4 0 0 1 17 8c0 4.5-7 9-7 9z" /></svg>);
+    case 'fitness':
+      return (<svg className={c} viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M3 10h14M5 7v6M15 7v6M7 5v10M13 5v10" /></svg>);
+    case 'metabolic':
+      return (<svg className={c} viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M10 2c0 4-4 6-4 10a4 4 0 0 0 8 0c0-4-4-6-4-10z" /></svg>);
+    case 'energy':
+      return (<svg className={c} viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M11 2L5 11h5l-1 7 6-9h-5l1-7z" /></svg>);
+    case 'sleep':
+      return (<svg className={c} viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M17 12A7 7 0 1 1 8 3a5 5 0 0 0 9 9z" /></svg>);
+    case 'habit':
+      return (<svg className={c} viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M14 4l-4 4-4-4M14 16l-4-4-4 4M10 8v4" /></svg>);
+    default:
+      return (<svg className={c} viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M10 3l2 4.5 5 .7-3.6 3.5.8 5L10 14.3 5.8 16.7l.8-5L3 8.2l5-.7L10 3z" /></svg>);
+  }
+}
+
 function StatusIcon({ status }: { status: string }) {
   if (status === 'completed') {
     return (
@@ -233,25 +376,84 @@ function StatusIcon({ status }: { status: string }) {
 
 /* ─── Sub-components ─── */
 
-function GoalCard({ goal }: { goal: UserGoal }) {
-  const pct = goal.progress_pct ?? 0;
+function GoalHeroCard({
+  goal,
+  onCheckIn,
+}: {
+  goal: UserGoal;
+  onCheckIn: (goal: UserGoal) => void;
+}) {
   const style = GOAL_TYPE_STYLES[goal.goal_type] || DEFAULT_STYLE;
+  const label = GOAL_TYPE_LABELS[goal.goal_type] || goal.goal_type.replace('_', ' ');
+  const isDraft = goal.target_value == null;
+  const days = goal.target_date ? daysRemaining(goal.target_date) : null;
+  const milestone = milestoneMessage(goal);
 
   return (
-    <div className={`flex-shrink-0 w-48 snap-center bg-gradient-to-br ${style.gradientFrom} ${style.gradientTo} border ${style.border} rounded-xl p-4 space-y-3 transition-all duration-300 hover:scale-[1.02] hover:shadow-lg hover:shadow-slate-950/50`}>
-      <div className="flex items-start justify-between gap-2">
-        <p className={`text-[10px] font-semibold uppercase tracking-widest ${style.text}`}>
-          {goal.goal_type.replace('_', ' ')}
-        </p>
-        <ProgressRing pct={pct} color={style.ring} />
+    <div
+      className={`bg-gradient-to-br ${style.gradientFrom} ${style.gradientTo} ${
+        isDraft ? 'border-dashed border-2' : 'border'
+      } ${style.border} rounded-xl p-5 space-y-3 transition-all duration-300 hover:shadow-lg hover:shadow-slate-950/40`}
+    >
+      {/* Top row: type + target date */}
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2.5">
+          <div
+            className="w-8 h-8 rounded-lg flex items-center justify-center"
+            style={{ backgroundColor: style.ring + '1a' }}
+          >
+            <GoalTypeIcon goalType={goal.goal_type} className={style.text} />
+          </div>
+          <span className={`text-xs font-semibold uppercase tracking-wide ${style.text}`}>
+            {label}
+          </span>
+        </div>
+        {days != null && (
+          <span className={`text-xs ${days <= 0 ? 'text-rose-400 font-medium' : 'text-slate-400'}`}>
+            {days > 0 ? `${days} days left` : days === 0 ? 'Due today' : 'Overdue'}
+          </span>
+        )}
       </div>
-      <p className="text-sm font-medium text-slate-100 leading-snug line-clamp-2">{goal.title}</p>
-      {goal.target_value != null && goal.target_unit && (
-        <p className="text-xs text-slate-400">
-          {goal.current_value != null ? `${goal.current_value}` : '?'} / {goal.target_value} {goal.target_unit}
+
+      {/* Title */}
+      <h3 className="text-lg font-semibold text-slate-100 leading-snug">{goal.title}</h3>
+
+      {/* Why it matters */}
+      {goal.why && (
+        <p className="text-sm text-slate-400 italic leading-relaxed">
+          &ldquo;{goal.why}&rdquo;
         </p>
       )}
-      {goal.target_date && <p className="text-[11px] text-slate-500">by {goal.target_date}</p>}
+
+      {/* Progress */}
+      {isDraft ? (
+        <div className="bg-slate-800/40 rounded-lg px-4 py-3 border border-dashed border-slate-600/50">
+          <p className="text-sm text-slate-400">
+            This goal needs a specific target to track progress.
+          </p>
+        </div>
+      ) : (
+        <ProgressJourney goal={goal} />
+      )}
+
+      {/* Milestone message */}
+      {milestone && !isDraft && (
+        <p className={`text-sm font-medium ${style.text}`}>{milestone}</p>
+      )}
+
+      {/* Actions */}
+      <div className="flex items-center justify-end pt-1">
+        <button
+          onClick={() => onCheckIn(goal)}
+          className={`px-3.5 py-1.5 text-xs font-medium rounded-lg transition-colors ${
+            isDraft
+              ? `border ${style.border} ${style.text} hover:bg-slate-700/50`
+              : 'bg-slate-700/60 text-slate-200 hover:bg-slate-600/60'
+          }`}
+        >
+          {isDraft ? 'Refine goal' : 'Check in'}
+        </button>
+      </div>
     </div>
   );
 }
@@ -329,6 +531,36 @@ function TimeBlock({
   );
 }
 
+function GoalTaskGroup({
+  goalTitle,
+  goalStyle,
+  tasks,
+  onChat,
+}: {
+  goalTitle: string;
+  goalStyle: typeof DEFAULT_STYLE;
+  tasks: PlanTask[];
+  onChat: (task: PlanTask) => void;
+}) {
+  const done = tasks.filter((t) => t.status === 'completed').length;
+  const allDone = done === tasks.length;
+
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center gap-2.5 px-1">
+        <span className={`w-1.5 h-1.5 rounded-full transition-colors ${allDone ? 'bg-emerald-400' : 'bg-slate-500'}`} />
+        <h3 className={`text-xs font-semibold uppercase tracking-wider ${goalStyle.text}`}>{goalTitle}</h3>
+        <span className="text-xs text-slate-600 ml-auto">{done}/{tasks.length}</span>
+      </div>
+      <div className="bg-slate-800/40 rounded-xl border border-slate-700/40 overflow-hidden divide-y divide-slate-700/30">
+        {tasks.map((task) => (
+          <TaskRow key={task.id} task={task} onChat={onChat} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function DayPlanCard({
   snapshot,
   onChat,
@@ -379,7 +611,8 @@ export default function Goals() {
   const [viewMode, setViewMode] = useState<ViewMode>('today');
 
   const [chatOpen, setChatOpen] = useState(false);
-  const [chatTask, setChatTask] = useState<PlanTask | null>(null);
+  const [chatTitle, setChatTitle] = useState('');
+  const [chatDesc, setChatDesc] = useState('');
   const [chatInitialMessage, setChatInitialMessage] = useState('');
 
   // Onboarding wizard state
@@ -495,7 +728,8 @@ export default function Goals() {
 
   const handleChat = useCallback((task: PlanTask) => {
     const dateLabel = task.cycle_start ? formatDateLabel(task.cycle_start) : 'today';
-    setChatTask(task);
+    setChatTitle(task.title);
+    setChatDesc(task.description || '');
     setChatInitialMessage(
       `Goal check-in for ${dateLabel}: ${task.title}${task.description ? ` (${task.description})` : ''} [task_id=${task.id}]`
     );
@@ -504,7 +738,8 @@ export default function Goals() {
 
   const handleChatClose = useCallback(() => {
     setChatOpen(false);
-    setChatTask(null);
+    setChatTitle('');
+    setChatDesc('');
     setChatInitialMessage('');
   }, []);
 
@@ -536,6 +771,41 @@ export default function Goals() {
     return grouped;
   }, [todaySnapshot]);
 
+  // Goal-grouped tasks: group today's tasks by the goal they serve
+  const goalTaskGroups = useMemo(() => {
+    const tasks = (todaySnapshot?.tasks ?? []).filter(t => t.status !== 'skipped');
+    const hasGoalLinks = tasks.some(t => t.goal_id != null);
+    if (!hasGoalLinks) return null;
+
+    const goalMap = new Map(goals.map(g => [g.id, g]));
+    const groups: Record<string, { title: string; style: typeof DEFAULT_STYLE; tasks: PlanTask[] }> = {};
+
+    for (const task of tasks) {
+      const goalId = task.goal_id;
+      const key = goalId != null ? String(goalId) : 'general';
+      if (!groups[key]) {
+        const goal = goalId != null ? goalMap.get(goalId) : null;
+        groups[key] = {
+          title: goal ? (GOAL_TYPE_LABELS[goal.goal_type] || goal.title) : 'General Wellness',
+          style: goal ? (GOAL_TYPE_STYLES[goal.goal_type] || DEFAULT_STYLE) : DEFAULT_STYLE,
+          tasks: [],
+        };
+      }
+      groups[key].tasks.push(task);
+    }
+
+    const entries = Object.entries(groups);
+    entries.sort(([a], [b]) => {
+      if (a === 'general') return 1;
+      if (b === 'general') return -1;
+      const goalA = goalMap.get(Number(a));
+      const goalB = goalMap.get(Number(b));
+      return (goalA?.priority ?? 5) - (goalB?.priority ?? 5);
+    });
+
+    return entries.map(([, group]) => group);
+  }, [todaySnapshot, goals]);
+
   const hasTodayTasks = ((todaySnapshot?.tasks ?? []).filter((t) => t.status !== 'skipped').length) > 0;
   const isLoading = loadingGoals || loadingPlan;
 
@@ -560,12 +830,31 @@ export default function Goals() {
     });
   }, [displayName, goals, isOnboarding, navigate]);
 
+  const handleGoalCheckIn = useCallback((goal: UserGoal) => {
+    if (goal.target_value == null) {
+      launchGoalSettingChat();
+      return;
+    }
+    setChatTitle(goal.title);
+    setChatDesc(goal.description || '');
+    setChatInitialMessage(
+      `Goal check-in: ${goal.title}${goal.description ? ` — ${goal.description}` : ''}`
+    );
+    setChatOpen(true);
+  }, [launchGoalSettingChat]);
+
+  const motLine = useMemo(
+    () => motivationalLine(goals, stats, streak),
+    [goals, stats, streak],
+  );
+
   return (
     <div className="min-h-screen bg-slate-900">
       <div className="max-w-3xl mx-auto px-4 py-6 space-y-6">
-        {/* ── Header ── */}
+        {/* ── Header with Motivation ── */}
         <div className="space-y-2">
           <h1 className="text-2xl font-bold text-slate-100">{greetingFor(displayName)}</h1>
+          <p className="text-sm text-slate-400">{motLine}</p>
           <div className="flex items-center gap-2.5 text-sm text-slate-400 flex-wrap">
             <span>{today}</span>
             {stats && (
@@ -735,10 +1024,10 @@ export default function Goals() {
           </div>
         )}
 
-        {/* ── Goal Cards ── */}
+        {/* ── Goal Hero Cards ── */}
         {!loadingGoals && (
           goals.length > 0 ? (
-            <div className="space-y-2.5">
+            <div className="space-y-3">
               <div className="flex items-center justify-between gap-2">
                 <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-500">Your Goals</h2>
                 <button
@@ -748,31 +1037,46 @@ export default function Goals() {
                   Refine with coach
                 </button>
               </div>
-              <div className="flex gap-3 overflow-x-auto pb-2 -mx-1 px-1 snap-x snap-mandatory scrollbar-hide">
+              <div className="space-y-3">
                 {goals.map((goal) => (
-                  <GoalCard key={goal.id} goal={goal} />
+                  <GoalHeroCard key={goal.id} goal={goal} onCheckIn={handleGoalCheckIn} />
                 ))}
               </div>
             </div>
           ) : (
-            <div className="bg-gradient-to-br from-slate-800/80 to-slate-800/40 border border-slate-700/60 rounded-xl p-6 text-center space-y-3">
+            <div className="bg-gradient-to-br from-slate-800/80 to-slate-800/40 border border-slate-700/60 rounded-xl p-8 text-center space-y-4">
               {isOnboarding ? (
                 <>
-                  <p className="text-slate-200 font-medium">Let's set your goals</p>
-                  <p className="text-sm text-slate-400">Tell your coach what you want to achieve and they will build your personalized plan.</p>
+                  <div className="w-12 h-12 mx-auto rounded-full bg-emerald-900/30 border border-emerald-700/30 flex items-center justify-center">
+                    <svg className="w-6 h-6 text-emerald-400" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M10 3l2 4.5 5 .7-3.6 3.5.8 5L10 14.3 5.8 16.7l.8-5L3 8.2l5-.7L10 3z" />
+                    </svg>
+                  </div>
+                  <h3 className="text-lg font-semibold text-slate-100">Let's set your goals</h3>
+                  <p className="text-sm text-slate-400 max-w-sm mx-auto leading-relaxed">
+                    Your coach will help you pick 1-3 focused health goals and build a personalized daily plan around them.
+                  </p>
                   <button
                     onClick={launchGoalSettingChat}
-                    className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium rounded-lg transition-colors"
+                    className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium rounded-lg transition-colors"
                   >
                     Start goal-setting with coach
                   </button>
                 </>
               ) : (
                 <>
-                  <p className="text-slate-400 text-sm">No active goals yet.</p>
+                  <div className="w-12 h-12 mx-auto rounded-full bg-slate-700/50 border border-slate-600/50 flex items-center justify-center">
+                    <svg className="w-6 h-6 text-slate-400" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M10 3l2 4.5 5 .7-3.6 3.5.8 5L10 14.3 5.8 16.7l.8-5L3 8.2l5-.7L10 3z" />
+                    </svg>
+                  </div>
+                  <h3 className="text-lg font-semibold text-slate-100">Your journey starts with a goal</h3>
+                  <p className="text-sm text-slate-400 max-w-sm mx-auto leading-relaxed">
+                    Tell your coach what matters most to you and they'll build a plan around it.
+                  </p>
                   <button
                     onClick={launchGoalSettingChat}
-                    className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium rounded-lg transition-colors"
+                    className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium rounded-lg transition-colors"
                   >
                     Set goals with coach
                   </button>
@@ -846,9 +1150,21 @@ export default function Goals() {
 
           {!isLoading && viewMode === 'today' && hasTodayTasks && (
             <div className="space-y-4">
-              {TIME_BLOCKS.map((block) => (
-                <TimeBlock key={block.key} block={block} tasks={todayTasksByTime[block.key] || []} onChat={handleChat} />
-              ))}
+              {goalTaskGroups ? (
+                goalTaskGroups.map((group, i) => (
+                  <GoalTaskGroup
+                    key={i}
+                    goalTitle={group.title}
+                    goalStyle={group.style}
+                    tasks={group.tasks}
+                    onChat={handleChat}
+                  />
+                ))
+              ) : (
+                TIME_BLOCKS.map((block) => (
+                  <TimeBlock key={block.key} block={block} tasks={todayTasksByTime[block.key] || []} onChat={handleChat} />
+                ))
+              )}
             </div>
           )}
 
@@ -878,12 +1194,12 @@ export default function Goals() {
         </div>
       </div>
 
-      {chatOpen && chatTask && (
+      {chatOpen && (
         <GoalChatPanel
           open={chatOpen}
           onClose={handleChatClose}
-          taskTitle={chatTask.title}
-          taskDescription={chatTask.description}
+          taskTitle={chatTitle}
+          taskDescription={chatDesc}
           initialMessage={chatInitialMessage}
           onTaskUpdated={handleTaskUpdated}
         />
