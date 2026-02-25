@@ -79,6 +79,10 @@ export default function AdminUsers() {
   const [aiDeepThinkingModel, setAiDeepThinkingModel] = useState('');
   const [modelOptions, setModelOptions] = useState<AdminModelOptionsResponse | null>(null);
 
+  // Multi-select state
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [bulkDeleting, setBulkDeleting] = useState(false);
+
   // Create user modal state
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [createUsername, setCreateUsername] = useState('');
@@ -311,6 +315,49 @@ export default function AdminUsers() {
     }
   };
 
+  const toggleSelect = (id: number) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    if (selectedIds.size === users.length) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(users.map((u) => u.id)));
+    }
+  };
+
+  const deleteSelected = async () => {
+    if (selectedIds.size === 0) return;
+    const names = users.filter((u) => selectedIds.has(u.id)).map((u) => u.username);
+    const confirmed = window.confirm(
+      `Delete ${names.length} user(s) permanently?\n\n${names.join(', ')}\n\nThis removes all their data and cannot be undone.`
+    );
+    if (!confirmed) return;
+
+    setBulkDeleting(true);
+    setMessage('');
+    let deleted = 0;
+    let failed = 0;
+    for (const id of selectedIds) {
+      try {
+        await apiClient.delete<AdminDeleteUserResponse>(`/api/admin/users/${id}`);
+        deleted++;
+      } catch {
+        failed++;
+      }
+    }
+    setSelectedIds(new Set());
+    setMessage(`Deleted ${deleted} user(s).${failed ? ` ${failed} failed.` : ''}`);
+    await loadUsers();
+    setBulkDeleting(false);
+  };
+
   return (
     <div className="max-w-6xl mx-auto px-4 py-6 space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -322,6 +369,15 @@ export default function AdminUsers() {
           >
             Create User
           </button>
+          {selectedIds.size > 0 && (
+            <button
+              onClick={deleteSelected}
+              disabled={bulkDeleting}
+              className="px-3 py-2 text-sm rounded-lg bg-rose-600 hover:bg-rose-500 text-white disabled:opacity-50"
+            >
+              {bulkDeleting ? 'Deleting...' : `Delete Selected (${selectedIds.size})`}
+            </button>
+          )}
           <input
             type="text"
             value={search}
@@ -342,7 +398,20 @@ export default function AdminUsers() {
       {message && <p className="text-sm text-emerald-400">{message}</p>}
 
       <div className="bg-slate-800 border border-slate-700 rounded-xl p-4">
-        <p className="text-sm text-slate-400 mb-3">Total users: {total}</p>
+        <div className="flex items-center gap-3 mb-3">
+          <p className="text-sm text-slate-400">Total users: {total}</p>
+          {users.length > 0 && (
+            <label className="inline-flex items-center gap-1.5 text-xs text-slate-400 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={users.length > 0 && selectedIds.size === users.length}
+                onChange={toggleSelectAll}
+                className="accent-emerald-500"
+              />
+              Select all
+            </label>
+          )}
+        </div>
         {loading ? (
           <p className="text-sm text-slate-400">Loading...</p>
         ) : users.length === 0 ? (
@@ -352,12 +421,20 @@ export default function AdminUsers() {
             {users.map((u) => (
               <div key={u.id} className="rounded-lg border border-slate-700 bg-slate-900/35 p-3">
                 <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div>
-                    <p className="text-sm text-slate-100 font-medium">{u.display_name} ({u.username})</p>
-                    <p className="text-xs text-slate-400 mt-1">
-                      Provider: {u.ai_provider || 'anthropic'} | API key: {u.has_api_key ? 'set' : 'not set'} | Passkeys: {u.passkey_count} | Force password change: {u.force_password_change ? 'yes' : 'no'}
-                      {u.created_at ? ` | Created ${new Date(u.created_at).toLocaleDateString()}` : ''}
-                    </p>
+                  <div className="flex items-center gap-3">
+                    <input
+                      type="checkbox"
+                      checked={selectedIds.has(u.id)}
+                      onChange={() => toggleSelect(u.id)}
+                      className="accent-emerald-500 flex-shrink-0"
+                    />
+                    <div>
+                      <p className="text-sm text-slate-100 font-medium">{u.display_name} ({u.username})</p>
+                      <p className="text-xs text-slate-400 mt-1">
+                        Provider: {u.ai_provider || 'anthropic'} | API key: {u.has_api_key ? 'set' : 'not set'} | Passkeys: {u.passkey_count} | Force password change: {u.force_password_change ? 'yes' : 'no'}
+                        {u.created_at ? ` | Created ${new Date(u.created_at).toLocaleDateString()}` : ''}
+                      </p>
+                    </div>
                   </div>
                   <div className="flex gap-2">
                     <button

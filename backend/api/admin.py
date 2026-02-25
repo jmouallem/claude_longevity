@@ -706,8 +706,18 @@ def admin_delete_user(
         if str(row.image_path).strip()
     ]
 
-    # Delete all rows referencing this user across every FK table
+    # Delete all rows referencing this user across every FK table.
+    # Order: children before parents (ai_turn_telemetry/meal_response_signals
+    # -> messages/food_log/meal_templates, meal_template_versions -> meal_templates,
+    # analysis_proposals -> analysis_runs).
     _del = lambda model, col: db.query(model).filter(col == target_id).delete(synchronize_session=False)  # noqa: E731
+    # --- children of messages / food_log / meal_templates ---
+    _del(AITurnTelemetry, AITurnTelemetry.user_id)
+    _del(MealResponseSignal, MealResponseSignal.user_id)
+    _del(MealTemplateVersion, MealTemplateVersion.user_id)
+    # --- children of analysis_runs ---
+    _del(AnalysisProposal, AnalysisProposal.user_id)
+    # --- remaining tables (no inter-table FK issues) ---
     _del(FoodLog, FoodLog.user_id)
     _del(HydrationLog, HydrationLog.user_id)
     _del(VitalsLog, VitalsLog.user_id)
@@ -718,15 +728,12 @@ def admin_delete_user(
     _del(FastingLog, FastingLog.user_id)
     _del(SleepLog, SleepLog.user_id)
     _del(Summary, Summary.user_id)
-    _del(MealResponseSignal, MealResponseSignal.user_id)
-    _del(MealTemplateVersion, MealTemplateVersion.user_id)
     _del(MealTemplate, MealTemplate.user_id)
     _del(Notification, Notification.user_id)
     _del(Message, Message.user_id)
     _del(IntakeSession, IntakeSession.user_id)
     _del(FeedbackEntry, FeedbackEntry.created_by_user_id)
     _del(ModelUsageEvent, ModelUsageEvent.user_id)
-    _del(AnalysisProposal, AnalysisProposal.user_id)
     _del(AnalysisRun, AnalysisRun.user_id)
     _del(CoachingPlanTask, CoachingPlanTask.user_id)
     _del(CoachingPlanAdjustment, CoachingPlanAdjustment.user_id)
@@ -734,7 +741,6 @@ def admin_delete_user(
     _del(UserGoal, UserGoal.user_id)
     _del(PasskeyCredential, PasskeyCredential.user_id)
     _del(PasskeyChallenge, PasskeyChallenge.user_id)
-    _del(AITurnTelemetry, AITurnTelemetry.user_id)
     _del(RequestTelemetryEvent, RequestTelemetryEvent.user_id)
     _del(RateLimitAuditEvent, RateLimitAuditEvent.user_id)
     _del(UserSettings, UserSettings.user_id)
