@@ -59,6 +59,18 @@ class PasskeyVerifyAuthenticationRequest(BaseModel):
     credential: dict[str, Any]
 
 
+class InviteStatusResponse(BaseModel):
+    valid: bool
+    display_name: str | None = None
+    username: str | None = None
+    expires_at: str | None = None
+    reason: str | None = None
+
+
+class InviteRedeemRequest(BaseModel):
+    password: str = Field(min_length=6)
+
+
 class PasskeyCredentialResponse(BaseModel):
     id: int
     label: str

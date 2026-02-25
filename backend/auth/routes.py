@@ -1,7 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy.orm import Session
 
+from datetime import datetime, timezone
+
 from auth.models import (
+    InviteRedeemRequest,
+    InviteStatusResponse,
     LoginRequest,
     PasskeyBeginRequest,
     PasskeyBeginResponse,
@@ -34,7 +38,7 @@ from auth.utils import (
 )
 from config import settings
 from db.database import get_db
-from db.models import User, UserSettings, SpecialistConfig
+from db.models import InviteToken, User, UserSettings, SpecialistConfig
 from services.health_framework_service import ensure_default_frameworks
 from services.coaching_plan_service import ensure_plan_seeded
 from services.rate_limit_service import RateLimitRule, enforce_rate_limit
@@ -289,3 +293,74 @@ def passkey_clear_credentials(
     deleted = clear_passkeys_for_user(db, user.id)
     db.commit()
     return {"status": "ok", "deleted": deleted}
+
+
+@router.get("/invite/{token}", response_model=InviteStatusResponse)
+def invite_status(token: str, db: Session = Depends(get_db)):
+    invite = db.query(InviteToken).filter(InviteToken.token == token).first()
+    if not invite:
+        return InviteStatusResponse(valid=False, reason="Invalid invite link")
+    if invite.redeemed_at is not None:
+        return InviteStatusResponse(valid=False, reason="This invite has already been used")
+    now = datetime.now(timezone.utc)
+    expires = invite.expires_at.replace(tzinfo=timezone.utc) if invite.expires_at.tzinfo is None else invite.expires_at
+    if now > expires:
+        return InviteStatusResponse(valid=False, reason="This invite has expired")
+    user = db.query(User).filter(User.id == invite.user_id).first()
+    if not user:
+        return InviteStatusResponse(valid=False, reason="User account not found")
+    return InviteStatusResponse(
+        valid=True,
+        display_name=user.display_name,
+        username=user.username,
+        expires_at=invite.expires_at.isoformat(),
+    )
+
+
+@router.post("/invite/{token}", response_model=TokenResponse)
+def invite_redeem(
+    token: str,
+    req: InviteRedeemRequest,
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    allowed, retry_after = enforce_rate_limit(
+        rule=RateLimitRule(
+            endpoint="/api/auth/invite/redeem",
+            limit=10,
+            window_seconds=300,
+        ),
+        scope_key=f"{_client_ip(request)}:{token[:8]}",
+        ip_address=_client_ip(request),
+        details={"token_prefix": token[:8]},
+    )
+    if not allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many attempts. Please try again later.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
+    invite = db.query(InviteToken).filter(InviteToken.token == token).first()
+    if not invite:
+        raise HTTPException(status_code=404, detail="Invalid invite link")
+    if invite.redeemed_at is not None:
+        raise HTTPException(status_code=400, detail="This invite has already been used")
+    now = datetime.now(timezone.utc)
+    expires = invite.expires_at.replace(tzinfo=timezone.utc) if invite.expires_at.tzinfo is None else invite.expires_at
+    if now > expires:
+        raise HTTPException(status_code=400, detail="This invite has expired")
+
+    user = db.query(User).filter(User.id == invite.user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User account not found")
+
+    user.password_hash = hash_password(req.password)
+    user.force_password_change = False
+    invite.redeemed_at = now
+
+    jwt_token = create_token(user.id, role=user.role, token_version=user.token_version)
+    _set_session_cookie(response, jwt_token, max_age_seconds=max(int(settings.JWT_EXPIRY_HOURS), 1) * 3600)
+    db.commit()
+    return TokenResponse(access_token=None)

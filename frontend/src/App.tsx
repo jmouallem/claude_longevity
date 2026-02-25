@@ -6,6 +6,7 @@ import AdminNavbar from './components/AdminNavbar';
 import IntakePromptModal from './components/IntakePromptModal';
 import Login from './pages/Login';
 import Register from './pages/Register';
+import InviteRedeem from './pages/InviteRedeem';
 import Chat from './pages/Chat';
 import Dashboard from './pages/Dashboard';
 import History from './pages/History';
@@ -143,6 +144,7 @@ export default function App() {
       <Routes>
         <Route path="/login" element={<Login />} />
         <Route path="/register" element={<Register />} />
+        <Route path="/invite/:token" element={<InviteRedeem />} />
         <Route element={<ProtectedRoute />}>
           <Route path="/*" element={<AuthenticatedLayout />} />
         </Route>

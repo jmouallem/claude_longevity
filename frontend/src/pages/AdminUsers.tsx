@@ -50,6 +50,13 @@ interface AdminModelOptionsResponse {
   presets: Record<string, PresetOption>;
 }
 
+interface CreateUserResponse {
+  user_id: number;
+  username: string;
+  invite_url: string;
+  expires_at: string;
+}
+
 export default function AdminUsers() {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -71,6 +78,17 @@ export default function AdminUsers() {
   const [aiUtilityModel, setAiUtilityModel] = useState('');
   const [aiDeepThinkingModel, setAiDeepThinkingModel] = useState('');
   const [modelOptions, setModelOptions] = useState<AdminModelOptionsResponse | null>(null);
+
+  // Create user modal state
+  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [createUsername, setCreateUsername] = useState('');
+  const [createDisplayName, setCreateDisplayName] = useState('');
+  const [createProvider, setCreateProvider] = useState('anthropic');
+  const [createApiKey, setCreateApiKey] = useState('');
+  const [createPreset, setCreatePreset] = useState('');
+  const [createLoading, setCreateLoading] = useState(false);
+  const [inviteUrl, setInviteUrl] = useState('');
+  const [inviteCopied, setInviteCopied] = useState(false);
 
   const loadModelOptions = async (
     providerValue: string,
@@ -239,11 +257,71 @@ export default function AdminUsers() {
     }
   };
 
+  const openCreateModal = () => {
+    setCreateUsername('');
+    setCreateDisplayName('');
+    setCreateProvider('anthropic');
+    setCreateApiKey('');
+    setCreatePreset('');
+    setInviteUrl('');
+    setInviteCopied(false);
+    setShowCreateModal(true);
+  };
+
+  const createUser = async () => {
+    if (!createUsername.trim() || !createDisplayName.trim()) {
+      setMessage('Username and display name are required.');
+      return;
+    }
+    setCreateLoading(true);
+    setMessage('');
+    try {
+      const result = await apiClient.post<CreateUserResponse>('/api/admin/users/create', {
+        username: createUsername.trim(),
+        display_name: createDisplayName.trim(),
+        ai_provider: createProvider || undefined,
+        api_key: createApiKey.trim() || undefined,
+        preset: createPreset || undefined,
+      });
+      setInviteUrl(result.invite_url);
+      setMessage(`User "${result.username}" created. Share the invite link below.`);
+      await loadUsers();
+    } catch (e: unknown) {
+      setMessage(e instanceof Error ? e.message : 'Failed to create user.');
+    } finally {
+      setCreateLoading(false);
+    }
+  };
+
+  const copyInviteUrl = async () => {
+    try {
+      await navigator.clipboard.writeText(inviteUrl);
+      setInviteCopied(true);
+      setTimeout(() => setInviteCopied(false), 2000);
+    } catch {
+      // Fallback for older browsers
+      const input = document.createElement('input');
+      input.value = inviteUrl;
+      document.body.appendChild(input);
+      input.select();
+      document.execCommand('copy');
+      document.body.removeChild(input);
+      setInviteCopied(true);
+      setTimeout(() => setInviteCopied(false), 2000);
+    }
+  };
+
   return (
     <div className="max-w-6xl mx-auto px-4 py-6 space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-2xl font-bold text-slate-100">User Administration</h1>
         <div className="flex gap-2">
+          <button
+            onClick={openCreateModal}
+            className="px-3 py-2 text-sm rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white"
+          >
+            Create User
+          </button>
           <input
             type="text"
             value={search}
@@ -476,6 +554,117 @@ export default function AdminUsers() {
           </div>
         )}
       </div>
+
+      {showCreateModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+          <div className="bg-slate-800 border border-slate-700 rounded-xl w-full max-w-md mx-4 p-6 space-y-4">
+            <h2 className="text-lg font-semibold text-slate-100">Create User</h2>
+
+            {!inviteUrl ? (
+              <>
+                <div className="space-y-3">
+                  <label className="block text-xs text-slate-400">
+                    Username
+                    <input
+                      type="text"
+                      value={createUsername}
+                      onChange={(e) => setCreateUsername(e.target.value)}
+                      placeholder="e.g. johndoe"
+                      className="mt-1 w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-100 focus:outline-none focus:border-emerald-500"
+                    />
+                  </label>
+                  <label className="block text-xs text-slate-400">
+                    Display Name
+                    <input
+                      type="text"
+                      value={createDisplayName}
+                      onChange={(e) => setCreateDisplayName(e.target.value)}
+                      placeholder="e.g. John Doe"
+                      className="mt-1 w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-100 focus:outline-none focus:border-emerald-500"
+                    />
+                  </label>
+                  <label className="block text-xs text-slate-400">
+                    AI Provider
+                    <select
+                      value={createProvider}
+                      onChange={(e) => setCreateProvider(e.target.value)}
+                      className="mt-1 w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-100 focus:outline-none focus:border-emerald-500"
+                    >
+                      <option value="anthropic">Anthropic</option>
+                      <option value="openai">OpenAI</option>
+                      <option value="google">Google</option>
+                    </select>
+                  </label>
+                  <label className="block text-xs text-slate-400">
+                    API Key (optional)
+                    <input
+                      type="password"
+                      value={createApiKey}
+                      onChange={(e) => setCreateApiKey(e.target.value)}
+                      placeholder="User's API key"
+                      className="mt-1 w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-100 focus:outline-none focus:border-emerald-500"
+                    />
+                  </label>
+                  <label className="block text-xs text-slate-400">
+                    Preset (optional)
+                    <select
+                      value={createPreset}
+                      onChange={(e) => setCreatePreset(e.target.value)}
+                      className="mt-1 w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-100 focus:outline-none focus:border-emerald-500"
+                    >
+                      <option value="">None</option>
+                      <option value="budget">Budget</option>
+                      <option value="balanced">Balanced</option>
+                      <option value="premium">Premium</option>
+                    </select>
+                  </label>
+                </div>
+                <div className="flex gap-2 pt-2">
+                  <button
+                    onClick={createUser}
+                    disabled={createLoading}
+                    className="flex-1 py-2 text-sm rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white disabled:opacity-50"
+                  >
+                    {createLoading ? 'Creating...' : 'Create & Generate Link'}
+                  </button>
+                  <button
+                    onClick={() => setShowCreateModal(false)}
+                    className="px-4 py-2 text-sm rounded-lg border border-slate-600 text-slate-300 hover:bg-slate-700"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </>
+            ) : (
+              <div className="space-y-4">
+                <p className="text-sm text-slate-300">
+                  User created. Share this one-time invite link (expires in 1 hour):
+                </p>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    readOnly
+                    value={inviteUrl}
+                    className="flex-1 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-100 focus:outline-none"
+                  />
+                  <button
+                    onClick={copyInviteUrl}
+                    className="px-3 py-2 text-sm rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white whitespace-nowrap"
+                  >
+                    {inviteCopied ? 'Copied!' : 'Copy'}
+                  </button>
+                </div>
+                <button
+                  onClick={() => setShowCreateModal(false)}
+                  className="w-full py-2 text-sm rounded-lg border border-slate-600 text-slate-300 hover:bg-slate-700"
+                >
+                  Done
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

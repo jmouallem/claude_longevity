@@ -702,3 +702,36 @@ def run_startup_migrations() -> None:
             ON user_goals (user_id, status)
             """
         ))
+
+        # Invite tokens — one-time invite links for admin-created users.
+        conn.execute(text(
+            """
+            CREATE TABLE IF NOT EXISTS invite_tokens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token TEXT NOT NULL UNIQUE,
+                user_id INTEGER NOT NULL REFERENCES users(id),
+                created_by_admin_id INTEGER NOT NULL REFERENCES users(id),
+                expires_at DATETIME NOT NULL,
+                redeemed_at DATETIME,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        ))
+        conn.execute(text(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_invite_tokens_token
+            ON invite_tokens (token)
+            """
+        ))
+        conn.execute(text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_invite_tokens_user
+            ON invite_tokens (user_id)
+            """
+        ))
+        conn.execute(text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_invite_tokens_expires
+            ON invite_tokens (expires_at)
+            """
+        ))

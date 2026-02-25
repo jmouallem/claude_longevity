@@ -633,6 +633,21 @@ class AdminAuditLog(Base):
     target_user = relationship("User", back_populates="admin_target_actions", foreign_keys=[target_user_id])
 
 
+class InviteToken(Base):
+    __tablename__ = "invite_tokens"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    token = Column(Text, nullable=False, unique=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_by_admin_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    redeemed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    user = relationship("User", foreign_keys=[user_id])
+    created_by_admin = relationship("User", foreign_keys=[created_by_admin_id])
+
+
 class RateLimitAuditEvent(Base):
     __tablename__ = "rate_limit_audit_events"
 

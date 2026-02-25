@@ -1,18 +1,19 @@
 import csv
 import io
 import json
+import secrets
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy import func, or_
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
-from auth.utils import get_current_user, hash_password, require_admin, verify_password
+from auth.utils import get_current_user, hash_password, normalize_username, require_admin, verify_password
 from db.database import get_db
 from db.models import (
     AITurnTelemetry,
@@ -20,12 +21,15 @@ from db.models import (
     AnalysisProposal,
     AnalysisRun,
     FeedbackEntry,
+    InviteToken,
     Message,
     ModelUsageEvent,
     PasskeyCredential,
     RateLimitAuditEvent,
     RequestTelemetryEvent,
+    SpecialistConfig,
     User,
+    UserSettings,
 )
 from config import settings
 from api.settings import (
@@ -129,6 +133,21 @@ class AdminUserAIConfigResponse(BaseModel):
 class AdminChangeOwnPasswordRequest(BaseModel):
     current_password: str
     new_password: str = Field(min_length=8, max_length=256)
+
+
+class AdminCreateUserRequest(BaseModel):
+    username: str = Field(min_length=3, max_length=50)
+    display_name: str = Field(min_length=1, max_length=100)
+    ai_provider: str | None = None
+    api_key: str | None = None
+    preset: str | None = None  # budget | balanced | premium
+
+
+class AdminCreateUserResponse(BaseModel):
+    user_id: int
+    username: str
+    invite_url: str
+    expires_at: str
 
 
 class AdminResetDataResponse(BaseModel):
@@ -317,6 +336,98 @@ def list_users(
     )
     db.commit()
     return AdminUserListResponse(total=total, users=rows)
+
+
+@router.post("/users/create", response_model=AdminCreateUserResponse)
+def admin_create_user(
+    req: AdminCreateUserRequest,
+    request: Request,
+    admin_user: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    normalized = normalize_username(req.username)
+    if len(normalized) < 3:
+        raise HTTPException(status_code=400, detail="Username must be at least 3 characters")
+
+    if db.query(User).filter(User.username_normalized == normalized).first():
+        raise HTTPException(status_code=409, detail="Username already taken")
+
+    canonical_username = " ".join(req.username.strip().split())
+    temp_password = secrets.token_urlsafe(24)
+    user = User(
+        username=canonical_username,
+        username_normalized=normalized,
+        password_hash=hash_password(temp_password),
+        display_name=req.display_name,
+        role="user",
+        token_version=0,
+        force_password_change=True,
+    )
+    db.add(user)
+    db.flush()
+
+    user_settings = UserSettings(user_id=user.id)
+    if req.ai_provider:
+        provider = _require_supported_provider(req.ai_provider)
+        user_settings.ai_provider = provider
+        if req.api_key and req.api_key.strip():
+            user_settings.api_key_encrypted = encrypt_api_key(req.api_key.strip())
+        if req.preset:
+            presets = _normalized_presets_for_provider(provider)
+            preset_name = req.preset.strip().lower()
+            if preset_name in presets:
+                preset_cfg = presets[preset_name]
+                r, u_model, d = _normalize_models_for_provider(
+                    provider,
+                    str(preset_cfg.get("reasoning", "")),
+                    str(preset_cfg.get("utility", "")),
+                    str(preset_cfg.get("deep_thinking", "")),
+                )
+                user_settings.reasoning_model = r
+                user_settings.utility_model = u_model
+                user_settings.deep_thinking_model = d
+    db.add(user_settings)
+    db.add(SpecialistConfig(user_id=user.id))
+    db.flush()
+
+    token = secrets.token_urlsafe(32)
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=max(int(settings.INVITE_TOKEN_EXPIRY_HOURS), 1))
+    invite = InviteToken(
+        token=token,
+        user_id=user.id,
+        created_by_admin_id=admin_user.id,
+        expires_at=expires_at,
+    )
+    db.add(invite)
+
+    origin = (request.headers.get("origin") or "").rstrip("/")
+    if not origin:
+        base = str(request.base_url).rstrip("/")
+        origin = base
+    invite_url = f"{origin}/invite/{token}"
+
+    _audit(
+        db=db,
+        admin_user_id=admin_user.id,
+        target_user_id=user.id,
+        action="admin.user.create",
+        details={
+            "username": canonical_username,
+            "display_name": req.display_name,
+            "ai_provider": req.ai_provider,
+            "has_api_key": bool(req.api_key and req.api_key.strip()),
+            "preset": req.preset,
+            "invite_expires_at": expires_at.isoformat(),
+        },
+        success=True,
+    )
+    db.commit()
+    return AdminCreateUserResponse(
+        user_id=user.id,
+        username=canonical_username,
+        invite_url=invite_url,
+        expires_at=expires_at.isoformat(),
+    )
 
 
 @router.get("/model-options")

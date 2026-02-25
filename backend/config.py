@@ -85,6 +85,7 @@ class Settings(BaseSettings):
     SLO_CHAT_P95_FIRST_TOKEN_MS: int = 3500
     SLO_DASHBOARD_P95_LOAD_MS: int = 1200
     SLO_ANALYSIS_RUN_COMPLETION_SLA_SECONDS: int = 120
+    INVITE_TOKEN_EXPIRY_HOURS: int = 1
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
