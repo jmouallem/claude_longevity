@@ -37,6 +37,7 @@ export function useChat() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const inflightRef = useRef(false);
 
   const loadHistory = useCallback(async () => {
     try {
@@ -63,6 +64,9 @@ export function useChat() {
 
   const sendMessage = useCallback(async (text: string, imageFile?: File, verbosity: ChatVerbosity = 'normal') => {
     if (!text.trim() && !imageFile) return;
+    // Prevent concurrent sends (e.g. React strict-mode double-fire or rapid clicks)
+    if (inflightRef.current) return;
+    inflightRef.current = true;
 
     setError(null);
 
@@ -213,6 +217,7 @@ export function useChat() {
     } finally {
       setLoading(false);
       abortRef.current = null;
+      inflightRef.current = false;
     }
   }, []);
 

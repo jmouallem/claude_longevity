@@ -16,7 +16,6 @@ from ai.log_parser import parse_log_data, assess_parse_confidence
 from ai.tool_call_executor import (
     DirectToolCallExecutor,
     extract_tool_calls,
-    format_tool_results_context,
     strip_tool_calls,
 )
 from ai.image_analyzer import analyze_image
@@ -3904,7 +3903,6 @@ async def process_chat(
         # 7b. Post-response AI tool calls
         # Extract <tool_call> blocks from the AI response and execute them.
         ai_tool_calls = extract_tool_calls(full_response)
-        ai_tool_results_text = ""
         if ai_tool_calls:
             tool_ctx = ToolContext(
                 db=db,
@@ -3915,14 +3913,10 @@ async def process_chat(
             executor = DirectToolCallExecutor(tool_registry)
             ai_tool_results = await executor.execute(ai_tool_calls, tool_ctx)
             db.commit()
-            results_summary = format_tool_results_context(ai_tool_results)
-            if results_summary:
-                ai_tool_results_text = f"\n\n**Actions taken:**\n{results_summary}"
-                yield {"type": "chunk", "text": ai_tool_results_text}
-            # Strip tool_call blocks from the stored response
+            # Tool results are executed silently; no need to surface raw
+            # action summaries to the user — the AI's natural-language reply
+            # already describes what was done.
             full_response = strip_tool_calls(full_response)
-            if ai_tool_results_text:
-                full_response += ai_tool_results_text
 
         yield {"type": "done", "specialist": specialist, "category": category}
 

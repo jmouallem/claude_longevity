@@ -139,10 +139,13 @@ function renderContent(content: string): ReactNode[] {
   return blocks;
 }
 
-/** Strip internal metadata tags and tool call blocks from user-facing text. */
+/** Strip internal metadata tags, tool call blocks, and action summaries from user-facing text. */
 function stripMetaTags(text: string): string {
   let cleaned = text.replace(/\s*\[task_id=\d+\]/g, '');
   cleaned = cleaned.replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '');
+  // Strip "Actions taken:" blocks (backend-appended or AI-generated)
+  cleaned = cleaned.replace(/\n*\*{0,2}Actions taken:?\*{0,2}\n```[\s\S]*?```/g, '');
+  cleaned = cleaned.replace(/\n*\*{0,2}Actions taken:?\*{0,2}\n\s*-[^\n]*/g, '');
   cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
   return cleaned.trim();
 }

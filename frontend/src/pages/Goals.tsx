@@ -459,6 +459,18 @@ export default function Goals() {
     fetchPlan();
   }, [fetchGoals, fetchPlan]);
 
+  // Refresh when page becomes visible again (e.g. returning from another tab)
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') {
+        fetchGoals();
+        fetchPlan();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [fetchGoals, fetchPlan]);
+
   // Onboarding trigger
   useEffect(() => {
     if (!frameworkEducation) return;
