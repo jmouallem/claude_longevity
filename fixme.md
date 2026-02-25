@@ -16,6 +16,72 @@
 
 ## Findings and Task List
 
+## Items Addressed
+
+### Core Correctness and Data Integrity
+1. Deprecated/unsafe user load in chat SSE stream.
+2. Intent classifier fallback dropping log workflows.
+3. Missing deterministic parser fallback on utility parse failure.
+4. Silent write failures with success-sounding responses.
+5. Duplicate checklist marking in a single turn.
+6. Dashboard day basis misaligned with user timezone.
+7. Sleep logs `target_date` not respected.
+8. Side-effecting mutations inside `GET /api/logs/checklist`.
+9. Missing uniqueness enforcement for daily checklist entries.
+10. Clock token parsing gaps for common time formats.
+11. Low-confidence inferred time confirmation persistence/enforcement.
+
+### Architecture, Reliability, and Cohesion
+12. Prompt/tool contract vs runtime execution alignment.
+13. Blocking web search calls on async chat path.
+14. Unsupported provider values accepted in settings API.
+15. Comma-split fallback corrupting med/supp structured entries.
+16. Proposal-list `GET` mutating proposal state.
+17. Potential duplicate analysis runs under concurrency.
+18. Oversized/competing context assembly each turn.
+19. Mixed date semantics across domains/services.
+20. Branding/name inconsistencies.
+21. Missing automated cross-component regression coverage.
+
+### Performance / AI Performance / Security
+22. High per-turn backend read fan-out baseline and instrumentation.
+23. Excessive sequential LLM utility-call fan-out.
+24. Due-analysis dispatch on every chat message (debounce/lock added).
+25. Dashboard request waterfall/duplication risk.
+26. Blocking web-search path and resilience controls.
+27. Missing explicit context-budget controls.
+28. Production-unsafe default secret/credential guardrails.
+29. `localStorage` token/session exposure risk.
+30. Missing auth/chat endpoint rate limiting.
+31. Upload content-type/signature hardening gaps.
+32. Missing app-layer security header enforcement.
+
+### Meal Logging Hardening Already Applied
+45. Stronger meal-evidence detection in orchestration.
+46. Context carry-over handling for short meal follow-up replies.
+47. Multi-log attempt path for mixed-turn write opportunities.
+48. Heuristic routing preference for mixed "log + question" meal turns.
+49. Focused meal logging regression tests added.
+50. False-positive safeguards for planning questions (no unintended meal write).
+
+## Items Outstanding
+
+### Meal Recording Focus - Deferred Work
+33. Workflow A resilience: explicit meal logs still depend on category gate in edge cases.
+34. Workflow B resilience: short contextual follow-ups can still be fragile.
+35. Workflow C resilience: mixed log + nutrition-question handling consistency.
+36. Workflow D resilience: one-message multi-domain logging completeness.
+37. Workflow E resilience: menu save/update dependence on latest persisted meal.
+38. Workflow F resilience: perceived misses from timezone/day-bucket mismatch UX.
+
+### Deferred Execution Plan (Not Fully Closed)
+39. Phase M1 reproduction matrix + decision-trace telemetry for meal-write path.
+40. Phase M2 secondary food-intent override + one-turn context carry-over guarantees.
+41. Phase M3 deterministic parse/write guarantees + explicit failure surfacing.
+42. Phase M4 multi-intent segmentation and idempotent multi-write execution.
+43. Phase M5 server-driven day-key UX consistency + write receipt UX.
+44. End-state validation criteria for zero silent meal drops across message patterns.
+
 ### P0 - Correctness and Data Integrity
 
 1. Deprecated and unsafe user load in chat SSE stream
