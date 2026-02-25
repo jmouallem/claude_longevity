@@ -20,16 +20,36 @@ from db.models import (
     AdminAuditLog,
     AnalysisProposal,
     AnalysisRun,
+    CoachingPlanAdjustment,
+    CoachingPlanTask,
+    DailyChecklistItem,
+    ExerciseLog,
+    ExercisePlan,
+    FastingLog,
     FeedbackEntry,
+    FoodLog,
+    HealthOptimizationFramework,
+    HydrationLog,
+    IntakeSession,
     InviteToken,
+    MealResponseSignal,
+    MealTemplate,
+    MealTemplateVersion,
     Message,
     ModelUsageEvent,
+    Notification,
+    PasskeyChallenge,
     PasskeyCredential,
     RateLimitAuditEvent,
     RequestTelemetryEvent,
+    SleepLog,
     SpecialistConfig,
+    Summary,
+    SupplementLog,
     User,
+    UserGoal,
     UserSettings,
+    VitalsLog,
 )
 from config import settings
 from api.settings import (
@@ -676,18 +696,82 @@ def admin_delete_user(
 
     target_id = target.id
     target_username = target.username
-    result = reset_user_data_for_user(db, target)
+
+    # Collect uploaded file paths before deleting messages
+    image_paths = [
+        str(row.image_path).strip()
+        for row in db.query(Message.image_path)
+        .filter(Message.user_id == target_id, Message.image_path.isnot(None))
+        .all()
+        if str(row.image_path).strip()
+    ]
+
+    # Delete all rows referencing this user across every FK table
+    _del = lambda model, col: db.query(model).filter(col == target_id).delete(synchronize_session=False)  # noqa: E731
+    _del(FoodLog, FoodLog.user_id)
+    _del(HydrationLog, HydrationLog.user_id)
+    _del(VitalsLog, VitalsLog.user_id)
+    _del(ExerciseLog, ExerciseLog.user_id)
+    _del(ExercisePlan, ExercisePlan.user_id)
+    _del(DailyChecklistItem, DailyChecklistItem.user_id)
+    _del(SupplementLog, SupplementLog.user_id)
+    _del(FastingLog, FastingLog.user_id)
+    _del(SleepLog, SleepLog.user_id)
+    _del(Summary, Summary.user_id)
+    _del(MealResponseSignal, MealResponseSignal.user_id)
+    _del(MealTemplateVersion, MealTemplateVersion.user_id)
+    _del(MealTemplate, MealTemplate.user_id)
+    _del(Notification, Notification.user_id)
+    _del(Message, Message.user_id)
+    _del(IntakeSession, IntakeSession.user_id)
+    _del(FeedbackEntry, FeedbackEntry.created_by_user_id)
+    _del(ModelUsageEvent, ModelUsageEvent.user_id)
+    _del(AnalysisProposal, AnalysisProposal.user_id)
+    _del(AnalysisRun, AnalysisRun.user_id)
+    _del(CoachingPlanTask, CoachingPlanTask.user_id)
+    _del(CoachingPlanAdjustment, CoachingPlanAdjustment.user_id)
+    _del(HealthOptimizationFramework, HealthOptimizationFramework.user_id)
+    _del(UserGoal, UserGoal.user_id)
+    _del(PasskeyCredential, PasskeyCredential.user_id)
+    _del(PasskeyChallenge, PasskeyChallenge.user_id)
+    _del(AITurnTelemetry, AITurnTelemetry.user_id)
+    _del(RequestTelemetryEvent, RequestTelemetryEvent.user_id)
+    _del(RateLimitAuditEvent, RateLimitAuditEvent.user_id)
+    _del(UserSettings, UserSettings.user_id)
+    _del(SpecialistConfig, SpecialistConfig.user_id)
+    db.query(InviteToken).filter(
+        (InviteToken.user_id == target_id) | (InviteToken.created_by_admin_id == target_id)
+    ).delete(synchronize_session=False)
+    # Nullify audit log references instead of deleting (preserve admin audit trail)
+    db.query(AdminAuditLog).filter(AdminAuditLog.target_user_id == target_id).update(
+        {AdminAuditLog.target_user_id: None}, synchronize_session=False
+    )
+    db.flush()
+
     db.delete(target)
     _audit(
         db=db,
         admin_user_id=admin_user.id,
         target_user_id=None,
         action="admin.user.delete",
-        details={"target_user_id": target_id, "username": target_username, "removed_files": result["removed_files"]},
+        details={"target_user_id": target_id, "username": target_username},
         success=True,
     )
     db.commit()
-    return AdminDeleteUserResponse(status="ok", removed_files=result["removed_files"])
+
+    # Remove uploaded files after successful commit
+    removed_files = 0
+    upload_root = settings.UPLOAD_DIR.resolve()
+    for raw in image_paths:
+        path = Path(raw) if Path(raw).is_absolute() else (Path.cwd() / raw).resolve()
+        try:
+            if upload_root in path.resolve().parents and path.exists():
+                path.unlink()
+                removed_files += 1
+        except Exception:
+            pass
+
+    return AdminDeleteUserResponse(status="ok", removed_files=removed_files)
 
 
 @router.get("/feedback", response_model=list[AdminFeedbackRow])
