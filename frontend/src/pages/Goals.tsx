@@ -777,7 +777,7 @@ export default function Goals() {
                             const selected = selectedFrameworkIds.includes(item.id);
                             const goalAligned = healthGoalsTags.length > 0 && itemSupportsGoals(item);
                             const hasMeta = item.metadata && (item.metadata.summary || item.metadata.supports);
-                            const showTooltip = tooltipItemId === item.id && hasMeta;
+                            const showTooltip = tooltipItemId === item.id && !!hasMeta;
                             const supports = (item.metadata?.supports as string[]) || [];
                             const watchOut = (item.metadata?.watch_out_for as string[]) || [];
                             const summary = (item.metadata?.summary as string) || '';
