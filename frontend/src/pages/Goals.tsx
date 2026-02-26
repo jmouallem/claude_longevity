@@ -72,6 +72,7 @@ interface FrameworkItem {
   is_active: boolean;
   source: string;
   rationale?: string | null;
+  metadata?: Record<string, unknown>;
 }
 
 interface FrameworkEducation {
@@ -93,6 +94,29 @@ type CycleType = 'daily' | 'weekly' | 'monthly';
 /* Constants imported from ../utils/coaching-ui */
 
 /* ─── Helpers ─── */
+
+const KG_TO_LB = 2.20462;
+
+/** Convert weight-related goal values to the user's preferred unit for display. */
+function convertGoalUnits(goal: UserGoal, preferredUnit: 'kg' | 'lb'): UserGoal {
+  const storedUnit = (goal.target_unit || '').toLowerCase().trim();
+  // Only convert weight goals (kg ↔ lb)
+  if (
+    (storedUnit === 'kg' && preferredUnit === 'lb') ||
+    (storedUnit === 'lb' && preferredUnit === 'kg')
+  ) {
+    const factor = storedUnit === 'kg' ? KG_TO_LB : 1 / KG_TO_LB;
+    const displayUnit = preferredUnit;
+    return {
+      ...goal,
+      target_value: goal.target_value != null ? Math.round(goal.target_value * factor * 100) / 100 : goal.target_value,
+      baseline_value: goal.baseline_value != null ? Math.round(goal.baseline_value * factor * 100) / 100 : goal.baseline_value,
+      current_value: goal.current_value != null ? Math.round(goal.current_value * factor * 100) / 100 : goal.current_value,
+      target_unit: displayUnit,
+    };
+  }
+  return goal;
+}
 
 function formatGoalForPrompt(goal: UserGoal): string {
   const targetPart =
@@ -410,6 +434,10 @@ export default function Goals() {
   const [chatDesc, setChatDesc] = useState('');
   const [chatInitialMessage, setChatInitialMessage] = useState('');
 
+  // User preferences from profile
+  const [healthGoalsTags, setHealthGoalsTags] = useState<string[]>([]);
+  const [weightUnit, setWeightUnit] = useState<'kg' | 'lb'>('kg');
+
   // Onboarding wizard state
   const [frameworkEducation, setFrameworkEducation] = useState<FrameworkEducation | null>(null);
   const [showOnboarding, setShowOnboarding] = useState(false);
@@ -435,12 +463,31 @@ export default function Goals() {
 
   const fetchPlan = useCallback(async () => {
     try {
-      const [planData, fwData] = await Promise.all([
+      const [planData, fwData, profileData] = await Promise.all([
         apiClient.get<RollingSnapshot>('/api/plan/snapshot/rolling?days=5'),
         apiClient.get<FrameworkEducation>('/api/plan/framework-education'),
+        apiClient.get<{ health_goals?: string | null; weight_unit?: string | null }>('/api/settings/profile').catch(() => null),
       ]);
       setRolling(planData);
       setFrameworkEducation(fwData);
+
+      // Extract user preferences
+      if (profileData?.weight_unit === 'lb') setWeightUnit('lb');
+
+      // Parse health goals for framework alignment highlighting
+      if (profileData?.health_goals) {
+        try {
+          const parsed = JSON.parse(profileData.health_goals);
+          if (Array.isArray(parsed)) {
+            setHealthGoalsTags(parsed.map((v: unknown) => String(v || '').trim()).filter(Boolean));
+          }
+        } catch {
+          // comma-separated fallback
+          setHealthGoalsTags(
+            profileData.health_goals.split(',').map((s: string) => s.trim()).filter(Boolean)
+          );
+        }
+      }
 
       const activeIds = Object.values(fwData.grouped || {})
         .flat()
@@ -621,6 +668,21 @@ export default function Goals() {
     [frameworkEducation?.grouped],
   );
 
+  // Goal-matching helpers for framework alignment highlighting
+  const normalizeMatch = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const matchGoalTerm = (goal: string, term: string) => {
+    const g = normalizeMatch(goal);
+    const t = normalizeMatch(term);
+    return Boolean(g && t && (g.includes(t) || t.includes(g)));
+  };
+  const itemSupportsGoals = useCallback((item: FrameworkItem): boolean => {
+    const supports = (item.metadata?.supports as string[]) || [];
+    return supports.some(term => healthGoalsTags.some(goal => matchGoalTerm(goal, term)));
+  }, [healthGoalsTags]);
+
+  // Tooltip state for framework chips
+  const [tooltipItemId, setTooltipItemId] = useState<number | null>(null);
+
   const launchGoalSettingChat = useCallback(() => {
     const prompt = buildGoalKickoffPrompt({
       goals,
@@ -713,19 +775,76 @@ export default function Goals() {
                         <div className="flex flex-wrap gap-2">
                           {items.map((item) => {
                             const selected = selectedFrameworkIds.includes(item.id);
+                            const goalAligned = healthGoalsTags.length > 0 && itemSupportsGoals(item);
+                            const hasMeta = item.metadata && (item.metadata.summary || item.metadata.supports);
+                            const showTooltip = tooltipItemId === item.id && hasMeta;
+                            const supports = (item.metadata?.supports as string[]) || [];
+                            const watchOut = (item.metadata?.watch_out_for as string[]) || [];
+                            const summary = (item.metadata?.summary as string) || '';
                             return (
-                              <button
-                                key={item.id}
-                                type="button"
-                                onClick={() => toggleFrameworkSelection(item.id)}
-                                className={`px-2.5 py-1 text-xs rounded-md border transition-colors ${
-                                  selected
-                                    ? 'border-emerald-500 bg-emerald-600/20 text-emerald-200'
-                                    : 'border-slate-600 text-slate-300 hover:bg-slate-700'
-                                }`}
-                              >
-                                {item.name}
-                              </button>
+                              <div key={item.id} className="relative">
+                                <button
+                                  type="button"
+                                  onClick={() => toggleFrameworkSelection(item.id)}
+                                  onMouseEnter={() => hasMeta && setTooltipItemId(item.id)}
+                                  onMouseLeave={() => setTooltipItemId(null)}
+                                  onFocus={() => hasMeta && setTooltipItemId(item.id)}
+                                  onBlur={() => setTooltipItemId(null)}
+                                  className={`px-2.5 py-1 text-xs rounded-md border transition-colors flex items-center gap-1 ${
+                                    selected
+                                      ? goalAligned
+                                        ? 'border-emerald-500 bg-emerald-600/20 text-emerald-200 ring-1 ring-amber-400/60'
+                                        : 'border-emerald-500 bg-emerald-600/20 text-emerald-200'
+                                      : goalAligned
+                                        ? 'border-slate-600 text-slate-300 hover:bg-slate-700 ring-1 ring-amber-400/40'
+                                        : 'border-slate-600 text-slate-300 hover:bg-slate-700'
+                                  }`}
+                                >
+                                  {goalAligned && (
+                                    <span className="text-amber-400 text-[10px]" title="Supports your goals">★</span>
+                                  )}
+                                  {item.name}
+                                </button>
+                                {showTooltip && (
+                                  <div className="absolute z-50 bottom-full left-1/2 -translate-x-1/2 mb-2 w-64 p-3 rounded-lg border border-slate-600 bg-slate-800 shadow-xl text-xs pointer-events-none">
+                                    {summary && (
+                                      <p className="text-slate-200 mb-2">{summary}</p>
+                                    )}
+                                    {supports.length > 0 && (
+                                      <div className="mb-2">
+                                        <p className="text-slate-400 font-medium mb-1">Supports</p>
+                                        <div className="flex flex-wrap gap-1">
+                                          {supports.map((s) => (
+                                            <span
+                                              key={s}
+                                              className={`px-1.5 py-0.5 rounded text-[10px] ${
+                                                healthGoalsTags.some(g => matchGoalTerm(g, s))
+                                                  ? 'bg-amber-500/20 text-amber-300 ring-1 ring-amber-400/40'
+                                                  : 'bg-slate-700 text-slate-300'
+                                              }`}
+                                            >
+                                              {s}
+                                            </span>
+                                          ))}
+                                        </div>
+                                      </div>
+                                    )}
+                                    {watchOut.length > 0 && (
+                                      <div>
+                                        <p className="text-slate-400 font-medium mb-1">Watch out for</p>
+                                        <div className="flex flex-wrap gap-1">
+                                          {watchOut.map((w) => (
+                                            <span key={w} className="px-1.5 py-0.5 rounded text-[10px] bg-rose-500/10 text-rose-300">
+                                              {w}
+                                            </span>
+                                          ))}
+                                        </div>
+                                      </div>
+                                    )}
+                                    <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-slate-600" />
+                                  </div>
+                                )}
+                              </div>
                             );
                           })}
                         </div>
@@ -846,7 +965,7 @@ export default function Goals() {
               </div>
               <div className="space-y-3">
                 {goals.map((goal) => (
-                  <GoalHeroCard key={goal.id} goal={goal} onCheckIn={handleGoalCheckIn} />
+                  <GoalHeroCard key={goal.id} goal={convertGoalUnits(goal, weightUnit)} onCheckIn={handleGoalCheckIn} />
                 ))}
               </div>
             </div>

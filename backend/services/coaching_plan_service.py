@@ -13,6 +13,7 @@ from db.models import (
     CoachingPlanTask,
     DailyChecklistItem,
     ExerciseLog,
+    FastingLog,
     FoodLog,
     HealthOptimizationFramework,
     HydrationLog,
@@ -182,7 +183,7 @@ def _target_defaults(user: User) -> dict[str, float]:
         "meals_logged": 2.0,
         "hydration_ml": hydration,
         "exercise_minutes": exercise,
-        "sleep_minutes": 420.0,
+        "sleep_hours": 7.0,
         "food_log_days": 5.0,
         "exercise_sessions": 4.0,
     }
@@ -410,8 +411,8 @@ def _task_template_rows(
                     "description": "Aim for at least 7 hours and log sleep start/end.",
                     "domain": "sleep",
                     "priority_score": 82,
-                    "target_value": defaults["sleep_minutes"],
-                    "target_unit": "minutes",
+                    "target_value": defaults["sleep_hours"],
+                    "target_unit": "hours",
                 },
             ]
         )
@@ -498,8 +499,8 @@ def _task_template_rows(
                     "description": "Average at least 7 hours sleep over the last 30 days.",
                     "domain": "sleep",
                     "priority_score": 80,
-                    "target_value": defaults["sleep_minutes"],
-                    "target_unit": "minutes_avg",
+                    "target_value": defaults["sleep_hours"],
+                    "target_unit": "hours_avg",
                 },
             ]
         )
@@ -510,19 +511,35 @@ def _task_template_rows(
         if not selected:
             continue
         framework = selected[0]
-        rows.append(
-            {
-                "target_metric": "manual_check",
-                "title": f"Follow {framework.name} today",
-                "description": f"Use your active {FRAMEWORK_TYPES.get(framework.framework_type, {}).get('label', framework.framework_type)} strategy in decisions.",
-                "domain": "framework",
-                "framework_type": framework.framework_type,
-                "framework_name": framework.name,
-                "priority_score": max(60, min(int(framework.priority_score or 60), 95)),
-                "target_value": 1.0,
-                "target_unit": "check",
-            }
-        )
+        # metabolic_timing frameworks (e.g. Intermittent Fasting) auto-track via fasting logs
+        if framework_type == "metabolic_timing":
+            rows.append(
+                {
+                    "target_metric": "fasting_hours",
+                    "title": f"Follow {framework.name} today",
+                    "description": "Log your fasting window — aim for your target hours.",
+                    "domain": "framework",
+                    "framework_type": framework.framework_type,
+                    "framework_name": framework.name,
+                    "priority_score": max(60, min(int(framework.priority_score or 60), 95)),
+                    "target_value": 12.0,
+                    "target_unit": "hours",
+                }
+            )
+        else:
+            rows.append(
+                {
+                    "target_metric": "manual_check",
+                    "title": f"Follow {framework.name} today",
+                    "description": f"Use your active {FRAMEWORK_TYPES.get(framework.framework_type, {}).get('label', framework.framework_type)} strategy in decisions.",
+                    "domain": "framework",
+                    "framework_type": framework.framework_type,
+                    "framework_name": framework.name,
+                    "priority_score": max(60, min(int(framework.priority_score or 60), 95)),
+                    "target_value": 1.0,
+                    "target_unit": "check",
+                }
+            )
 
     training_rows = by_type.get("training", [])
     if training_rows and window.cycle_type == "daily":
@@ -636,7 +653,7 @@ _GOAL_TYPE_TO_METRICS: dict[str, list[str]] = {
     "weight_loss": ["meals_logged", "food_log_days", "exercise_minutes", "exercise_sessions"],
     "cardiovascular": ["exercise_minutes", "exercise_sessions"],
     "fitness": ["exercise_minutes", "exercise_sessions"],
-    "metabolic": ["meals_logged", "food_log_days"],
+    "metabolic": ["meals_logged", "food_log_days", "fasting_hours"],
     "energy": ["sleep_minutes", "exercise_minutes", "meals_logged"],
     "sleep": ["sleep_minutes"],
     "habit": ["manual_check"],
@@ -825,13 +842,20 @@ def _collect_metric_values(db: Session, user: User, window: CycleWindow) -> dict
     completed_med = sum(1 for item in checklist if item.item_type == "medication" and bool(item.completed))
     completed_supp = sum(1 for item in checklist if item.item_type == "supplement" and bool(item.completed))
 
-    sleep_values = [float(s.duration_minutes) for s in sleep if s.duration_minutes is not None and float(s.duration_minutes) >= 0.0]
+    fasting = (
+        db.query(FastingLog)
+        .filter(FastingLog.user_id == user.id, FastingLog.fast_start >= start_dt, FastingLog.fast_start <= end_dt)
+        .all()
+    )
+    fasting_hrs = [float(f.duration_minutes) / 60.0 for f in fasting if f.duration_minutes is not None and float(f.duration_minutes) > 0]
+
+    sleep_values_hrs = [float(s.duration_minutes) / 60.0 for s in sleep if s.duration_minutes is not None and float(s.duration_minutes) >= 0.0]
     # Daily sleep goals should credit the best complete sleep session in the day window.
     # Averaging with partial/duplicate rows can incorrectly keep daily sleep goals pending.
     if window.cycle_type == "daily":
-        sleep_metric = max(sleep_values) if sleep_values else None
+        sleep_metric = max(sleep_values_hrs) if sleep_values_hrs else None
     else:
-        sleep_metric = (sum(sleep_values) / len(sleep_values)) if sleep_values else None
+        sleep_metric = (sum(sleep_values_hrs) / len(sleep_values_hrs)) if sleep_values_hrs else None
 
     return {
         "meals_logged": float(len(foods)),
@@ -840,6 +864,7 @@ def _collect_metric_values(db: Session, user: User, window: CycleWindow) -> dict
         "exercise_minutes": float(sum(e.duration_minutes or 0 for e in exercise)),
         "exercise_sessions": float(len(exercise)),
         "sleep_minutes": sleep_metric,
+        "fasting_hours": max(fasting_hrs) if fasting_hrs else None,
         "medication_adherence": (float(completed_med) / float(expected_med)) if expected_med > 0 else None,
         "supplement_adherence": (float(completed_supp) / float(expected_supp)) if expected_supp > 0 else None,
     }
@@ -926,7 +951,8 @@ def _refresh_goal_progress(db: Session, user: User, reference_day: date) -> int:
                 .first()
             )
             if latest and latest.weight_kg is not None:
-                new_value = float(latest.weight_kg)
+                kg = float(latest.weight_kg)
+                new_value = kg * 2.20462 if unit in ("lbs", "lb", "pounds") else kg
 
         elif gtype == "cardiovascular" and ("systolic" in unit or "mmhg" in unit or "bp" in unit):
             latest = (
@@ -1022,12 +1048,12 @@ def refresh_task_statuses(
         if key not in metric_cache:
             metric_cache[key] = _collect_metric_values(db, user, window)
         metrics = metric_cache[key]
-        # Keep daily sleep task semantics stable at 7 hours (420 minutes).
+        # Keep daily sleep task semantics stable at 7 hours.
         # Historical auto-adjustments may have raised this value and caused
         # users to appear "pending" despite meeting the documented threshold.
         if str(task.cycle_type) == "daily" and str(task.target_metric) == "sleep_minutes":
-            if task.target_value is None or float(task.target_value or 0.0) != 420.0:
-                task.target_value = 420.0
+            if task.target_value is None or float(task.target_value or 0.0) != 7.0:
+                task.target_value = 7.0
         progress = _progress_for_task(task, metrics)
         task.progress_pct = round(progress, 2)
         previous = str(task.status or "pending")
@@ -1130,7 +1156,7 @@ def _apply_weekly_adjustment_if_due(db: Session, user: User, reference_day: date
             if row.target_metric == "meals_logged":
                 new_val = max(new_val, 1.0)
             elif row.target_metric == "sleep_minutes":
-                new_val = max(new_val, 360.0)
+                new_val = max(new_val, 6.0)
             elif row.target_metric == "exercise_minutes":
                 new_val = max(new_val, 10.0)
             elif row.target_metric == "hydration_ml":

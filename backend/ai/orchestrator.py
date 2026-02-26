@@ -422,6 +422,8 @@ Rules:
 - Only create/update when the user explicitly confirms goals or asks to change/refine goals.
 - Never invent goals not grounded in the user message.
 - Keep create_goals/update_goals empty when unsure.
+- For blood pressure goals, use the systolic value as target_value (e.g., "120/80" → target_value=120, target_unit="mmHg systolic").
+- Use the user's preferred units for weight goals (lb or kg based on their profile).
 """
 
 from utils.med_utils import (
@@ -1329,22 +1331,41 @@ def _last_assistant_message(db: Session, user: User) -> Message | None:
     )
 
 
-def _assistant_requested_menu_save(db: Session, user: User) -> bool:
-    last = _last_assistant_message(db, user)
-    if not last or not last.content:
-        return False
-    text = _normalize_whitespace(last.content)
+def _assistant_message_has_menu_save_offer(text: str) -> bool:
+    """Check whether a normalized assistant message text contains a menu-save offer."""
     if (
         "save this meal to your menu" in text
         or "save this to your menu" in text
         or "add this to your menu" in text
     ):
         return True
-    # Also accept named variants like:
-    # "Do you want me to save Lunch to your menu for quick future logging?"
+    # Accept varied AI phrasings: "save X to your menu", "save X in your menu",
+    # "save X in your meal menu", etc.
     return bool(
-        re.search(r"\b(?:save|add)\b.{0,80}\bto your menu\b", text, flags=re.IGNORECASE)
+        re.search(r"\b(?:save|add)\b.{0,80}\b(?:to|in) your (?:meal )?menu\b", text, flags=re.IGNORECASE)
     )
+
+
+def _assistant_requested_menu_save(db: Session, user: User) -> bool:
+    """Check whether a recent assistant message offered to save a meal to
+    the user's menu.  Scans beyond the very last message to handle cases
+    where intervening Q&A turns pushed the offer further back."""
+    recent = (
+        db.query(Message)
+        .filter(
+            Message.user_id == user.id,
+            Message.role == "assistant",
+            Message.content.isnot(None),
+        )
+        .order_by(Message.created_at.desc())
+        .limit(10)
+        .all()
+    )
+    for msg in recent:
+        text = _normalize_whitespace(msg.content or "")
+        if _assistant_message_has_menu_save_offer(text):
+            return True
+    return False
 
 
 def _assistant_requested_menu_update(db: Session, user: User) -> bool:
@@ -1503,6 +1524,60 @@ def _latest_food_log(db: Session, user: User, lookback_hours: int = 72) -> FoodL
         .order_by(FoodLog.logged_at.desc())
         .first()
     )
+
+
+def _food_log_from_menu_save_turn(db: Session, user: User) -> FoodLog | None:
+    """Find the food log linked to the conversation turn where the assistant
+    offered to save a meal to the menu.
+
+    Scans recent assistant messages (not just the latest) to find the one that
+    contains the menu-save offer, then walks back through preceding user
+    messages to find one with an attached FoodLog.  This handles intervening
+    Q&A turns between the food log and the user's save confirmation."""
+    recent_assistant_msgs = (
+        db.query(Message)
+        .filter(
+            Message.user_id == user.id,
+            Message.role == "assistant",
+            Message.content.isnot(None),
+        )
+        .order_by(Message.created_at.desc())
+        .limit(10)
+        .all()
+    )
+
+    for assistant_msg in recent_assistant_msgs:
+        text = _normalize_whitespace(assistant_msg.content or "")
+        if not _assistant_message_has_menu_save_offer(text):
+            continue
+
+        # Found the assistant message with the menu-save offer.
+        # Walk back through preceding user messages to find one with a FoodLog.
+        preceding_user_msgs = (
+            db.query(Message)
+            .filter(
+                Message.user_id == user.id,
+                Message.role == "user",
+                Message.created_at < assistant_msg.created_at,
+            )
+            .order_by(Message.created_at.desc())
+            .limit(5)
+            .all()
+        )
+        for user_msg in preceding_user_msgs:
+            food_log = (
+                db.query(FoodLog)
+                .filter(
+                    FoodLog.user_id == user.id,
+                    FoodLog.source_message_id == user_msg.id,
+                )
+                .order_by(FoodLog.logged_at.desc())
+                .first()
+            )
+            if food_log:
+                return food_log
+
+    return None
 
 
 def _food_log_from_saved_output(db: Session, user: User, saved_out: dict[str, Any] | None) -> FoodLog | None:
@@ -1893,6 +1968,49 @@ def _looks_like_food_planning_question(message_text: str) -> bool:
     return any(re.search(pattern, text) for pattern in planning_patterns)
 
 
+def _enrich_food_log_macros_from_response(db: Session, food_log_id: int, ai_response: str) -> bool:
+    """
+    If the food log has null calories, try to extract macro values from
+    the AI reasoning response text and update the record.  This closes the
+    gap where the utility parse returned null macros but the reasoning
+    model estimated them in its text.
+    """
+    from db.models import FoodLog as _FoodLog
+
+    row = db.query(_FoodLog).filter(_FoodLog.id == food_log_id).first()
+    if not row or row.calories is not None:
+        return False
+
+    text = ai_response.lower()
+    updated = False
+
+    _approx = r"(?:approximately|approx|around|about|~)?\s*"
+    patterns = {
+        "calories": rf"calories[:\s]*{_approx}([\d,]+(?:\.\d+)?)",
+        "protein_g": rf"protein[:\s]*{_approx}([\d,]+(?:\.\d+)?)\s*g",
+        "carbs_g": rf"carbs?[:\s]*{_approx}([\d,]+(?:\.\d+)?)\s*g",
+        "fat_g": rf"fat[:\s]*{_approx}([\d,]+(?:\.\d+)?)\s*g",
+        "fiber_g": rf"fiber[:\s]*{_approx}([\d,]+(?:\.\d+)?)\s*g",
+        "sodium_mg": rf"sodium[:\s]*{_approx}([\d,]+(?:\.\d+)?)\s*mg",
+    }
+
+    for field, pattern in patterns.items():
+        m = re.search(pattern, text)
+        if m:
+            try:
+                value = float(m.group(1).replace(",", ""))
+                if value > 0:
+                    setattr(row, field, value)
+                    updated = True
+            except (ValueError, IndexError):
+                pass
+
+    if updated:
+        db.flush()
+        logger.info(f"Enriched food_log {food_log_id} with macros from AI response")
+    return updated
+
+
 def _minimal_food_payload_from_message(message_text: str, *, low_confidence: bool) -> dict[str, Any]:
     item_name = _normalize_whitespace(message_text).strip() or "meal entry"
     note = "Low-confidence meal capture from follow-up context; confirm details if needed."
@@ -1922,7 +2040,14 @@ def _try_handle_menu_template_action(
     if not save_intent and not update_intent:
         return None
 
-    latest = source_food_log or _latest_food_log(db, user, lookback_hours=72)
+    # Prefer the explicitly provided food log, then try finding the food log
+    # from the conversation turn where the assistant asked about menu save
+    # (via source_message_id), and fall back to a global 72-hour lookback.
+    latest = (
+        source_food_log
+        or _food_log_from_menu_save_turn(db, user)
+        or _latest_food_log(db, user, lookback_hours=72)
+    )
     if not latest:
         return {
             "status": "failed",
@@ -2047,7 +2172,7 @@ def _format_menu_context(menu_action: dict[str, Any] | None, followup_hint: dict
                 lines.append(f"The user logged a meal (`{meal_name}`) that is not in menu templates.")
             else:
                 lines.append("The user logged a meal that is not in menu templates.")
-            lines.append("Ask one short follow-up question: do they want to save it to their menu?")
+            lines.append("Ask one short follow-up question: do they want to save it to their menu? Use the exact phrase 'save ... to your menu' so the system can detect their reply.")
         elif hint_type == "ask_update_base":
             lines.append("The user logged a template meal with modifications.")
             lines.append("Ask one short follow-up question: should this adjustment update the base menu item or stay one-off?")
@@ -2942,7 +3067,15 @@ async def _apply_goal_updates(
         try:
             return float(value)
         except (TypeError, ValueError):
-            return None
+            pass
+        # Handle compound values like "120/80" (blood pressure) → extract first number
+        s = str(value).strip()
+        if "/" in s:
+            try:
+                return float(s.split("/")[0].strip())
+            except (TypeError, ValueError):
+                pass
+        return None
 
     def _to_int(value: Any) -> int | None:
         if value is None or value == "":
@@ -3475,11 +3608,14 @@ async def process_chat(
     menu_command_only = (has_menu_save_intent or has_menu_update_intent) and not _looks_like_food_logging_message(message)
     menu_action_result: dict[str, Any] | None = None
     if menu_command_only:
+        # Do NOT pass source_food_log here.  Let the function's internal
+        # fallback chain (_food_log_from_menu_save_turn -> _latest_food_log)
+        # resolve the correct food log by tracing back through the
+        # conversation to find the meal that triggered the save offer.
         menu_action_result = _try_handle_menu_template_action(
             db=db,
             user=user,
             message_text=message,
-            source_food_log=_latest_food_log(db, user, lookback_hours=72),
         )
 
     # 3. Parse and save structured data.
@@ -3917,6 +4053,17 @@ async def process_chat(
             # action summaries to the user — the AI's natural-language reply
             # already describes what was done.
             full_response = strip_tool_calls(full_response)
+
+        # 7c. Post-response macro enrichment for food logs
+        # If the food log was saved with null macros but the AI estimated them
+        # in its response, extract and backfill.
+        food_saved = saved_by_category.get("log_food")
+        if isinstance(food_saved, dict) and food_saved.get("food_log_id"):
+            try:
+                _enrich_food_log_macros_from_response(db, int(food_saved["food_log_id"]), full_response)
+                db.commit()
+            except Exception as enrich_err:
+                logger.warning(f"Food log macro enrichment failed: {enrich_err}")
 
         yield {"type": "done", "specialist": specialist, "category": category}
 

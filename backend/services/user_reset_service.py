@@ -1,9 +1,9 @@
-import json
 import logging
 from pathlib import Path
 
 from config import settings as app_settings
 from db.models import (
+    AITurnTelemetry,
     AnalysisProposal,
     AnalysisRun,
     CoachingPlanAdjustment,
@@ -17,7 +17,9 @@ from db.models import (
     HydrationLog,
     IntakeSession,
     HealthOptimizationFramework,
+    MealResponseSignal,
     MealTemplate,
+    MealTemplateVersion,
     Message,
     ModelUsageEvent,
     Notification,
@@ -28,6 +30,7 @@ from db.models import (
     Summary,
     SupplementLog,
     User,
+    UserGoal,
     UserSettings,
     VitalsLog,
 )
@@ -35,25 +38,6 @@ from services.health_framework_service import ensure_default_frameworks
 from services.coaching_plan_service import ensure_plan_seeded
 
 logger = logging.getLogger(__name__)
-
-_MODELS_FILE = Path(__file__).parent.parent / "data" / "models.json"
-_FALLBACK_ANTHROPIC_DEFAULTS = {
-    "reasoning": "claude-sonnet-4-5-20250929",
-    "utility": "claude-haiku-4-5-20251001",
-    "deep_thinking": "claude-sonnet-4-5-20250929",
-}
-
-
-def _anthropic_defaults() -> dict[str, str]:
-    try:
-        payload = json.loads(_MODELS_FILE.read_text(encoding="utf-8"))
-        defaults = payload.get("defaults", {}).get("anthropic", {})
-        reasoning = str(defaults.get("reasoning", "")).strip() or _FALLBACK_ANTHROPIC_DEFAULTS["reasoning"]
-        utility = str(defaults.get("utility", "")).strip() or _FALLBACK_ANTHROPIC_DEFAULTS["utility"]
-        deep = str(defaults.get("deep_thinking", "")).strip() or reasoning
-        return {"reasoning": reasoning, "utility": utility, "deep_thinking": deep}
-    except Exception:
-        return dict(_FALLBACK_ANTHROPIC_DEFAULTS)
 
 
 def reset_user_data_for_user(db, user: User) -> dict[str, int]:
@@ -65,6 +49,9 @@ def reset_user_data_for_user(db, user: User) -> dict[str, int]:
         if str(row.image_path).strip()
     ]
 
+    # Delete tables with FK references first (bulk .delete() skips ORM cascades)
+    db.query(MealResponseSignal).filter(MealResponseSignal.user_id == user.id).delete(synchronize_session=False)
+    db.query(AITurnTelemetry).filter(AITurnTelemetry.user_id == user.id).delete(synchronize_session=False)
     db.query(FoodLog).filter(FoodLog.user_id == user.id).delete(synchronize_session=False)
     db.query(HydrationLog).filter(HydrationLog.user_id == user.id).delete(synchronize_session=False)
     db.query(VitalsLog).filter(VitalsLog.user_id == user.id).delete(synchronize_session=False)
@@ -76,6 +63,7 @@ def reset_user_data_for_user(db, user: User) -> dict[str, int]:
     db.query(SleepLog).filter(SleepLog.user_id == user.id).delete(synchronize_session=False)
     db.query(Summary).filter(Summary.user_id == user.id).delete(synchronize_session=False)
     db.query(Message).filter(Message.user_id == user.id).delete(synchronize_session=False)
+    db.query(MealTemplateVersion).filter(MealTemplateVersion.user_id == user.id).delete(synchronize_session=False)
     db.query(MealTemplate).filter(MealTemplate.user_id == user.id).delete(synchronize_session=False)
     db.query(Notification).filter(Notification.user_id == user.id).delete(synchronize_session=False)
     db.query(IntakeSession).filter(IntakeSession.user_id == user.id).delete(synchronize_session=False)
@@ -84,21 +72,17 @@ def reset_user_data_for_user(db, user: User) -> dict[str, int]:
     db.query(AnalysisProposal).filter(AnalysisProposal.user_id == user.id).delete(synchronize_session=False)
     db.query(AnalysisRun).filter(AnalysisRun.user_id == user.id).delete(synchronize_session=False)
     db.query(CoachingPlanTask).filter(CoachingPlanTask.user_id == user.id).delete(synchronize_session=False)
+    db.query(UserGoal).filter(UserGoal.user_id == user.id).delete(synchronize_session=False)
     db.query(CoachingPlanAdjustment).filter(CoachingPlanAdjustment.user_id == user.id).delete(synchronize_session=False)
     db.query(HealthOptimizationFramework).filter(HealthOptimizationFramework.user_id == user.id).delete(synchronize_session=False)
     db.query(PasskeyCredential).filter(PasskeyCredential.user_id == user.id).delete(synchronize_session=False)
     db.query(PasskeyChallenge).filter(PasskeyChallenge.user_id == user.id).delete(synchronize_session=False)
 
-    defaults = _anthropic_defaults()
     s = user.settings
     if not s:
         s = UserSettings(user_id=user.id)
         db.add(s)
-    s.ai_provider = "anthropic"
-    s.api_key_encrypted = None
-    s.reasoning_model = defaults["reasoning"]
-    s.utility_model = defaults["utility"]
-    s.deep_thinking_model = defaults["deep_thinking"]
+    # Preserve ai_provider, api_key_encrypted, and model selections across reset
     s.age = None
     s.sex = None
     s.height_cm = None

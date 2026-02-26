@@ -200,7 +200,7 @@ export default function Chat() {
 
   const handleUpdate = (task: UpcomingTask) => {
     const desc = task.description ? ` (${task.description})` : '';
-    setChatFill(`Goal check-in: ${task.title}${desc} [task_id=${task.id}]`);
+    sendMessage(`Goal check-in: ${task.title}${desc} [task_id=${task.id}]`, undefined, verbosity);
     setMobileGoalsOpen(false);
   };
 
@@ -208,17 +208,13 @@ export default function Chat() {
   useEffect(() => {
     if (!hasLoadedRef.current) {
       hasLoadedRef.current = true;
-      let active = true;
       void (async () => {
         try {
           await Promise.all([loadHistory(), fetchPlanSnapshot()]);
         } finally {
-          if (active) setHistoryReady(true);
+          setHistoryReady(true);
         }
       })();
-      return () => {
-        active = false;
-      };
     }
   }, [fetchPlanSnapshot, loadHistory]);
 

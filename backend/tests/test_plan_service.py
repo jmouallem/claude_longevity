@@ -312,7 +312,7 @@ def test_daily_sleep_progress_uses_best_session_not_average():
     assert float(task.progress_pct or 0.0) >= 100.0
 
 
-def test_daily_sleep_target_is_normalized_to_420_minutes():
+def test_daily_sleep_target_is_normalized_to_7_hours():
     db = _new_db()
     user = _new_user(db, "plan_sleep_target_normalize_user")
 
@@ -331,7 +331,7 @@ def test_daily_sleep_target_is_normalized_to_420_minutes():
         .first()
     )
     assert task is not None
-    task.target_value = 462.0
+    task.target_value = 7.7  # Simulate drift from auto-adjustment
 
     db.add(
         SleepLog(
@@ -347,5 +347,5 @@ def test_daily_sleep_target_is_normalized_to_420_minutes():
     db.commit()
     db.refresh(task)
 
-    assert float(task.target_value or 0.0) == 420.0
+    assert float(task.target_value or 0.0) == 7.0
     assert task.status == "completed"
